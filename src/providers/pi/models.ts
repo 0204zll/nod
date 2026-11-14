@@ -182,8 +182,8 @@ const levels = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 let endpointConnections: Dispatcher1Wrapper | undefined;
 const keyless = 'nod-no-key';
 const ollamaShowSchema = z.object({
-  capabilities: z.array(z.string()).catch([]),
-  model_info: z.record(z.string(), z.unknown()),
+  capabilities: z.array(z.string()).optional().catch(undefined),
+  model_info: z.record(z.string(), z.unknown()).catch({}),
   parameters: z.string().catch(''),
   thinking: z
     .object({ values: z.array(z.union([z.string(), z.boolean()])) })
@@ -200,7 +200,7 @@ function ollamaModel(show: z.infer<typeof ollamaShowSchema>) {
   const values = show.thinking?.values;
   const named = levels.filter((level) => values?.includes(level));
   const thinkingLevelMap =
-    !show.capabilities.includes('thinking') || !values
+    show.capabilities?.includes('thinking') === false || !values
       ? undefined
       : named.length
         ? {
@@ -218,8 +218,8 @@ function ollamaModel(show: z.infer<typeof ollamaShowSchema>) {
             }
           : undefined;
   return {
-    usable: show.capabilities.includes('tools'),
-    images: show.capabilities.includes('vision'),
+    usable: show.capabilities?.includes('tools'),
+    images: show.capabilities?.includes('vision'),
     contextWindow: Number.isFinite(contextWindow) ? contextWindow : undefined,
     reasoning: !!thinkingLevelMap,
     thinkingLevelMap,
@@ -354,74 +354,67 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
       })
         .then((response) => (response.ok ? response.json() : undefined))
         .catch(() => undefined);
-    const ollamaProbe = z
-      .object({ version: z.string() })
-      .safeParse(await serverJson('/api/version')).success;
-    const show = async (id: string) =>
-      ollamaShowSchema.safeParse(
-        await serverJson('/api/show', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: id }),
+    const [version, studio] = await Promise.all([
+      serverJson('/api/version'),
+      serverJson('/api/v1/models'),
+    ]);
+    const ollama = z.object({ version: z.string() }).safeParse(version).success;
+    const studioModels = entries(
+      z.object({ models: z.array(z.unknown()) }).safeParse(studio).data?.models ?? [],
+      lmStudioModelSchema,
+    );
+    const models: ModelDefinition[] = [];
+    for (let index = 0; index < listed.length; index += 3) {
+      const batch = await Promise.all(
+        listed.slice(index, index + 3).map(async (entry) => {
+          const studioModel = studioModels.find((model) => model.key === entry.id);
+          const shown =
+            ollama && !studioModel
+              ? ollamaShowSchema.safeParse(
+                  await serverJson('/api/show', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model: entry.id }),
+                  }),
+                )
+              : undefined;
+          const known = studioModel
+            ? lmStudioModel(studioModel)
+            : shown?.success
+              ? ollamaModel(shown.data)
+              : undefined;
+          if (known?.usable === false) return [];
+          const contextWindow =
+            known?.contextWindow ??
+            entry.context_length ??
+            entry.context_window ??
+            entry.max_model_len ??
+            128_000;
+          return [
+            definition({
+              id: entry.id,
+              name: entry.id,
+              api: 'openai-completions',
+              provider: 'compatible',
+              baseUrl: found.url,
+              compat: {
+                supportsStore: false,
+                supportsDeveloperRole: false,
+                maxTokensField: 'max_tokens',
+              },
+              reasoning: known?.reasoning ?? false,
+              thinkingLevelMap: known?.thinkingLevelMap,
+              input: known?.images ? ['text', 'image'] : ['text'],
+              contextWindow,
+              maxTokens: Math.min(32_768, Math.floor(contextWindow / 2)),
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            } as Model<Api>),
+          ];
         }),
       );
-    const probed = new Map<string, Awaited<ReturnType<typeof show>>>();
-    let ollamaServer = false;
-    if (ollamaProbe) {
-      for (let index = 0; index < listed.length && !ollamaServer; index += 3) {
-        const batch = await Promise.all(
-          listed
-            .slice(index, index + 3)
-            .map(async (entry) => [entry.id, await show(entry.id)] as const),
-        );
-        for (const [id, shown] of batch) probed.set(id, shown);
-        ollamaServer = batch.some(([, shown]) => shown.success);
-      }
+      models.push(...batch.flat());
     }
-    const studio = ollamaServer
-      ? undefined
-      : z.object({ models: z.array(z.unknown()) }).safeParse(await serverJson('/api/v1/models'))
-          .data?.models;
-    const studioModels = studio ? entries(studio, lmStudioModelSchema) : [];
-    const models = await Promise.all(
-      listed.map(async (entry) => {
-        const shown = ollamaServer ? (probed.get(entry.id) ?? (await show(entry.id))) : undefined;
-        const studioModel = studioModels.find((model) => model.key === entry.id);
-        const known = shown?.success
-          ? ollamaModel(shown.data)
-          : studioModel
-            ? lmStudioModel(studioModel)
-            : undefined;
-        if (known && !known.usable) return [];
-        const contextWindow =
-          known?.contextWindow ??
-          entry.context_length ??
-          entry.context_window ??
-          entry.max_model_len ??
-          128_000;
-        return [
-          definition({
-            id: entry.id,
-            name: entry.id,
-            api: 'openai-completions',
-            provider: 'compatible',
-            baseUrl: found.url,
-            compat: {
-              supportsStore: false,
-              supportsDeveloperRole: false,
-              maxTokensField: 'max_tokens',
-            },
-            reasoning: known?.reasoning ?? false,
-            thinkingLevelMap: known?.thinkingLevelMap,
-            input: known?.images ? ['text', 'image'] : ['text'],
-            contextWindow,
-            maxTokens: Math.min(32_768, Math.floor(contextWindow / 2)),
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          } as Model<Api>),
-        ];
-      }),
-    );
-    return models.flat();
+    return models;
   }
   async function cloudResponse(url: string, init: RequestInit, rejected: string) {
     const response = await request(url, {
