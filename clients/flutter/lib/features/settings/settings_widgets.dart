@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/nod_errors.dart';
+import '../../design_system/design_system.dart';
 
 String settingsError(Object error) => error is NodException
     ? error.message
@@ -87,8 +88,9 @@ class SettingsSectionState extends State<SettingsSection> {
   });
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      title: Text(widget.title),
+    appBar: NodPageBar(
+      title: widget.title,
+      busy: busy,
       actions: [
         IconButton(
           onPressed: busy ? null : reload,
@@ -99,18 +101,22 @@ class SettingsSectionState extends State<SettingsSection> {
     ),
     body: Column(
       children: [
-        if (busy) const LinearProgressIndicator(),
         if (error != null)
           Padding(
-            padding: const EdgeInsets.all(16),
-            child: Text(error!, semanticsLabel: 'Error: $error'),
+            padding: const EdgeInsets.fromLTRB(
+              NodSpacing.md,
+              NodSpacing.md,
+              NodSpacing.md,
+              0,
+            ),
+            child: NodNotice(error!, tone: NodTone.error),
           ),
         Expanded(
           child: data == null
               ? Center(
                   child: busy
-                      ? const CircularProgressIndicator()
-                      : FilledButton(
+                      ? null
+                      : OutlinedButton(
                           onPressed: reload,
                           child: const Text('Try again'),
                         ),
@@ -134,6 +140,7 @@ class SettingsEditPage extends StatefulWidget {
     this.secretFields = const {},
     this.limits = const {},
     this.multiline = const {},
+    this.labels = const {},
     this.help,
   });
   final String title;
@@ -141,6 +148,7 @@ class SettingsEditPage extends StatefulWidget {
   final Set<String> secretFields;
   final Set<String> multiline;
   final Map<String, int> limits;
+  final Map<String, String> labels;
   final String? help;
   final Future<void> Function(Map<String, String>) save;
   @override
@@ -199,13 +207,19 @@ class _SettingsEditPageState extends State<SettingsEditPage> {
     },
     child: Scaffold(
       appBar: AppBar(title: Text(widget.title)),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
+      body: NodPageBody(
         children: [
-          if (widget.help != null) Text(widget.help!),
+          if (widget.help != null) ...[
+            Text(
+              widget.help!,
+              style: Theme.of(context).textTheme.bodyMedium
+                  ?.copyWith(color: context.nodColors.textSecondary),
+            ),
+            const SizedBox(height: NodSpacing.lg),
+          ],
           for (final entry in fields.entries)
             Padding(
-              padding: const EdgeInsets.only(bottom: 16),
+              padding: const EdgeInsets.only(bottom: NodSpacing.md),
               child: TextField(
                 controller: entry.value,
                 enabled: !busy,
@@ -215,13 +229,19 @@ class _SettingsEditPageState extends State<SettingsEditPage> {
                 enableIMEPersonalizedLearning: !widget.secretFields.contains(
                   entry.key,
                 ),
-                maxLines: widget.multiline.contains(entry.key) ? 8 : 1,
+                minLines: widget.multiline.contains(entry.key) ? 4 : 1,
+                maxLines: widget.multiline.contains(entry.key) ? 10 : 1,
                 maxLength: widget.limits[entry.key],
-                decoration: InputDecoration(labelText: entry.key),
+                decoration: InputDecoration(
+                  labelText: widget.labels[entry.key] ?? entry.key,
+                ),
                 onChanged: (_) => setState(() {}),
               ),
             ),
-          if (error != null) Text(error!),
+          if (error != null) ...[
+            NodNotice(error!, tone: NodTone.error),
+            const SizedBox(height: NodSpacing.md),
+          ],
           FilledButton(
             onPressed: busy ? null : save,
             child: Text(busy ? 'Saving' : 'Save'),

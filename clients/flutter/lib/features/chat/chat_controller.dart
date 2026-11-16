@@ -95,6 +95,7 @@ final class ChatController extends ChangeNotifier {
   String? _retrySignature;
   String? _retryClientId;
 
+  String? get threadId => _threadId;
   List<ChatMessageItem> get messages => List.unmodifiable(_messages);
   NodConnectionState get connection => _connection;
   NodTurnState get turn => _turn;

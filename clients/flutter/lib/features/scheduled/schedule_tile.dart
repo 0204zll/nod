@@ -51,12 +51,6 @@ class ScheduleTile extends StatelessWidget {
         : active
         ? 'Active'
         : 'No upcoming run';
-    final statusColor = !schedule.enabled
-        ? colors.textSecondary
-        : active
-        ? colors.success
-        : colors.textSecondary;
-    final statusBackground = active ? colors.successSoft : colors.surfaceInset;
     return Material(
       clipBehavior: Clip.antiAlias,
       color: colors.surfaceOverlay,
@@ -84,22 +78,9 @@ class ScheduleTile extends StatelessWidget {
                 runSpacing: NodSpacing.xs,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 4,
-                    ),
-                    decoration: BoxDecoration(
-                      color: statusBackground,
-                      borderRadius: BorderRadius.circular(NodRadii.control),
-                    ),
-                    child: Text(
-                      status,
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: statusColor,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
+                  NodStatusLabel(
+                    status,
+                    tone: active ? NodTone.success : NodTone.neutral,
                   ),
                   Text(
                     scheduleCadence(schedule),

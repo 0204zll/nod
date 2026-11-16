@@ -42,6 +42,19 @@ abstract final class NodNavigationModel {
   ];
 }
 
+class NodShellScope extends InheritedWidget {
+  const NodShellScope({super.key, required this.onBack, required super.child});
+
+  final VoidCallback? onBack;
+
+  static NodShellScope? maybeOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<NodShellScope>();
+
+  @override
+  bool updateShouldNotify(NodShellScope oldWidget) =>
+      onBack != oldWidget.onBack;
+}
+
 class NodAdaptiveShell extends StatelessWidget {
   const NodAdaptiveShell({
     super.key,
@@ -51,6 +64,7 @@ class NodAdaptiveShell extends StatelessWidget {
     this.destinations = NodNavigationModel.destinations,
     this.actions = const [],
     this.onLogOut,
+    this.bodyOwnsBar = false,
   });
 
   final int selectedIndex;
@@ -59,6 +73,7 @@ class NodAdaptiveShell extends StatelessWidget {
   final List<NodNavigationDestination> destinations;
   final List<Widget> actions;
   final VoidCallback? onLogOut;
+  final bool bodyOwnsBar;
 
   @override
   Widget build(BuildContext context) {
@@ -73,6 +88,7 @@ class NodAdaptiveShell extends StatelessWidget {
             actions: actions,
             body: body,
             onLogOut: onLogOut,
+            bodyOwnsBar: bodyOwnsBar,
           );
         }
         return _ExpandedShell(
@@ -82,6 +98,7 @@ class NodAdaptiveShell extends StatelessWidget {
           actions: actions,
           body: body,
           onLogOut: onLogOut,
+          bodyOwnsBar: bodyOwnsBar,
         );
       },
     );
@@ -96,6 +113,7 @@ class _CompactShell extends StatelessWidget {
     required this.onLogOut,
     required this.actions,
     required this.body,
+    required this.bodyOwnsBar,
   });
 
   final VoidCallback? onLogOut;
@@ -104,6 +122,7 @@ class _CompactShell extends StatelessWidget {
   final List<NodNavigationDestination> destinations;
   final List<Widget> actions;
   final Widget body;
+  final bool bodyOwnsBar;
 
   @override
   Widget build(BuildContext context) {
@@ -115,39 +134,39 @@ class _CompactShell extends StatelessWidget {
       },
       child: Scaffold(
         key: const Key('compact-shell'),
-        appBar: AppBar(
-          toolbarHeight: 64,
-          titleSpacing: NodSpacing.xs,
-          leading: isChat
-              ? Builder(
-                  builder: (context) => IconButton(
-                    key: const Key('open-navigation'),
-                    tooltip: 'Open menu',
-                    icon: const Icon(Icons.menu_rounded),
-                    onPressed: () {
-                      FocusManager.instance.primaryFocus?.unfocus();
-                      Scaffold.of(context).openDrawer();
-                    },
-                  ),
-                )
-              : IconButton(
-                  key: const Key('back-to-chat'),
-                  tooltip: 'Back to chat',
-                  icon: const Icon(Icons.arrow_back_rounded),
-                  onPressed: () => onDestinationSelected(0),
-                ),
-          title: isChat
-              ? const Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    NodBrandMark(size: 28),
-                    SizedBox(width: NodSpacing.xs),
-                    Text('Nod'),
-                  ],
-                )
-              : Text(destinations[selectedIndex].label),
-          actions: actions,
-        ),
+        appBar: bodyOwnsBar
+            ? null
+            : AppBar(
+                leading: isChat
+                    ? Builder(
+                        builder: (context) => IconButton(
+                          key: const Key('open-navigation'),
+                          tooltip: 'Open menu',
+                          icon: const Icon(Icons.menu_rounded),
+                          onPressed: () {
+                            FocusManager.instance.primaryFocus?.unfocus();
+                            Scaffold.of(context).openDrawer();
+                          },
+                        ),
+                      )
+                    : IconButton(
+                        key: const Key('back-to-chat'),
+                        tooltip: 'Back to chat',
+                        icon: const BackButtonIcon(),
+                        onPressed: () => onDestinationSelected(0),
+                      ),
+                title: isChat
+                    ? const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          NodBrandMark(size: 28),
+                          SizedBox(width: NodSpacing.xs),
+                          Text('Nod'),
+                        ],
+                      )
+                    : Text(destinations[selectedIndex].label),
+                actions: actions,
+              ),
         drawer: Drawer(
           key: const Key('compact-navigation'),
           semanticLabel: 'Navigation menu',
@@ -231,7 +250,13 @@ class _CompactShell extends StatelessWidget {
             ),
           ),
         ),
-        body: SafeArea(top: false, child: body),
+        body: SafeArea(
+          top: false,
+          child: NodShellScope(
+            onBack: () => onDestinationSelected(0),
+            child: body,
+          ),
+        ),
       ),
     );
   }
@@ -245,6 +270,7 @@ class _ExpandedShell extends StatelessWidget {
     required this.onLogOut,
     required this.actions,
     required this.body,
+    required this.bodyOwnsBar,
   });
 
   final VoidCallback? onLogOut;
@@ -253,6 +279,7 @@ class _ExpandedShell extends StatelessWidget {
   final List<NodNavigationDestination> destinations;
   final List<Widget> actions;
   final Widget body;
+  final bool bodyOwnsBar;
 
   @override
   Widget build(BuildContext context) {
@@ -270,32 +297,36 @@ class _ExpandedShell extends StatelessWidget {
             Expanded(
               child: Column(
                 children: [
-                  SizedBox(
-                    height: 64,
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        border: Border(
-                          bottom: BorderSide(color: context.nodColors.border),
+                  if (!bodyOwnsBar)
+                    SizedBox(
+                      height: NodSizes.appBar,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          border: Border(
+                            bottom: BorderSide(color: context.nodColors.border),
+                          ),
                         ),
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: NodSpacing.lg,
-                        ),
-                        child: Row(
-                          children: [
-                            Text(
-                              destinations[selectedIndex].label,
-                              style: Theme.of(context).textTheme.titleLarge,
-                            ),
-                            const Spacer(),
-                            ...actions,
-                          ],
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: NodSpacing.lg,
+                          ),
+                          child: Row(
+                            children: [
+                              Text(
+                                destinations[selectedIndex].label,
+                                style: Theme.of(context).textTheme.titleLarge,
+                              ),
+                              const Spacer(),
+                              ...actions,
+                            ],
+                          ),
                         ),
                       ),
                     ),
+                  Expanded(
+                    key: const ValueKey('shell-body'),
+                    child: NodShellScope(onBack: null, child: body),
                   ),
-                  Expanded(child: body),
                 ],
               ),
             ),

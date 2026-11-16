@@ -54,10 +54,32 @@ abstract final class NodTheme {
       TargetPlatform.windows => 'Segoe UI',
       TargetPlatform.linux => 'Lato',
     };
-    final baseText = Typography.material2021(
+    final tracking =
+        defaultTargetPlatform == TargetPlatform.iOS ||
+            defaultTargetPlatform == TargetPlatform.macOS
+        ? const TextStyle(letterSpacing: 0)
+        : null;
+    final material = Typography.material2021(
       platform: defaultTargetPlatform,
       colorScheme: scheme,
     ).black.apply(fontFamily: fontFamily);
+    final baseText = TextTheme(
+      displayLarge: material.displayLarge?.merge(tracking),
+      displayMedium: material.displayMedium?.merge(tracking),
+      displaySmall: material.displaySmall?.merge(tracking),
+      headlineLarge: material.headlineLarge?.merge(tracking),
+      headlineMedium: material.headlineMedium?.merge(tracking),
+      headlineSmall: material.headlineSmall?.merge(tracking),
+      titleLarge: material.titleLarge?.merge(tracking),
+      titleMedium: material.titleMedium?.merge(tracking),
+      titleSmall: material.titleSmall?.merge(tracking),
+      bodyLarge: material.bodyLarge?.merge(tracking),
+      bodyMedium: material.bodyMedium?.merge(tracking),
+      bodySmall: material.bodySmall?.merge(tracking),
+      labelLarge: material.labelLarge?.merge(tracking),
+      labelMedium: material.labelMedium?.merge(tracking),
+      labelSmall: material.labelSmall?.merge(tracking),
+    );
     final textTheme = baseText
         .copyWith(
           displaySmall: baseText.displaySmall?.copyWith(
@@ -105,6 +127,7 @@ abstract final class NodTheme {
         )
         .apply(bodyColor: scheme.onSurface, displayColor: scheme.onSurface);
     final focusBorder = nodColors.focusRing.withValues(alpha: 0.55);
+    final text = Typography.englishLike2021.merge(textTheme);
     return ThemeData(
       useMaterial3: true,
       brightness: brightness,
@@ -125,24 +148,94 @@ abstract final class NodTheme {
         elevation: 0,
         scrolledUnderElevation: 0,
         centerTitle: false,
+        toolbarHeight: NodSizes.appBar,
+        titleSpacing: NodSpacing.xs,
         titleTextStyle: textTheme.titleLarge,
+      ),
+      dividerTheme: DividerThemeData(color: nodColors.border, thickness: 1),
+      textSelectionTheme: TextSelectionThemeData(
+        cursorColor: nodColors.accent,
+        selectionColor: NodPalette.brandPink.withValues(alpha: 0.35),
+        selectionHandleColor: nodColors.accent,
+      ),
+      progressIndicatorTheme: ProgressIndicatorThemeData(
+        color: nodColors.accent,
+        linearTrackColor: nodColors.surfaceInset,
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
+          backgroundColor: nodColors.accent,
+          foregroundColor: scheme.onSecondary,
           minimumSize: const Size(NodSizes.touchTarget, NodSizes.touchTarget),
           padding: const EdgeInsets.symmetric(horizontal: NodSpacing.lg),
         ),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
+          foregroundColor: scheme.onSurface,
+          side: BorderSide(color: scheme.outlineVariant),
           minimumSize: const Size(NodSizes.touchTarget, NodSizes.touchTarget),
           padding: const EdgeInsets.symmetric(horizontal: NodSpacing.lg),
         ),
       ),
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
+          foregroundColor: nodColors.accent,
           minimumSize: const Size(NodSizes.touchTarget, NodSizes.touchTarget),
           padding: const EdgeInsets.symmetric(horizontal: NodSpacing.md),
+        ),
+      ),
+      cardTheme: CardThemeData(
+        elevation: 0,
+        margin: EdgeInsets.zero,
+        clipBehavior: Clip.antiAlias,
+        color: nodColors.surfaceOverlay,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(NodRadii.card),
+          side: BorderSide(color: nodColors.border),
+        ),
+      ),
+      listTileTheme: ListTileThemeData(
+        iconColor: nodColors.mutedForeground,
+        selectedColor: nodColors.accent,
+      ),
+      expansionTileTheme: ExpansionTileThemeData(
+        shape: const Border(),
+        collapsedShape: const Border(),
+        iconColor: nodColors.mutedForeground,
+        collapsedIconColor: nodColors.mutedForeground,
+        textColor: scheme.onSurface,
+        expandedAlignment: Alignment.centerLeft,
+      ),
+      dialogTheme: DialogThemeData(
+        backgroundColor: nodColors.surfaceOverlay,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(NodRadii.dialog),
+        ),
+        titleTextStyle: text.titleLarge,
+        contentTextStyle: text.bodyMedium?.copyWith(
+          color: nodColors.textSecondary,
+        ),
+      ),
+      popupMenuTheme: PopupMenuThemeData(
+        color: nodColors.surfaceOverlay,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(NodRadii.card),
+          side: BorderSide(color: nodColors.border),
+        ),
+        textStyle: text.bodyLarge,
+      ),
+      bottomSheetTheme: BottomSheetThemeData(
+        backgroundColor: nodColors.surfaceOverlay,
+        surfaceTintColor: Colors.transparent,
+        showDragHandle: true,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(
+            top: Radius.circular(NodRadii.dialog),
+          ),
         ),
       ),
       navigationBarTheme: NavigationBarThemeData(
@@ -185,11 +278,32 @@ abstract final class NodTheme {
           horizontal: NodSpacing.md,
           vertical: NodSpacing.sm,
         ),
+        helperMaxLines: 3,
+        errorMaxLines: 3,
+        alignLabelWithHint: true,
+        hintStyle: text.bodyLarge?.copyWith(color: nodColors.mutedForeground),
+        labelStyle: text.bodyLarge?.copyWith(color: nodColors.mutedForeground),
+        floatingLabelStyle: WidgetStateTextStyle.resolveWith(
+          (states) => text.bodyLarge!.copyWith(
+            color: states.contains(WidgetState.error)
+                ? scheme.error
+                : states.contains(WidgetState.focused)
+                ? nodColors.accent
+                : nodColors.mutedForeground,
+          ),
+        ),
+        helperStyle: text.bodySmall?.copyWith(color: nodColors.mutedForeground),
+        prefixIconColor: nodColors.mutedForeground,
+        suffixIconColor: nodColors.mutedForeground,
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(NodRadii.input),
           borderSide: BorderSide(color: nodColors.border),
         ),
         enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(NodRadii.input),
+          borderSide: BorderSide(color: nodColors.border),
+        ),
+        disabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(NodRadii.input),
           borderSide: BorderSide(color: nodColors.border),
         ),

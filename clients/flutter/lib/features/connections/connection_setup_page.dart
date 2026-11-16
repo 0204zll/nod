@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../api/connections_management_repository.dart';
 import '../../core/connections_management.dart';
+import '../../design_system/design_system.dart';
 
 class NodConnectionSetupPage extends StatefulWidget {
   const NodConnectionSetupPage({
@@ -296,23 +297,22 @@ class _NodConnectionSetupPageState extends State<NodConnectionSetupPage>
     String label,
     TextEditingController controller, {
     bool secret = false,
-  }) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 8),
-    child: TextField(
-      controller: controller,
-      enabled: !_busy && !_closing,
-      obscureText: secret,
-      autocorrect: false,
-      enableSuggestions: false,
-      autofillHints: const [],
-      decoration: InputDecoration(labelText: label),
-    ),
+  }) => TextField(
+    controller: controller,
+    enabled: !_busy && !_closing,
+    obscureText: secret,
+    autocorrect: false,
+    enableSuggestions: false,
+    autofillHints: const [],
+    decoration: InputDecoration(labelText: label),
   );
 
   @override
   Widget build(BuildContext context) {
     final discovery = _discovery;
     final oauth = discovery?.paths.firstOrNull?['auth'] == 'oauth';
+    final secondary = Theme.of(context).textTheme.bodyMedium
+        ?.copyWith(color: context.nodColors.textSecondary);
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
@@ -323,20 +323,21 @@ class _NodConnectionSetupPageState extends State<NodConnectionSetupPage>
           title: Text(widget.name),
           leading: IconButton(
             icon: const Icon(Icons.close),
+            tooltip: 'Close',
             onPressed: _busy || _closing ? null : _close,
           ),
+          bottom: NodProgressLine(active: _busy || _closing),
         ),
-        body: ListView(
-          padding: const EdgeInsets.all(24),
+        body: NodPageBody(
+          spacing: NodSpacing.md,
           children: [
-            const Text(
+            Text(
               'Private setup. Credentials go only to your paired Nod server, never to chat.',
+              style: secondary,
             ),
-            if (_busy || _closing) const LinearProgressIndicator(),
-            if (_error != null)
-              Semantics(liveRegion: true, child: Text(_error!)),
+            if (_error != null) NodNotice(_error!, tone: NodTone.error),
             if (_connected) ...[
-              const Text('Account connected.'),
+              const NodNotice('Account connected.', tone: NodTone.success),
               FilledButton(onPressed: _close, child: const Text('Done')),
             ] else if (!_unavailable) ...[
               if (_id == null && _url == null) ...[
@@ -344,6 +345,9 @@ class _NodConnectionSetupPageState extends State<NodConnectionSetupPage>
                 _field('Public HTTPS server URL', _endpoint),
                 DropdownButtonFormField<String>(
                   initialValue: _auth,
+                  isExpanded: true,
+                  style: Theme.of(context).textTheme.bodyLarge,
+                  dropdownColor: context.nodColors.surfaceOverlay,
                   decoration: const InputDecoration(
                     labelText: 'Authentication',
                   ),
@@ -367,6 +371,8 @@ class _NodConnectionSetupPageState extends State<NodConnectionSetupPage>
                 ),
                 if (_auth == 'oauth')
                   CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
                     title: const Text('Server requires a client ID'),
                     value: _clientRequired,
                     onChanged: _busy
@@ -381,17 +387,22 @@ class _NodConnectionSetupPageState extends State<NodConnectionSetupPage>
               if (discovery != null) ...[
                 if (discovery.setupText != null) Text(discovery.setupText!),
                 if (discovery.setupUrl != null)
-                  SelectableText('Setup instructions: ${discovery.setupUrl}'),
-                for (final path in discovery.paths) ...[
-                  Text(
-                    '${path['kind']}: ${path['endpoint'] ?? path['command'] ?? ''}',
+                  SelectableText(
+                    'Setup instructions: ${discovery.setupUrl}',
+                    style: secondary,
                   ),
-                  Text('Authentication: ${path['auth']}'),
-                  if (path['testPath'] != null)
-                    Text('Read check: GET ${path['testPath']}'),
-                  if (path['source'] != null)
-                    Text('Install source: ${path['source']}'),
-                ],
+                for (final path in discovery.paths)
+                  Text(
+                    [
+                      '${path['kind']}: ${path['endpoint'] ?? path['command'] ?? ''}',
+                      'Authentication: ${path['auth']}',
+                      if (path['testPath'] != null)
+                        'Read check: GET ${path['testPath']}',
+                      if (path['source'] != null)
+                        'Install source: ${path['source']}',
+                    ].join('\n'),
+                    style: secondary,
+                  ),
                 if (discovery.needsAddress) ...[
                   _field(
                     'n8n instance address (as reached by Nod’s server)',
@@ -408,7 +419,10 @@ class _NodConnectionSetupPageState extends State<NodConnectionSetupPage>
                   ),
                 ] else if (oauth) ...[
                   if (discovery.callbackUrl != null)
-                    SelectableText('Callback URL: ${discovery.callbackUrl}'),
+                    SelectableText(
+                      'Callback URL: ${discovery.callbackUrl}',
+                      style: secondary,
+                    ),
                   if (discovery.paths.any((p) => p['clientIdRequired'] == true))
                     _field('Client ID', _clientId),
                   FilledButton(
@@ -430,8 +444,9 @@ class _NodConnectionSetupPageState extends State<NodConnectionSetupPage>
                 ],
               ],
               if (_url != null && !_timedOut) ...[
-                const Text(
+                Text(
                   'Open sign-in, review the permissions, then return here. The server checks completion.',
+                  style: secondary,
                 ),
                 OutlinedButton(
                   onPressed: _busy ? null : _open,

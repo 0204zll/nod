@@ -9,9 +9,10 @@ import '../../design_system/design_system.dart';
 import '../../design_system/nod_flow_dialog.dart';
 
 class NodAppsPage extends StatefulWidget {
-  const NodAppsPage({required this.repository, super.key});
+  const NodAppsPage({required this.repository, this.onManage, super.key});
 
   final NodAppsRepository repository;
+  final VoidCallback? onManage;
 
   @override
   State<NodAppsPage> createState() => _NodAppsPageState();
@@ -84,81 +85,128 @@ class _NodAppsPageState extends State<NodAppsPage> {
           ),
         )
         .toList();
-    return RefreshIndicator(
+    final theme = Theme.of(context);
+    final colors = context.nodColors;
+    return NodPageBody(
       onRefresh: _load,
-      child: ListView(
-        padding: const EdgeInsets.all(NodSpacing.lg),
-        children: [
-          Text(
-            'Connected apps',
-            style: Theme.of(context).textTheme.headlineMedium,
+      children: [
+        Text(
+          'Connect an account to give Nod tools for the apps you use. Sign-in and permissions stay in your browser.',
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: colors.textSecondary,
           ),
-          const SizedBox(height: NodSpacing.sm),
-          const Text(
-            'Connect an account to give Nod tools for the apps you use. Sign-in and permissions stay in your browser.',
-          ),
-          const SizedBox(height: NodSpacing.lg),
-          TextField(
-            decoration: const InputDecoration(
-              labelText: 'Search apps',
-              prefixIcon: Icon(Icons.search),
-            ),
-            onChanged: (value) => setState(() => _query = value),
+        ),
+        const SizedBox(height: NodSpacing.md),
+        if (widget.onManage != null) ...[
+          NodGroup(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.manage_accounts_outlined),
+                title: const Text('Manage accounts and channels'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: widget.onManage,
+              ),
+            ],
           ),
           const SizedBox(height: NodSpacing.md),
-          if (_loading) const LinearProgressIndicator(),
-          if (_error != null) ...[
-            Text(
-              _error!,
-              style: TextStyle(color: Theme.of(context).colorScheme.error),
+        ],
+        TextField(
+          decoration: const InputDecoration(
+            labelText: 'Search apps',
+            prefixIcon: Icon(Icons.search),
+          ),
+          onChanged: (value) => setState(() => _query = value),
+        ),
+        const SizedBox(height: NodSpacing.md),
+        if (_loading) const LinearProgressIndicator(),
+        if (_error != null) ...[
+          NodNotice(_error!, tone: NodTone.error),
+          const SizedBox(height: NodSpacing.xs),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton(
+              onPressed: _load,
+              child: const Text('Try again'),
             ),
-            TextButton(onPressed: _load, child: const Text('Try again')),
-          ],
-          if (!_loading && visible != null && visible.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: NodSpacing.lg),
-              child: Text('No apps found. Try another search.'),
-            ),
-          for (final app in visible ?? <NodAppConnection>[]) ...[
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: NodSpacing.md),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    app.name,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  if (app.account != null) Text(app.account!),
-                  if (app.description != null)
-                    Text(
-                      app.description!,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  const SizedBox(height: NodSpacing.xs),
-                  if (app.status == 'connected') const Text('Connected'),
-                  OutlinedButton.icon(
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Theme.of(context).colorScheme.onSurface,
-                    ),
-                    onPressed: () => _connect(app),
-                    icon: const Icon(Icons.link),
-                    label: Text(
-                      app.status == 'connected'
-                          ? 'Add account'
-                          : app.connectionId == null
-                          ? 'Connect'
-                          : 'Reconnect',
-                    ),
-                  ),
-                ],
+          ),
+        ],
+        if (!_loading && visible != null && visible.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: NodSpacing.lg),
+            child: Text(
+              'No apps found. Try another search.',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: colors.textSecondary,
               ),
             ),
-            const Divider(height: 1),
-          ],
-        ],
-      ),
+          ),
+        if (visible != null && visible.isNotEmpty)
+          NodGroup(
+            children: [
+              for (final app in visible)
+                Padding(
+                  padding: const EdgeInsets.all(NodSpacing.md),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(
+                        width: double.infinity,
+                        child: Wrap(
+                          alignment: WrapAlignment.spaceBetween,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: NodSpacing.sm,
+                          runSpacing: NodSpacing.xs,
+                          children: [
+                            Text(app.name, style: theme.textTheme.titleMedium),
+                            OutlinedButton(
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: NodSpacing.md,
+                                ),
+                              ),
+                              onPressed: () => _connect(app),
+                              child: Text(
+                                app.status == 'connected'
+                                    ? 'Add account'
+                                    : app.connectionId == null
+                                    ? 'Connect'
+                                    : 'Reconnect',
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (app.account != null || app.status == 'connected') ...[
+                        const SizedBox(height: NodSpacing.xxs),
+                        Wrap(
+                          spacing: NodSpacing.xs,
+                          runSpacing: NodSpacing.xxs,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            if (app.account != null) Text(app.account!),
+                            if (app.status == 'connected')
+                              const NodStatusLabel(
+                                'Connected',
+                                tone: NodTone.success,
+                              ),
+                          ],
+                        ),
+                      ],
+                      if (app.description != null)
+                        Text(
+                          app.description!,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: colors.mutedForeground,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+      ],
     );
   }
 }
@@ -345,9 +393,6 @@ class _AppConnectionDialogState extends State<_AppConnectionDialog>
             : 'Connect ${widget.app.name}',
         actions: [
           TextButton(
-            style: TextButton.styleFrom(
-              foregroundColor: Theme.of(context).colorScheme.onSurface,
-            ),
             onPressed: _closing ? null : _close,
             child: Text(connected ? 'Done' : 'Cancel'),
           ),
@@ -360,9 +405,6 @@ class _AppConnectionDialogState extends State<_AppConnectionDialog>
             ),
           if (_step == _Step.ready || _step == _Step.waiting)
             OutlinedButton(
-              style: OutlinedButton.styleFrom(
-                foregroundColor: Theme.of(context).colorScheme.onSurface,
-              ),
               onPressed: busy ? null : _open,
               child: const Text('Open sign-in'),
             ),
@@ -398,13 +440,7 @@ class _AppConnectionDialogState extends State<_AppConnectionDialog>
             ],
             if (_error != null) ...[
               const SizedBox(height: NodSpacing.md),
-              Semantics(
-                liveRegion: true,
-                child: Text(
-                  _error!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
-                ),
-              ),
+              NodNotice(_error!, tone: NodTone.error),
             ],
           ],
         ),

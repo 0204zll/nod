@@ -133,7 +133,7 @@ Future<void> runParityWorkflows(
     await parityReady(tester, find.text('Synthetic source-bound draft'));
     await parityReady(tester, find.text('Synthetic source record'));
     await command('remove-source');
-    await parityTap(tester, find.text('Refresh'));
+    await parityTap(tester, find.byTooltip('Refresh'));
     await parityReady(
       tester,
       find.textContaining('This prepared work is unavailable.'),
@@ -183,8 +183,8 @@ Future<void> runParityWorkflows(
     await parityBack(tester);
     await parityTap(tester, find.text('General'));
     await parityReady(tester, find.text('Appearance'));
-    await parityTap(tester, find.text('light'));
-    await parityTap(tester, find.text('dark').last);
+    await parityTap(tester, find.text('Light'));
+    await parityTap(tester, find.text('Dark').last);
     await parityWait(tester, () async => (await inspect())['theme'] == 'dark');
     await tester.pump(const Duration(milliseconds: 500));
     expect(
@@ -198,7 +198,7 @@ Future<void> runParityWorkflows(
     await parityReady(tester, find.text('No saved items'));
     await navigateToSection(tester, 'apps');
     await parityTap(tester, find.text('Manage accounts and channels'));
-    await parityReady(tester, find.text('Connected apps'));
+    await parityReady(tester, find.text('Accounts and channels'));
     await parityBack(tester);
     await navigateToSection(tester, 'chat');
     final result = await inspect();

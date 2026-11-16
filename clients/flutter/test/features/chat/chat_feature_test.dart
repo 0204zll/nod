@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nod_client/core/api_transport.dart';
 import 'package:nod_client/core/attachments.dart';
@@ -14,6 +15,7 @@ import 'package:nod_client/core/rich_results.dart' as results;
 import 'package:nod_client/design_system/design_system.dart';
 import 'package:nod_client/features/chat/agent_message_body.dart';
 import 'package:nod_client/features/chat/chat.dart';
+import 'package:nod_client/features/chat/chat_inbox.dart';
 import 'package:nod_client/features/chat/chat_testing.dart';
 import 'package:nod_client/features/connections/connection_setup_page.dart';
 import 'package:nod_client/features/prepared/prepared_page.dart';
@@ -23,6 +25,78 @@ import 'package:nod_client/features/results/rich_result.dart';
 import 'package:nod_client/motion/motion.dart';
 
 void main() {
+  test(
+    'inbox read receipts survive reopening and stay isolated by conversation',
+    () async {
+      FlutterSecureStorage.setMockInitialValues({});
+      final inbox = ChatInbox();
+      final restored = ChatInbox();
+      addTearDown(inbox.dispose);
+      addTearDown(restored.dispose);
+      final message = ChatMessageItem.fromMessage(
+        NodMessage(
+          id: 'update',
+          role: NodMessageRole.assistant,
+          text: 'Synthetic result',
+          createdAt: DateTime(2026),
+        ),
+      );
+      await inbox.scope('https://fixture.invalid:thread-a');
+      inbox.markRead([message.id]);
+      await Future<void>.delayed(Duration.zero);
+      await restored.scope('https://fixture.invalid:thread-a');
+      expect(restored.isUnread(message), isFalse);
+      await restored.scope('https://fixture.invalid:thread-b');
+      expect(restored.isUnread(message), isTrue);
+      await restored.scope('https://other.invalid:thread-a');
+      expect(restored.isUnread(message), isTrue);
+    },
+  );
+
+  testWidgets(
+    'inbox opens older context without sending a reply and preserves unseen updates',
+    (tester) async {
+      FlutterSecureStorage.setMockInitialValues({});
+      final repository = FakeNodRepository(
+        state: NodState(
+          threadId: 'inbox-routing',
+          messages: List.generate(
+            30,
+            (index) => NodMessage(
+              id: 'update-$index',
+              role: NodMessageRole.assistant,
+              text: 'Synthetic update $index',
+              createdAt: DateTime(2026, 1, 1, 0, index),
+            ),
+          ),
+          turn: NodTurnState.idle,
+          revision: '1',
+        ),
+      );
+      addTearDown(repository.dispose);
+      await _pumpChat(tester, repository);
+      await tester.tap(find.text('Updates'));
+      await tester.pumpAndSettle();
+      expect(find.text('Synthetic update 29'), findsNothing);
+      await tester.scrollUntilVisible(
+        find.text('Synthetic update 20'),
+        200,
+        scrollable: find.descendant(
+          of: find.byType(ChatInboxPage),
+          matching: find.byType(Scrollable),
+        ),
+      );
+      expect(find.text('Synthetic update 20'), findsOneWidget);
+      await tester.tap(find.text('Synthetic update 20'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ChatInboxPage), findsNothing);
+      expect(find.text('Synthetic update 20'), findsOneWidget);
+      expect(find.byTooltip('Cancel reply'), findsNothing);
+      expect(repository.sentTexts, isEmpty);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
   testWidgets(
     'older prepared finding opens exact authenticated result and surfaces refusal',
     (tester) async {
@@ -1522,15 +1596,28 @@ void main() {
 
     expect(repository.sentTexts, isEmpty);
 
-    await tester.enterText(
-      find.byKey(const Key('chat-composer')),
-      'First line\nSecond line',
+    const draft = 'First line\nSecond line\nThird line';
+    await tester.enterText(find.byKey(const Key('chat-composer')), draft);
+    await tester.pumpAndSettle();
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: draft,
+        selection: TextSelection.collapsed(offset: 12),
+      ),
     );
     await tester.pump();
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    await tester.pumpAndSettle();
+    final input = tester.widget<TextField>(
+      find.byKey(const Key('chat-composer')),
+    );
+    expect(input.focusNode!.hasFocus, isTrue);
+    expect(input.controller!.selection.baseOffset, 12);
+    expect(input.controller!.text, draft);
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pump();
 
-    expect(repository.sentTexts.single.text, 'First line\nSecond line');
+    expect(repository.sentTexts.single.text, draft);
   });
 
   testWidgets('approval stays usable at high text scale on compact screens', (

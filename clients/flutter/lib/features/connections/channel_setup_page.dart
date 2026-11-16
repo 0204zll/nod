@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../api/connections_management_repository.dart';
 import '../../core/connections_management.dart';
+import '../../design_system/design_system.dart';
 import 'linked_whatsapp_setup.dart';
 
 class NodChannelSetupPage extends StatefulWidget {
@@ -213,17 +214,19 @@ class _NodChannelSetupPageState extends State<NodChannelSetupPage>
     }
   }
 
-  Widget _field(String key, String label, {bool secret = false}) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 8),
-    child: TextField(
-      controller: _controller(key),
-      enabled: !_busy,
-      obscureText: secret,
-      autocorrect: false,
-      enableSuggestions: false,
-      autofillHints: const [],
-      decoration: InputDecoration(labelText: label),
-    ),
+  Widget _field(
+    String key,
+    String label, {
+    bool secret = false,
+    String? helper,
+  }) => TextField(
+    controller: _controller(key),
+    enabled: !_busy,
+    obscureText: secret,
+    autocorrect: false,
+    enableSuggestions: false,
+    autofillHints: const [],
+    decoration: InputDecoration(labelText: label, helperText: helper),
   );
 
   @override
@@ -249,20 +252,18 @@ class _NodChannelSetupPageState extends State<NodChannelSetupPage>
     if (!_telegram && !_loaded) {
       return Scaffold(
         appBar: AppBar(title: const Text('WhatsApp')),
-        body: Center(
-          child: _error == null
-              ? const CircularProgressIndicator()
-              : Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(_error!),
-                    TextButton(
-                      onPressed: _load,
-                      child: const Text('Refresh status'),
-                    ),
-                  ],
-                ),
-        ),
+        body: _error == null
+            ? const Center(child: CircularProgressIndicator())
+            : NodPageBody(
+                spacing: NodSpacing.md,
+                children: [
+                  NodNotice(_error!, tone: NodTone.error),
+                  OutlinedButton(
+                    onPressed: _load,
+                    child: const Text('Refresh status'),
+                  ),
+                ],
+              ),
       );
     }
     if (!_telegram &&
@@ -272,8 +273,7 @@ class _NodChannelSetupPageState extends State<NodChannelSetupPage>
             setup?.mode == 'linked')) {
       return Scaffold(
         appBar: AppBar(title: const Text('WhatsApp')),
-        body: ListView(
-          padding: const EdgeInsets.all(24),
+        body: NodPageBody(
           children: [
             NodLinkedWhatsAppSetup(
               repository: widget.repository,
@@ -289,52 +289,76 @@ class _NodChannelSetupPageState extends State<NodChannelSetupPage>
         ),
       );
     }
+    final secondary = Theme.of(context).textTheme.bodyMedium
+        ?.copyWith(color: context.nodColors.textSecondary);
     return Scaffold(
-      appBar: AppBar(title: Text(_telegram ? 'Telegram' : 'WhatsApp')),
-      body: ListView(
-        padding: const EdgeInsets.all(24),
+      appBar: AppBar(
+        title: Text(_telegram ? 'Telegram' : 'WhatsApp'),
+        bottom: NodProgressLine(active: _busy),
+      ),
+      body: NodPageBody(
+        spacing: NodSpacing.md,
         children: [
-          const Text(
+          Text(
             'Configure privately on your paired Nod server. Never paste these credentials into chat.',
+            style: secondary,
           ),
-          if (_busy) const LinearProgressIndicator(),
-          if (_error != null) Semantics(liveRegion: true, child: Text(_error!)),
-          if (setup?.enabled == true) ...[
-            Text(
-              '${values['accountName'] ?? values['accountHandle'] ?? widget.provider} · ${values['connectionState'] ?? values['mode'] ?? 'Enabled'}',
+          if (_error != null) NodNotice(_error!, tone: NodTone.error),
+          if (setup?.enabled == true)
+            NodGroup(
+              children: [
+                ListTile(
+                  title: Text(
+                    '${values['accountName'] ?? values['accountHandle'] ?? widget.provider}',
+                  ),
+                  subtitle: Text(
+                    [
+                      '${values['connectionState'] ?? values['mode'] ?? 'Enabled'}',
+                      if (values['webhookStatus'] != null)
+                        'Webhook: ${values['webhookStatus']}',
+                      if (values['pairedUser'] != null)
+                        'Paired with ${values['pairedUser']}',
+                      if (values['allowedUserId'] != null)
+                        'Allowed user: ${values['allowedUserId']}',
+                    ].join('\n'),
+                  ),
+                ),
+                if (values['webhookUrl'] != null)
+                  ListTile(
+                    title: const Text('Callback URL'),
+                    subtitle: SelectableText('${values['webhookUrl']}'),
+                  ),
+              ],
             ),
-            if (values['webhookStatus'] != null)
-              Text('Webhook: ${values['webhookStatus']}'),
-            if (values['webhookUrl'] != null)
-              SelectableText('Callback URL: ${values['webhookUrl']}'),
-            if (values['pairedUser'] != null)
-              Text('Paired with ${values['pairedUser']}'),
-            if (values['allowedUserId'] != null)
-              Text('Allowed user: ${values['allowedUserId']}'),
-          ],
           if (managed)
-            const Text(
+            const NodNotice(
               'Managed by the server environment. Change or remove its configuration there.',
             ),
           if (!managed && (_editing || setup?.enabled != true)) ...[
-            if (_telegram) ...[
-              _field('botToken', 'BotFather bot token', secret: true),
-              const Text(
-                'Default delivery uses polling. A bot already using a webhook must be reconfigured first.',
-              ),
-            ] else ...[
-              const Text(
+            if (_telegram)
+              _field(
+                'botToken',
+                'BotFather bot token',
+                secret: true,
+                helper: 'Default delivery uses polling. A bot already using a webhook must be reconfigured first.',
+              )
+            else ...[
+              Text(
                 'Meta Cloud API setup requires a business sender and public HTTPS callback. Replies are limited to 24 hours after your last message.',
+                style: secondary,
               ),
               _field('phoneNumberId', 'Business phone number ID'),
               _field(
                 'allowedNumber',
-                'Your personal number (country code, digits only)',
+                'Your personal number',
+                helper: 'Country code, digits only',
               ),
               _field('accessToken', 'Business access token', secret: true),
               _field('appSecret', 'Meta app secret', secret: true),
               _field('verifyToken', 'Webhook verification token', secret: true),
               CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
                 value: _policy,
                 onChanged: _busy
                     ? null
@@ -346,7 +370,8 @@ class _NodChannelSetupPageState extends State<NodChannelSetupPage>
             ],
             _field(
               'webhookUrl',
-              'Public HTTPS webhook URL (optional if configured by server)',
+              'Public HTTPS webhook URL',
+              helper: 'Optional if configured by server',
             ),
             FilledButton(
               onPressed: _busy || (!_telegram && !_policy) ? null : _save,
@@ -355,8 +380,9 @@ class _NodChannelSetupPageState extends State<NodChannelSetupPage>
           ],
           if (!managed && setup?.enabled == true) ...[
             if (_telegram && values['allowedUserId'] == null) ...[
-              const Text(
+              Text(
                 'Pair your own Telegram account. Open the pairing link and send Start, then confirm the account shown here.',
+                style: secondary,
               ),
               if (_pairing != null && pairingActive)
                 OutlinedButton(
@@ -378,7 +404,8 @@ class _NodChannelSetupPageState extends State<NodChannelSetupPage>
               ),
               _field(
                 'allowedUserId',
-                'Your Telegram user ID (alternative to pairing)',
+                'Your Telegram user ID',
+                helper: 'Alternative to pairing',
               ),
               OutlinedButton(
                 onPressed: _busy ? null : () => _pair('user'),
@@ -392,6 +419,9 @@ class _NodChannelSetupPageState extends State<NodChannelSetupPage>
               child: const Text('Edit configuration'),
             ),
             TextButton(
+              style: TextButton.styleFrom(
+                foregroundColor: Theme.of(context).colorScheme.error,
+              ),
               onPressed: _busy ? null : _disconnect,
               child: const Text('Disconnect'),
             ),

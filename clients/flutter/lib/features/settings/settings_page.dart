@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../api/settings_repository.dart';
 import '../../core/api_transport.dart';
 import '../../core/settings.dart';
+import '../../design_system/design_system.dart';
 import 'memory_settings_page.dart';
 import 'model_settings_page.dart';
 import 'settings_media.dart';
@@ -40,49 +41,78 @@ class NodSettingsPage extends StatelessWidget {
     void open(Widget page) =>
         Navigator.push(context, MaterialPageRoute<void>(builder: (_) => page));
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
-      body: ListView(
+      appBar: const NodPageBar(title: 'Settings'),
+      body: NodPageBody(
         children: [
-          ListTile(
-            title: const Text('General'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => open(_general(repository, onThemeChanged)),
-          ),
-          ListTile(
-            title: const Text('Models'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => open(NodModelSettingsPage(repository: repository)),
-          ),
-          ListTile(
-            title: const Text('Voice & audio'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => open(NodVoiceSettingsPage(repository: repository)),
-          ),
-          ListTile(
-            title: const Text('Memory'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => open(
-              NodMemorySettingsPage(
-                repository: repository,
-                onShowMessage: onShowMessage,
-              ),
-            ),
-          ),
-          ListTile(
-            title: const Text('Rules & task check-ins'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => open(_rules(repository)),
-          ),
-          ListTile(
-            title: const Text('Privacy & data'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => open(_privacy(repository)),
+          NodGroup(
+            children: [
+              for (final (icon, title, page) in [
+                (
+                  Icons.tune_rounded,
+                  'General',
+                  () => _general(repository, onThemeChanged),
+                ),
+                (
+                  Icons.hub_outlined,
+                  'Models',
+                  () => NodModelSettingsPage(repository: repository),
+                ),
+                (
+                  Icons.graphic_eq_rounded,
+                  'Voice & audio',
+                  () => NodVoiceSettingsPage(repository: repository),
+                ),
+                (
+                  Icons.psychology_outlined,
+                  'Memory',
+                  () => NodMemorySettingsPage(
+                    repository: repository,
+                    onShowMessage: onShowMessage,
+                  ),
+                ),
+                (
+                  Icons.rule_rounded,
+                  'Rules & task check-ins',
+                  () => _rules(repository),
+                ),
+                (
+                  Icons.privacy_tip_outlined,
+                  'Privacy & data',
+                  () => _privacy(repository),
+                ),
+              ])
+                ListTile(
+                  leading: Icon(icon),
+                  title: Text(title),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => open(page()),
+                ),
+            ],
           ),
         ],
       ),
     );
   }
 }
+
+Widget _choice(
+  BuildContext context,
+  String value,
+  Map<String, String> labels,
+  ValueChanged<String?> onChanged,
+) => DropdownButton<String>(
+  value: value,
+  style: Theme.of(context).textTheme.bodyLarge,
+  dropdownColor: context.nodColors.surfaceOverlay,
+  underline: const SizedBox.shrink(),
+  borderRadius: BorderRadius.circular(NodRadii.card),
+  alignment: AlignmentDirectional.centerEnd,
+  items: [
+    for (final entry in labels.entries)
+      DropdownMenuItem(value: entry.key, child: Text(entry.value)),
+  ],
+  onChanged: onChanged,
+);
 
 Widget _general(
   NodSettingsRepository repository,
@@ -96,85 +126,100 @@ Widget _general(
   builder: (context, data, state) {
     final account = settingsMap(settingsMap(data['session'])['settings']);
     final preferences = settingsMap(data['preferences']);
-    return ListView(
+    return NodPageBody(
       children: [
-        ListTile(
-          title: const Text('Appearance'),
-          subtitle: const Text('Shared with your paired Nod server.'),
-          trailing: DropdownButton<String>(
-            value: account['theme'] as String,
-            items: ['system', 'light', 'dark']
-                .map(
-                  (value) => DropdownMenuItem(value: value, child: Text(value)),
-                )
-                .toList(),
-            onChanged: (value) => state.change(() async {
-              final result = await repository.saveAccount({'theme': value});
-              onThemeChanged?.call(switch (value) {
-                'light' => ThemeMode.light,
-                'dark' => ThemeMode.dark,
-                _ => ThemeMode.system,
-              });
-              return result;
-            }),
-          ),
-        ),
-        for (final field in ['timeZone', 'locale'])
-          ListTile(
-            title: Text(field == 'timeZone' ? 'Time zone' : 'Region'),
-            subtitle: Text(preferences[field] as String? ?? 'Automatic'),
-            onTap: () async {
-              if (await editSettings(
+        NodGroup(
+          children: [
+            ListTile(
+              title: const Text('Appearance'),
+              subtitle: const Text('Shared with your paired Nod server.'),
+              trailing: _choice(
                 context,
-                SettingsEditPage(
-                  title: field == 'timeZone' ? 'Time zone' : 'Region',
-                  fields: {field: preferences[field] as String? ?? ''},
-                  help: field == 'timeZone'
-                      ? 'Use an IANA zone such as Europe/London. Leave empty for automatic.'
-                      : 'Use a locale such as en-GB. This controls formatting, not reply language. Leave empty for automatic.',
-                  save: (values) async {
-                    await repository.savePreferences({
-                      field: values[field]!.trim().isEmpty
-                          ? null
-                          : values[field]!.trim(),
-                    });
-                  },
-                ),
-              )) {
-                await state.reload();
-              }
-            },
-          ),
-        ListTile(
-          title: const Text('Clock format'),
-          trailing: DropdownButton<String>(
-            value: preferences['hourCycle'] as String,
-            items: ['auto', 'h12', 'h23']
-                .map(
-                  (value) => DropdownMenuItem(value: value, child: Text(value)),
-                )
-                .toList(),
-            onChanged: (value) => state.change(
-              () => repository.savePreferences({'hourCycle': value}),
+                account['theme'] as String,
+                const {'system': 'System', 'light': 'Light', 'dark': 'Dark'},
+                (value) => state.change(() async {
+                  final result = await repository.saveAccount({'theme': value});
+                  onThemeChanged?.call(switch (value) {
+                    'light' => ThemeMode.light,
+                    'dark' => ThemeMode.dark,
+                    _ => ThemeMode.system,
+                  });
+                  return result;
+                }),
+              ),
             ),
-          ),
+          ],
         ),
-        for (final link in {
-          'Discord': 'https://discord.gg/n8n',
-          'Forum': 'https://community.n8n.io/c/n8n-labs/48',
-        }.entries)
-          ListTile(
-            title: Text(link.key),
-            trailing: const Icon(Icons.open_in_new),
-            onTap: () => state.run(() async {
-              if (!await launchUrl(
-                Uri.parse(link.value),
-                mode: LaunchMode.externalApplication,
-              )) {
-                throw const FormatException();
-              }
-            }),
-          ),
+        const SizedBox(height: NodSpacing.lg),
+        NodGroup(
+          title: 'Region and time',
+          children: [
+            for (final field in ['timeZone', 'locale'])
+              ListTile(
+                title: Text(field == 'timeZone' ? 'Time zone' : 'Region'),
+                subtitle: Text(preferences[field] as String? ?? 'Automatic'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () async {
+                  if (await editSettings(
+                    context,
+                    SettingsEditPage(
+                      title: field == 'timeZone' ? 'Time zone' : 'Region',
+                      fields: {field: preferences[field] as String? ?? ''},
+                      labels: const {
+                        'timeZone': 'Time zone',
+                        'locale': 'Region',
+                      },
+                      help: field == 'timeZone'
+                          ? 'Use an IANA zone such as Europe/London. Leave empty for automatic.'
+                          : 'Use a locale such as en-GB. This controls formatting, not reply language. Leave empty for automatic.',
+                      save: (values) async {
+                        await repository.savePreferences({
+                          field: values[field]!.trim().isEmpty
+                              ? null
+                              : values[field]!.trim(),
+                        });
+                      },
+                    ),
+                  )) {
+                    await state.reload();
+                  }
+                },
+              ),
+            ListTile(
+              title: const Text('Clock format'),
+              trailing: _choice(
+                context,
+                preferences['hourCycle'] as String,
+                const {'auto': 'Automatic', 'h12': '12-hour', 'h23': '24-hour'},
+                (value) => state.change(
+                  () => repository.savePreferences({'hourCycle': value}),
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: NodSpacing.lg),
+        NodGroup(
+          title: 'Community',
+          children: [
+            for (final link in {
+              'Discord': 'https://discord.gg/n8n',
+              'Forum': 'https://community.n8n.io/c/n8n-labs/48',
+            }.entries)
+              ListTile(
+                title: Text(link.key),
+                trailing: const Icon(Icons.open_in_new, size: 20),
+                onTap: () => state.run(() async {
+                  if (!await launchUrl(
+                    Uri.parse(link.value),
+                    mode: LaunchMode.externalApplication,
+                  )) {
+                    throw const FormatException();
+                  }
+                }),
+              ),
+          ],
+        ),
       ],
     );
   },
@@ -189,57 +234,68 @@ Widget _rules(NodSettingsRepository repository) => SettingsSection(
   builder: (context, data, state) {
     final preferences = settingsMap(data['preferences']);
     final taskUsd = settingsMap(data['usage'])['taskUsd'];
-    return ListView(
+    return NodPageBody(
       children: [
-        ListTile(
-          title: const Text('Your rules'),
-          subtitle: Text(
-            (preferences['rules'] as String).isEmpty
-                ? 'Set lasting instructions for actions Nod may take or must ask about.'
-                : preferences['rules'] as String,
-          ),
-          onTap: () async {
-            if (await editSettings(
-              context,
-              SettingsEditPage(
-                title: 'Your rules',
-                fields: {'Rules': preferences['rules'] as String},
-                multiline: const {'Rules'},
-                limits: const {'Rules': 4000},
-                help: 'Rules to ask first override other permission. Rules never authorize Nod to change its own settings.',
-                save: (values) async {
-                  await repository.savePreferences({'rules': values['Rules']});
-                },
+        NodGroup(
+          children: [
+            ListTile(
+              title: const Text('Your rules'),
+              subtitle: Text(
+                (preferences['rules'] as String).isEmpty
+                    ? 'Set lasting instructions for actions Nod may take or must ask about.'
+                    : preferences['rules'] as String,
+                maxLines: 4,
+                overflow: TextOverflow.ellipsis,
               ),
-            )) {
-              await state.reload();
-            }
-          },
-        ),
-        ListTile(
-          title: const Text('Task check-in'),
-          subtitle: Text(
-            taskUsd == null
-                ? 'Off'
-                : '\$$taskUsd per session since your last message',
-          ),
-          onTap: () async {
-            if (await editSettings(
-              context,
-              SettingsEditPage(
-                title: 'Task check-in',
-                fields: {'USD': taskUsd?.toString() ?? ''},
-                help: 'Minimum \$1, at most two decimals. Leave empty to turn off. Plan usage counts at its API-price estimate. Each session waits for your reply when it passes this amount.',
-                save: (values) async {
-                  final value = values['USD']!.trim();
-                  final amount = value.isEmpty ? null : double.parse(value);
-                  await repository.taskCheckIn(amount);
-                },
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () async {
+                if (await editSettings(
+                  context,
+                  SettingsEditPage(
+                    title: 'Your rules',
+                    fields: {'Rules': preferences['rules'] as String},
+                    multiline: const {'Rules'},
+                    limits: const {'Rules': 4000},
+                    help: 'Rules to ask first override other permission. Rules never authorize Nod to change its own settings.',
+                    save: (values) async {
+                      await repository.savePreferences({
+                        'rules': values['Rules'],
+                      });
+                    },
+                  ),
+                )) {
+                  await state.reload();
+                }
+              },
+            ),
+            ListTile(
+              title: const Text('Task check-in'),
+              subtitle: Text(
+                taskUsd == null
+                    ? 'Off'
+                    : '\$$taskUsd per session since your last message',
               ),
-            )) {
-              await state.reload();
-            }
-          },
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () async {
+                if (await editSettings(
+                  context,
+                  SettingsEditPage(
+                    title: 'Task check-in',
+                    fields: {'USD': taskUsd?.toString() ?? ''},
+                    labels: const {'USD': 'Amount in US dollars'},
+                    help: 'Minimum \$1, at most two decimals. Leave empty to turn off. Plan usage counts at its API-price estimate. Each session waits for your reply when it passes this amount.',
+                    save: (values) async {
+                      final value = values['USD']!.trim();
+                      final amount = value.isEmpty ? null : double.parse(value);
+                      await repository.taskCheckIn(amount);
+                    },
+                  ),
+                )) {
+                  await state.reload();
+                }
+              },
+            ),
+          ],
         ),
       ],
     );
@@ -310,118 +366,138 @@ Widget _voice(
               localReady,
         )
         .toList();
-    return ListView(
+    return NodPageBody(
       children: [
-        ListTile(
-          title: const Text('Speech recognition'),
-          subtitle: Text(
-            data['transcription'] == true
-                ? 'Available on your Nod server'
-                : 'Not ready on your Nod server',
-          ),
-        ),
-        ListTile(
-          title: const Text('Spoken replies'),
-          trailing: DropdownButton<String>(
-            value: data['speechReply'] as String,
-            items: const [
-              DropdownMenuItem(value: 'auto', child: Text('Auto')),
-              DropdownMenuItem(value: 'voice', child: Text('After audio')),
-              DropdownMenuItem(value: 'always', child: Text('Always')),
-              DropdownMenuItem(value: 'never', child: Text('Off')),
-            ],
-            onChanged: (value) => state.change(
-              () => repository.savePreferences({'speechReply': value}),
+        NodGroup(
+          children: [
+            ListTile(
+              title: const Text('Speech recognition'),
+              subtitle: Text(
+                data['transcription'] == true
+                    ? 'Available on your Nod server'
+                    : 'Not ready on your Nod server',
+              ),
             ),
-          ),
-        ),
-        RadioGroup<String>(
-          groupValue: data['speechVoice'] as String? ?? '',
-          onChanged: (value) => state.change(() async {
-            await preview.stop();
-            return repository.savePreferences({
-              'speechVoice': value == '' ? null : value,
-            });
-          }),
-          child: Column(
-            children: [
-              const RadioListTile(value: '', title: Text('Automatic voice')),
-              for (final voice in voices)
-                RadioListTile(
-                  value: voice['id'] as String,
-                  title: Text(voice['name'] as String),
-                  subtitle: Text(
-                    '${voice['engine']} · ${voice['description']}',
-                  ),
-                ),
-            ],
-          ),
-        ),
-        ListTile(
-          title: const Text('Voice preview'),
-          subtitle: Text(
-            preview.error ??
-                (preview.loading
-                    ? 'Preparing preview. Stop discards the result; the request is not retried.'
-                    : preview.playing
-                    ? 'Playing preview'
-                    : 'Hear the selected voice.'),
-          ),
-          trailing: TextButton.icon(
-            onPressed: preview.loading || preview.playing
-                ? preview.stop
-                : () => preview.start(
-                    data['speechVoice'] as String?,
-                    Localizations.localeOf(context).toLanguageTag(),
-                  ),
-            icon: Icon(
-              preview.loading || preview.playing
-                  ? Icons.stop
-                  : Icons.play_arrow,
-            ),
-            label: Text(
-              preview.loading || preview.playing
-                  ? 'Stop preview'
-                  : 'Preview voice',
-            ),
-          ),
-        ),
-        if (data['voicesError'] != null)
-          const ListTile(
-            title: Text(
-              'Some voices could not be loaded. Refresh the catalog.',
-            ),
-          ),
-        ListTile(
-          title: const Text('Refresh voice catalog'),
-          trailing: const Icon(Icons.refresh),
-          onTap: () => state.change(repository.refreshVoices),
-        ),
-        if (data['local'] != null)
-          ListTile(
-            title: const Text('Free audio on your Nod server'),
-            subtitle: Text(
-              'State: ${settingsMap(data['local'])['state']}. Downloads run on the server, not this phone.',
-            ),
-            onTap: () async {
-              if (await confirmSettings(
+            ListTile(
+              title: const Text('Spoken replies'),
+              trailing: _choice(
                 context,
-                'Download free audio?',
-                'Download voice and recognition models on the computer running Nod?',
-              )) {
-                await state.change(
-                  () => repository.prepareSpeech(
-                    Localizations.localeOf(context).toLanguageTag(),
+                data['speechReply'] as String,
+                const {
+                  'auto': 'Auto',
+                  'voice': 'After audio',
+                  'always': 'Always',
+                  'never': 'Off',
+                },
+                (value) => state.change(
+                  () => repository.savePreferences({'speechReply': value}),
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: NodSpacing.lg),
+        NodGroup(
+          title: 'Voice',
+          children: [
+            RadioGroup<String>(
+              groupValue: data['speechVoice'] as String? ?? '',
+              onChanged: (value) => state.change(() async {
+                await preview.stop();
+                return repository.savePreferences({
+                  'speechVoice': value == '' ? null : value,
+                });
+              }),
+              child: Column(
+                children: [
+                  const RadioListTile(
+                    value: '',
+                    title: Text('Automatic voice'),
                   ),
-                );
-              }
-            },
-          ),
-        const ListTile(
-          title: Text('Microphone'),
-          subtitle: Text(
-            'Recording uses the system microphone. Grant microphone permission when recording in chat. Manage denied permission in device settings.',
-          ),
+                  for (final voice in voices)
+                    RadioListTile(
+                      value: voice['id'] as String,
+                      title: Text(voice['name'] as String),
+                      subtitle: Text(
+                        '${voice['engine']} · ${voice['description']}',
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            ListTile(
+              title: const Text('Voice preview'),
+              subtitle: Text(
+                preview.error ??
+                    (preview.loading
+                        ? 'Preparing preview. Stop discards the result; the request is not retried.'
+                        : preview.playing
+                        ? 'Playing preview'
+                        : 'Hear the selected voice.'),
+              ),
+              trailing: TextButton.icon(
+                onPressed: preview.loading || preview.playing
+                    ? preview.stop
+                    : () => preview.start(
+                        data['speechVoice'] as String?,
+                        Localizations.localeOf(context).toLanguageTag(),
+                      ),
+                icon: Icon(
+                  preview.loading || preview.playing
+                      ? Icons.stop
+                      : Icons.play_arrow,
+                ),
+                label: Text(
+                  preview.loading || preview.playing
+                      ? 'Stop preview'
+                      : 'Preview voice',
+                ),
+              ),
+            ),
+            if (data['voicesError'] != null)
+              const ListTile(
+                title: Text(
+                  'Some voices could not be loaded. Refresh the catalog.',
+                ),
+              ),
+            ListTile(
+              title: const Text('Refresh voice catalog'),
+              trailing: const Icon(Icons.refresh),
+              onTap: () => state.change(repository.refreshVoices),
+            ),
+          ],
+        ),
+        const SizedBox(height: NodSpacing.lg),
+        NodGroup(
+          children: [
+            if (data['local'] != null)
+              ListTile(
+                title: const Text('Free audio on your Nod server'),
+                subtitle: Text(
+                  'State: ${settingsMap(data['local'])['state']}. Downloads run on the server, not this phone.',
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () async {
+                  if (await confirmSettings(
+                    context,
+                    'Download free audio?',
+                    'Download voice and recognition models on the computer running Nod?',
+                  )) {
+                    await state.change(
+                      () => repository.prepareSpeech(
+                        Localizations.localeOf(context).toLanguageTag(),
+                      ),
+                    );
+                  }
+                },
+              ),
+            const ListTile(
+              title: Text('Microphone'),
+              subtitle: Text(
+                'Recording uses the system microphone. Grant microphone permission when recording in chat. Manage denied permission in device settings.',
+              ),
+            ),
+          ],
         ),
       ],
     );
@@ -456,55 +532,67 @@ Widget _privacy(NodSettingsRepository repository) => SettingsSection(
       await state.change(() => repository.saveAccount({key: value}));
     }
 
-    return ListView(
+    return NodPageBody(
       children: [
-        SwitchListTile(
-          title: const Text('Share usage data'),
-          subtitle: const Text(
-            'Turning off stops new sends. Previously stored data is deleted by request.',
-          ),
-          value: account['usageData'] == true,
-          onChanged: (value) => share('usageData', value),
-        ),
-        if (capabilities['traces'] == true)
-          SwitchListTile(
-            title: const Text('Share conversation traces'),
-            subtitle: const Text(
-              'Includes conversation content. Pseudonymised, not anonymous.',
+        NodGroup(
+          title: 'Sharing',
+          children: [
+            SwitchListTile(
+              title: const Text('Share usage data'),
+              subtitle: const Text(
+                'Turning off stops new sends. Previously stored data is deleted by request.',
+              ),
+              value: account['usageData'] == true,
+              onChanged: (value) => share('usageData', value),
             ),
-            value: account['traces'] == true,
-            onChanged: (value) => share('traces', value),
-          ),
-        if (configuration['conversationResetEnabled'] == true)
-          ListTile(
-            title: const Text('Reset conversation'),
-            subtitle: const Text(
-              'Start a new conversation and stop current work. Memory is kept.',
-            ),
-            onTap: () async {
-              final threadId = settingsText(appState, 'threadId');
-              if (await confirmSettings(
-                context,
-                'Reset conversation?',
-                'This stops current work and starts a fresh conversation. Existing memory is kept.',
-              )) {
-                await state.change(
-                  () => repository.resetConversation(threadId),
-                );
-              }
-            },
-          ),
-        const ListTile(
-          title: Text('Remove all data'),
-          subtitle: Text(
-            'This is a desktop-only operation. On a self-hosted server, its administrator must stop Nod and remove its data. Mobile does not erase the paired server.',
-          ),
+            if (capabilities['traces'] == true)
+              SwitchListTile(
+                title: const Text('Share conversation traces'),
+                subtitle: const Text(
+                  'Includes conversation content. Pseudonymised, not anonymous.',
+                ),
+                value: account['traces'] == true,
+                onChanged: (value) => share('traces', value),
+              ),
+          ],
         ),
-        const ListTile(
-          title: Text('Request deletion of shared data'),
-          subtitle: Text(
-            'Contact privacy@n8n.io. Turning sharing off does not delete data already sent.',
-          ),
+        const SizedBox(height: NodSpacing.lg),
+        NodGroup(
+          title: 'Your data',
+          children: [
+            if (configuration['conversationResetEnabled'] == true)
+              ListTile(
+                title: const Text('Reset conversation'),
+                subtitle: const Text(
+                  'Start a new conversation and stop current work. Memory is kept.',
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () async {
+                  final threadId = settingsText(appState, 'threadId');
+                  if (await confirmSettings(
+                    context,
+                    'Reset conversation?',
+                    'This stops current work and starts a fresh conversation. Existing memory is kept.',
+                  )) {
+                    await state.change(
+                      () => repository.resetConversation(threadId),
+                    );
+                  }
+                },
+              ),
+            const ListTile(
+              title: Text('Remove all data'),
+              subtitle: Text(
+                'This is a desktop-only operation. On a self-hosted server, its administrator must stop Nod and remove its data. Mobile does not erase the paired server.',
+              ),
+            ),
+            const ListTile(
+              title: Text('Request deletion of shared data'),
+              subtitle: Text(
+                'Contact privacy@n8n.io. Turning sharing off does not delete data already sent.',
+              ),
+            ),
+          ],
         ),
       ],
     );

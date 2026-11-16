@@ -226,176 +226,145 @@ class _NodUsagePageState extends State<NodUsagePage>
   Widget build(BuildContext context) {
     final report = _report;
     final theme = Theme.of(context);
-    return RefreshIndicator(
+    return NodPageBody(
+      listKey: const Key('usage-page'),
       onRefresh: _load,
-      child: ListView(
-        key: const Key('usage-page'),
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.all(NodSpacing.lg),
-        children: [
-          Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 760),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (_loading && report == null)
-                    const LinearProgressIndicator(),
-                  if (_error != null) ...[
-                    const SizedBox(height: NodSpacing.md),
-                    Semantics(
-                      liveRegion: true,
-                      child: Text(
-                        _error!,
-                        style: TextStyle(color: theme.colorScheme.error),
-                      ),
-                    ),
-                    TextButton(
-                      onPressed: _loading ? null : _load,
-                      child: const Text('Try again'),
-                    ),
-                  ],
-                  if (report != null) ...[
-                    UsageSummary(report: report),
-                    if (report.planUsage || report.unpriced)
-                      ExpansionTile(
-                        tilePadding: EdgeInsets.zero,
-                        leading: const Icon(Icons.info_outline, size: 20),
-                        title: const Text('How usage is counted'),
-                        children: [
-                          if (report.planUsage)
-                            Padding(
-                              padding: const EdgeInsets.only(bottom: 12),
-                              child: Text(
-                                'ChatGPT plan usage is separate from API spending. Its estimated API-price equivalent is ${usageMoney(report.planUsd)}; this is not an additional charge.',
-                              ),
-                            ),
-                          if (report.unpriced)
-                            const Padding(
-                              padding: EdgeInsets.only(bottom: 12),
-                              child: Text(
-                                'Some usage has no recorded price, such as local or free models. It is not included in API spending.',
-                              ),
-                            ),
-                        ],
-                      ),
-                    const SizedBox(height: NodSpacing.sm),
-                    ExpansionTile(
-                      tilePadding: EdgeInsets.zero,
-                      title: const Text('Manage monthly limit'),
-                      children: [
-                        const Text(
-                          'At the limit, new requests pause until next month. Only paid usage counts.',
-                        ),
-                        const SizedBox(height: NodSpacing.md),
-                        TextField(
-                          key: const Key('usage-monthly-limit'),
-                          controller: _limitInput,
-                          focusNode: _limitFocus,
-                          enabled: !_saving && !_loading && !_paging,
-                          keyboardType: const TextInputType.numberWithOptions(
-                            decimal: true,
-                          ),
-                          decoration: const InputDecoration(
-                            labelText: 'Monthly limit in US dollars',
-                            prefixText: '\$',
-                          ),
-                          onChanged: (_) => _limitDirty = true,
-                          onSubmitted: (_) => _submit(),
-                        ),
-                        const SizedBox(height: NodSpacing.sm),
-                        Wrap(
-                          spacing: 8,
-                          children: [
-                            FilledButton(
-                              onPressed: _saving || _loading || _paging
-                                  ? null
-                                  : _submit,
-                              child: Text(_saving ? 'Saving…' : 'Save limit'),
-                            ),
-                            if (report.limit != null)
-                              TextButton(
-                                onPressed: _saving || _loading || _paging
-                                    ? null
-                                    : _remove,
-                                child: const Text('Remove limit'),
-                              ),
-                          ],
-                        ),
-                        if (_limitMessage != null)
-                          Semantics(
-                            liveRegion: true,
-                            child: Text(_limitMessage!),
-                          ),
-                        const SizedBox(height: NodSpacing.md),
-                      ],
-                    ),
-                    ExpansionTile(
-                      tilePadding: EdgeInsets.zero,
-                      title: const Text('Daily API spending'),
-                      children: [
-                        for (
-                          var index = 0;
-                          index < report.daily.length;
-                          index++
-                        )
-                          Padding(
-                            padding: const EdgeInsets.symmetric(
-                              vertical: NodSpacing.sm,
-                            ),
-                            child: Row(
-                              children: [
-                                Expanded(child: Text('Day ${index + 1}')),
-                                Text(usageMoney(report.daily[index])),
-                              ],
-                            ),
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: NodSpacing.lg),
-                    Text('Activity', style: theme.textTheme.titleLarge),
-                    const SizedBox(height: NodSpacing.sm),
-                    if (_entries.isEmpty)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: NodSpacing.lg),
-                        child: Text(
-                          'No activity yet. Your requests and their recorded costs will appear here.',
-                        ),
-                      ),
-                    for (final entry in _entries) ...[
-                      UsageActivityTile(key: ValueKey(entry.id), entry: entry),
-                      const Divider(height: 1),
-                    ],
-                    if (_pageError != null)
-                      Text(
-                        _pageError!,
-                        style: TextStyle(color: theme.colorScheme.error),
-                      ),
-                    if (_next != null)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(
-                          vertical: NodSpacing.md,
-                        ),
-                        child: OutlinedButton(
-                          onPressed: _paging || _loading || _saving
-                              ? null
-                              : _more,
-                          child: Text(
-                            _paging
-                                ? 'Loading…'
-                                : _pageError != null
-                                ? 'Retry loading activity'
-                                : 'Load more activity',
-                          ),
-                        ),
-                      ),
-                  ],
-                ],
-              ),
+      children: [
+        if (_loading && report == null) const LinearProgressIndicator(),
+        if (_error != null) ...[
+          const SizedBox(height: NodSpacing.md),
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              _error!,
+              style: TextStyle(color: theme.colorScheme.error),
             ),
           ),
+          TextButton(
+            onPressed: _loading ? null : _load,
+            child: const Text('Try again'),
+          ),
         ],
-      ),
+        if (report != null) ...[
+          UsageSummary(report: report),
+          if (report.planUsage || report.unpriced)
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              expandedCrossAxisAlignment: CrossAxisAlignment.start,
+              leading: const Icon(Icons.info_outline, size: 20),
+              title: const Text('How usage is counted'),
+              children: [
+                if (report.planUsage)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      'ChatGPT plan usage is separate from API spending. Its estimated API-price equivalent is ${usageMoney(report.planUsd)}; this is not an additional charge.',
+                    ),
+                  ),
+                if (report.unpriced)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 12),
+                    child: Text(
+                      'Some usage has no recorded price, such as local or free models. It is not included in API spending.',
+                    ),
+                  ),
+              ],
+            ),
+          const SizedBox(height: NodSpacing.sm),
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            expandedCrossAxisAlignment: CrossAxisAlignment.start,
+            title: const Text('Manage monthly limit'),
+            children: [
+              const Text(
+                'At the limit, new requests pause until next month. Only paid usage counts.',
+              ),
+              const SizedBox(height: NodSpacing.md),
+              TextField(
+                key: const Key('usage-monthly-limit'),
+                controller: _limitInput,
+                focusNode: _limitFocus,
+                enabled: !_saving && !_loading && !_paging,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: const InputDecoration(
+                  labelText: 'Monthly limit in US dollars',
+                  prefixText: '\$',
+                ),
+                onChanged: (_) => _limitDirty = true,
+                onSubmitted: (_) => _submit(),
+              ),
+              const SizedBox(height: NodSpacing.sm),
+              Wrap(
+                spacing: 8,
+                children: [
+                  FilledButton(
+                    onPressed: _saving || _loading || _paging ? null : _submit,
+                    child: Text(_saving ? 'Saving…' : 'Save limit'),
+                  ),
+                  if (report.limit != null)
+                    TextButton(
+                      onPressed: _saving || _loading || _paging
+                          ? null
+                          : _remove,
+                      child: const Text('Remove limit'),
+                    ),
+                ],
+              ),
+              if (_limitMessage != null)
+                Semantics(liveRegion: true, child: Text(_limitMessage!)),
+              const SizedBox(height: NodSpacing.md),
+            ],
+          ),
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            title: const Text('Daily API spending'),
+            children: [
+              for (var index = 0; index < report.daily.length; index++)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: NodSpacing.sm),
+                  child: Row(
+                    children: [
+                      Expanded(child: Text('Day ${index + 1}')),
+                      Text(usageMoney(report.daily[index])),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: NodSpacing.lg),
+          Text('Activity', style: theme.textTheme.titleLarge),
+          const SizedBox(height: NodSpacing.sm),
+          if (_entries.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: NodSpacing.lg),
+              child: Text(
+                'No activity yet. Your requests and their recorded costs will appear here.',
+              ),
+            ),
+          for (final entry in _entries) ...[
+            UsageActivityTile(key: ValueKey(entry.id), entry: entry),
+            const Divider(height: 1),
+          ],
+          if (_pageError != null)
+            Text(_pageError!, style: TextStyle(color: theme.colorScheme.error)),
+          if (_next != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: NodSpacing.md),
+              child: OutlinedButton(
+                onPressed: _paging || _loading || _saving ? null : _more,
+                child: Text(
+                  _paging
+                      ? 'Loading…'
+                      : _pageError != null
+                      ? 'Retry loading activity'
+                      : 'Load more activity',
+                ),
+              ),
+            ),
+        ],
+      ],
     );
   }
 }

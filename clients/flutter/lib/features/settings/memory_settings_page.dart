@@ -3,6 +3,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../api/settings_repository.dart';
 import '../../core/settings.dart';
+import '../../design_system/design_system.dart';
 import 'settings_media.dart';
 import 'settings_widgets.dart';
 
@@ -94,40 +95,41 @@ class _NodMemorySettingsPageState extends State<NodMemorySettingsPage> {
           ].whereType<String>().any(
             (value) => value.toLowerCase().contains(search.toLowerCase()),
           );
-      return ListView(
-        padding: const EdgeInsets.all(12),
+      return NodPageBody(
         children: [
-          SwitchListTile(
-            title: const Text('Save new notes'),
-            value: data['saving'] == true,
-            onChanged: (value) => state.change(
-              () => repository.saveMemorySettings({'saving': value}),
-            ),
+          NodGroup(
+            footer: 'Memory is context, not permission. Actions still pass the trust check.',
+            children: [
+              SwitchListTile(
+                title: const Text('Save new notes'),
+                value: data['saving'] == true,
+                onChanged: (value) => state.change(
+                  () => repository.saveMemorySettings({'saving': value}),
+                ),
+              ),
+              SwitchListTile(
+                title: const Text('Include sensitive details'),
+                subtitle: const Text(
+                  'Allow background learning about health, religion, politics, and similar topics.',
+                ),
+                value: data['sensitive'] == true,
+                onChanged: (value) async {
+                  if (!value ||
+                      await confirmSettings(
+                        context,
+                        'Include sensitive details?',
+                        'Allow Nod to learn sensitive details from your own messages in the background?',
+                      )) {
+                    await state.change(
+                      () => repository.saveMemorySettings({'sensitive': value}),
+                    );
+                  }
+                },
+              ),
+            ],
           ),
-          SwitchListTile(
-            title: const Text('Include sensitive details'),
-            subtitle: const Text(
-              'Allow background learning about health, religion, politics, and similar topics.',
-            ),
-            value: data['sensitive'] == true,
-            onChanged: (value) async {
-              if (!value ||
-                  await confirmSettings(
-                    context,
-                    'Include sensitive details?',
-                    'Allow Nod to learn sensitive details from your own messages in the background?',
-                  )) {
-                await state.change(
-                  () => repository.saveMemorySettings({'sensitive': value}),
-                );
-              }
-            },
-          ),
-          const Text(
-            'Memory is context, not permission. Actions still pass the trust check.',
-          ),
+          const SizedBox(height: NodSpacing.xs),
           Wrap(
-            spacing: 8,
             children: [
               TextButton(
                 onPressed: () => note(context, state, null),
@@ -169,14 +171,17 @@ class _NodMemorySettingsPageState extends State<NodMemorySettingsPage> {
               ),
             ],
           ),
+          const SizedBox(height: NodSpacing.sm),
           TextField(
             decoration: const InputDecoration(
               labelText: 'Search notes and skills',
+              prefixIcon: Icon(Icons.search),
             ),
             onChanged: (value) => setState(() => search = value),
           ),
+          const SizedBox(height: NodSpacing.xs),
           Wrap(
-            spacing: 6,
+            spacing: NodSpacing.xs,
             children: [
               for (final value in [
                 'All',
@@ -208,9 +213,13 @@ class _NodMemorySettingsPageState extends State<NodMemorySettingsPage> {
                 )
                 .map(
                   (item) => Card(
+                    margin: const EdgeInsets.only(top: NodSpacing.xs),
                     child: ExpansionTile(
+                      expandedCrossAxisAlignment: CrossAxisAlignment.start,
                       title: Text(settingsText(item, 'text')),
-                      subtitle: Text('${item['area']} · ${item['status']}'),
+                      subtitle: Text(
+                        '${memoryAreas.contains(item['area']) ? memoryLabels[memoryAreas.indexOf(item['area'] as String)] : item['area']} · ${const {'stated': 'Confirmed', 'observed': 'Learned', 'tentative': 'Mentioned once'}[item['status']] ?? item['status']}',
+                      ),
                       children: [
                         ListTile(
                           title: const Text('Details'),
@@ -240,47 +249,58 @@ class _NodMemorySettingsPageState extends State<NodMemorySettingsPage> {
                                   )
                                 : null,
                           ),
-                        Wrap(
-                          children: [
-                            TextButton(
-                              onPressed: () => note(context, state, item),
-                              child: const Text('Edit'),
-                            ),
-                            if (item['status'] != 'stated')
+                        const Divider(height: 1),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: NodSpacing.xs,
+                          ),
+                          child: Wrap(
+                            children: [
+                              TextButton(
+                                onPressed: () => note(context, state, item),
+                                child: const Text('Edit'),
+                              ),
+                              if (item['status'] != 'stated')
+                                TextButton(
+                                  onPressed: () => state.change(
+                                    () => repository.editNote(
+                                      settingsText(item, 'path'),
+                                      {'confirm': true},
+                                    ),
+                                  ),
+                                  child: const Text('Confirm note'),
+                                ),
                               TextButton(
                                 onPressed: () => state.change(
-                                  () => repository.editNote(
+                                  () => repository.archiveNote(
                                     settingsText(item, 'path'),
-                                    {'confirm': true},
                                   ),
                                 ),
-                                child: const Text('Confirm note'),
+                                child: const Text('Archive'),
                               ),
-                            TextButton(
-                              onPressed: () => state.change(
-                                () => repository.archiveNote(
-                                  settingsText(item, 'path'),
+                              TextButton(
+                                style: TextButton.styleFrom(
+                                  foregroundColor: Theme.of(context)
+                                      .colorScheme
+                                      .error,
                                 ),
+                                onPressed: () async {
+                                  if (await confirmSettings(
+                                    context,
+                                    'Forget note?',
+                                    'Permanently delete this note and its archived versions?',
+                                  )) {
+                                    await state.change(
+                                      () => repository.forgetNote(
+                                        settingsText(item, 'path'),
+                                      ),
+                                    );
+                                  }
+                                },
+                                child: const Text('Forget'),
                               ),
-                              child: const Text('Archive'),
-                            ),
-                            TextButton(
-                              onPressed: () async {
-                                if (await confirmSettings(
-                                  context,
-                                  'Forget note?',
-                                  'Permanently delete this note and its archived versions?',
-                                )) {
-                                  await state.change(
-                                    () => repository.forgetNote(
-                                      settingsText(item, 'path'),
-                                    ),
-                                  );
-                                }
-                              },
-                              child: const Text('Forget'),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ],
                     ),
@@ -291,6 +311,7 @@ class _NodMemorySettingsPageState extends State<NodMemorySettingsPage> {
                 .where(matches)
                 .map(
                   (item) => Card(
+                    margin: const EdgeInsets.only(top: NodSpacing.xs),
                     child: ListTile(
                       title: Text(settingsText(item, 'text')),
                       subtitle: Text('${item['reason']} · ${item['archived']}'),
@@ -326,77 +347,116 @@ class _NodMemorySettingsPageState extends State<NodMemorySettingsPage> {
                 .where(matches)
                 .map(
                   (item) => Card(
+                    margin: const EdgeInsets.only(top: NodSpacing.xs),
                     child: ExpansionTile(
+                      expandedCrossAxisAlignment: CrossAxisAlignment.start,
                       title: Text(settingsText(item, 'name')),
                       subtitle: Text(settingsText(item, 'description')),
                       children: [
                         Padding(
-                          padding: const EdgeInsets.all(16),
-                          child: SelectableText(settingsText(item, 'body')),
-                        ),
-                        ListTile(
-                          subtitle: Text(
-                            'Learned: ${item['learned']}\nUpdated: ${item['updated']}\nTask: ${item['task'] ?? 'Unavailable'}',
+                          padding: const EdgeInsets.fromLTRB(
+                            NodSpacing.md,
+                            0,
+                            NodSpacing.md,
+                            NodSpacing.md,
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              SelectableText(settingsText(item, 'body')),
+                              const SizedBox(height: NodSpacing.xs),
+                              Text(
+                                [
+                                  if (item['learned'] != null)
+                                    'Learned: ${item['learned']}',
+                                  if (item['updated'] != null)
+                                    'Updated: ${item['updated']}',
+                                  'Task: ${item['task'] ?? 'Unavailable'}',
+                                ].join('\n'),
+                                style: Theme.of(context).textTheme.bodySmall
+                                    ?.copyWith(
+                                      color: context.nodColors.mutedForeground,
+                                    ),
+                              ),
+                            ],
                           ),
                         ),
-                        Wrap(
-                          children: [
-                            TextButton(
-                              onPressed: () async {
-                                if (await editSettings(
-                                  context,
-                                  SettingsEditPage(
-                                    title: 'Edit skill',
-                                    fields: {
-                                      'Description': settingsText(
-                                        item,
-                                        'description',
-                                      ),
-                                      'Steps': settingsText(item, 'body'),
-                                    },
-                                    limits: const {
-                                      'Description': 200,
-                                      'Steps': 6000,
-                                    },
-                                    multiline: const {'Steps'},
-                                    save: (values) async {
-                                      await repository.editSkill(
-                                        settingsText(item, 'name'),
-                                        values['Description']!,
-                                        values['Steps']!,
-                                      );
-                                    },
-                                  ),
-                                )) {
-                                  await state.reload();
-                                }
-                              },
-                              child: const Text('Edit'),
-                            ),
-                            TextButton(
-                              onPressed: () async {
-                                if (await confirmSettings(
-                                  context,
-                                  'Forget skill?',
-                                  'Permanently delete this learned procedure?',
-                                )) {
-                                  await state.change(
-                                    () => repository.forgetSkill(
-                                      settingsText(item, 'name'),
+                        const Divider(height: 1),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: NodSpacing.xs,
+                          ),
+                          child: Wrap(
+                            children: [
+                              TextButton(
+                                onPressed: () async {
+                                  if (await editSettings(
+                                    context,
+                                    SettingsEditPage(
+                                      title: 'Edit skill',
+                                      fields: {
+                                        'Description': settingsText(
+                                          item,
+                                          'description',
+                                        ),
+                                        'Steps': settingsText(item, 'body'),
+                                      },
+                                      limits: const {
+                                        'Description': 200,
+                                        'Steps': 6000,
+                                      },
+                                      multiline: const {'Steps'},
+                                      save: (values) async {
+                                        await repository.editSkill(
+                                          settingsText(item, 'name'),
+                                          values['Description']!,
+                                          values['Steps']!,
+                                        );
+                                      },
                                     ),
-                                  );
-                                }
-                              },
-                              child: const Text('Forget'),
-                            ),
-                          ],
+                                  )) {
+                                    await state.reload();
+                                  }
+                                },
+                                child: const Text('Edit'),
+                              ),
+                              TextButton(
+                                style: TextButton.styleFrom(
+                                  foregroundColor: Theme.of(context)
+                                      .colorScheme
+                                      .error,
+                                ),
+                                onPressed: () async {
+                                  if (await confirmSettings(
+                                    context,
+                                    'Forget skill?',
+                                    'Permanently delete this learned procedure?',
+                                  )) {
+                                    await state.change(
+                                      () => repository.forgetSkill(
+                                        settingsText(item, 'name'),
+                                      ),
+                                    );
+                                  }
+                                },
+                                child: const Text('Forget'),
+                              ),
+                            ],
+                          ),
                         ),
                       ],
                     ),
                   ),
                 ),
           if (notes.isEmpty && skills.isEmpty && archive.isEmpty)
-            const ListTile(title: Text('Nothing remembered yet')),
+            const Padding(
+              padding: EdgeInsets.only(top: NodSpacing.xs),
+              child: NodEmptyState(
+                icon: Icons.psychology_outlined,
+                title: 'Nothing remembered yet',
+                message: 'Notes you add, and notes Nod saves from your messages, appear here.',
+              ),
+            ),
         ],
       );
     },
@@ -445,19 +505,23 @@ class _MemoryImportPageState extends State<_MemoryImportPage> {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Import memory')),
-    body: ListView(
-      padding: const EdgeInsets.all(16),
+    body: NodPageBody(
       children: [
-        const Text(
+        Text(
           'Paste notes from another assistant. Use one fact per bullet under About you, Preferences, People, Routines, or Lessons headings. Review before importing. Secrets and duplicates are skipped by the server.',
+          style: Theme.of(context).textTheme.bodyMedium
+              ?.copyWith(color: context.nodColors.textSecondary),
         ),
+        const SizedBox(height: NodSpacing.lg),
         if (notes == null) ...[
           TextField(
             controller: input,
+            minLines: 8,
             maxLines: 12,
             maxLength: 100000,
             decoration: const InputDecoration(labelText: 'Notes to import'),
           ),
+          const SizedBox(height: NodSpacing.xs),
           FilledButton(
             onPressed: () => setState(() {
               notes = parseNodMemoryImport(input.text);
@@ -466,32 +530,48 @@ class _MemoryImportPageState extends State<_MemoryImportPage> {
             child: const Text('Review notes'),
           ),
         ] else if (result != null) ...[
-          Text('Import result: ${result!['imported']}'),
+          NodNotice(
+            'Import result: ${result!['imported']}',
+            tone: NodTone.success,
+          ),
+          const SizedBox(height: NodSpacing.md),
           FilledButton(
             onPressed: () => Navigator.pop(context),
             child: const Text('Done'),
           ),
         ] else ...[
-          for (var i = 0; i < notes!.length; i++)
-            CheckboxListTile(
-              value: !excluded.contains(i),
-              title: Text(notes![i].text),
-              subtitle: Text(notes![i].area),
-              onChanged: busy
-                  ? null
-                  : (value) => setState(() {
-                      if (value == true) {
-                        excluded.remove(i);
-                      } else {
-                        excluded.add(i);
-                      }
-                    }),
+          if (notes!.isEmpty)
+            const NodNotice('No notes found in the pasted text.')
+          else
+            NodGroup(
+              children: [
+                for (var i = 0; i < notes!.length; i++)
+                  CheckboxListTile(
+                    value: !excluded.contains(i),
+                    title: Text(notes![i].text),
+                    subtitle: Text(notes![i].area),
+                    onChanged: busy
+                        ? null
+                        : (value) => setState(() {
+                            if (value == true) {
+                              excluded.remove(i);
+                            } else {
+                              excluded.add(i);
+                            }
+                          }),
+                  ),
+              ],
             ),
-          if (error != null) Text(error!),
+          const SizedBox(height: NodSpacing.md),
+          if (error != null) ...[
+            NodNotice(error!, tone: NodTone.error),
+            const SizedBox(height: NodSpacing.md),
+          ],
           FilledButton(
             onPressed: busy || notes!.length == excluded.length ? null : save,
             child: Text(busy ? 'Importing' : 'Import selected notes'),
           ),
+          const SizedBox(height: NodSpacing.xs),
           TextButton(
             onPressed: busy ? null : () => setState(() => notes = null),
             child: const Text('Back'),

@@ -9,7 +9,7 @@ This is part of the [Flutter evaluation client](/contribute/mobile-evaluation/),
 
 ## Manage an account
 
-Open **Manage connections** from the app's connections entry. Search for an app to see its saved accounts.
+Open **Apps → Manage accounts and channels**. Channels are listed first, then **Connect MCP** and your apps. Search for an app to see its saved accounts.
 
 - Select **Reconnect** beside the account you intend to reconnect. The request names that saved account, not just the app.
 - Select **Add account** to request another connection. It does not remove the existing account.

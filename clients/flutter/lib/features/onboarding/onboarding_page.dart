@@ -8,6 +8,7 @@ import '../../api/settings_repository.dart';
 import '../../core/api_transport.dart';
 import '../../core/onboarding.dart';
 import '../../core/settings.dart';
+import '../../design_system/design_system.dart';
 import '../connections/connections_page.dart';
 import '../settings/model_settings_page.dart';
 import '../settings/settings_widgets.dart';
@@ -199,9 +200,29 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
     if (mounted) await reload();
   }
 
-  Widget button(String label, Future<void> Function() action) => FilledButton(
-    onPressed: busy ? null : () => run(action),
-    child: Text(label),
+  Widget button(
+    String label,
+    Future<void> Function() action, {
+    bool primary = true,
+  }) => primary
+      ? FilledButton(
+          onPressed: busy ? null : () => run(action),
+          child: Text(label),
+        )
+      : OutlinedButton(
+          onPressed: busy ? null : () => run(action),
+          child: Text(label),
+        );
+
+  Widget heading(String text) => Semantics(
+    header: true,
+    child: Text(text, style: Theme.of(context).textTheme.headlineSmall),
+  );
+
+  Widget note(String text) => Text(
+    text,
+    style: Theme.of(context).textTheme.bodyLarge
+        ?.copyWith(color: context.nodColors.textSecondary),
   );
 
   Widget choices(
@@ -213,6 +234,7 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       Text(title, style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height: NodSpacing.xxs),
       Wrap(
         spacing: 8,
         children: [
@@ -225,7 +247,6 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
             ),
         ],
       ),
-      const SizedBox(height: 16),
     ],
   );
 
@@ -237,6 +258,7 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       Text(title, style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height: NodSpacing.xxs),
       Wrap(
         spacing: 8,
         children: [
@@ -250,17 +272,18 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
             ),
         ],
       ),
-      const SizedBox(height: 16),
     ],
   );
 
   List<Widget> content() => switch (step) {
     0 => [
-      const Text('Welcome to Nod', style: TextStyle(fontSize: 28)),
-      const Text(
+      heading('Welcome to Nod'),
+      note(
         'Your assistant runs on your paired server. It checks connected apps in the background with your model, which counts as model usage. It asks before actions your words do not cover. Never enter passwords, codes, cards or API keys in chat.',
       ),
       CheckboxListTile(
+        contentPadding: EdgeInsets.zero,
+        controlAffinity: ListTileControlAffinity.leading,
         title: const Text('Share usage data'),
         subtitle: const Text(
           'Basic usage and fixed About you choices, never your messages or screen recordings.',
@@ -276,13 +299,14 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
       }),
     ],
     1 => [
-      const Text('Connect email (optional)', style: TextStyle(fontSize: 24)),
-      const Text(
+      heading('Connect email (optional)'),
+      note(
         'Connect Gmail or Outlook to help Nod suggest useful first tasks. Google or Microsoft may ask you to allow Composio. You can connect other apps here too.',
       ),
       button(
         'Connect apps',
         () => open(NodConnectionsPage(transport: widget.transport)),
+        primary: false,
       ),
       button('Continue', () async => next()),
       TextButton(
@@ -291,8 +315,8 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
       ),
     ],
     2 => [
-      const Text('About you (optional)', style: TextStyle(fontSize: 24)),
-      Text(
+      heading('About you (optional)'),
+      note(
         'Answers become one memory note when memory is on. Do not include secrets.${usage ? ' Fixed choices are also shared with the Nod team and saved on this installation’s usage profile. Your typed answers are not analytics.' : ''}',
       ),
       choices('Where would you like help?', nodProfileScopes, scope, (value) {
@@ -339,11 +363,15 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
       ),
     ],
     3 => [
-      const Text('Connect a model', style: TextStyle(fontSize: 24)),
-      const Text(
+      heading('Connect a model'),
+      note(
         'Choose the provider your paired server will use. Keys go directly to its private configuration, never chat.',
       ),
-      button('Models', () => open(NodModelSettingsPage(repository: settings))),
+      button(
+        'Models',
+        () => open(NodModelSettingsPage(repository: settings)),
+        primary: false,
+      ),
       button('Check and continue', () async {
         ready = nodOnboardingModelReady(await settings.models());
         if (!ready) throw const FormatException();
@@ -351,9 +379,9 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
       }),
     ],
     4 => [
-      const Text('Help improve Nod', style: TextStyle(fontSize: 24)),
+      heading('Help improve Nod'),
       if (capability('traces')) ...[
-        const Text(
+        note(
           'Conversation traces include your messages and what Nod reads and does. Recognized personal details are removed first. Traces are pseudonymised, not anonymous, kept 14 days and never used to train AI.',
         ),
         button('Share traces', () async {
@@ -363,19 +391,21 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
         button('Not now', () async {
           await settings.saveAccount({'traces': false});
           next();
-        }),
+        }, primary: false),
       ] else ...[
-        const Text('Conversation traces are not available on this server.'),
+        note('Conversation traces are not available on this server.'),
         button('Continue', () async => next()),
       ],
       Text(
         usage
             ? 'Basic usage sharing is on. Change it in Settings → Privacy & data.'
             : 'Basic usage sharing is off.',
+        style: Theme.of(context).textTheme.bodyMedium
+            ?.copyWith(color: context.nodColors.mutedForeground),
       ),
     ],
     _ => [
-      const Text('Join us (optional)', style: TextStyle(fontSize: 24)),
+      heading('Join us (optional)'),
       if (capability('updatesEmail') && usage) ...[
         TextField(
           controller: email,
@@ -387,6 +417,8 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
           ),
         ),
         CheckboxListTile(
+          contentPadding: EdgeInsets.zero,
+          controlAffinity: ListTileControlAffinity.leading,
           value: consent,
           onChanged: busy
               ? null
@@ -399,17 +431,23 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
           ),
         ),
       ],
-      for (final link in {
-        'Discord': 'https://discord.gg/n8n',
-        'Forum': 'https://community.n8n.io/c/n8n-labs/48',
-      }.entries)
-        TextButton(
-          onPressed: () => launchUrl(
-            Uri.parse(link.value),
-            mode: LaunchMode.externalApplication,
-          ),
-          child: Text(link.key),
-        ),
+      Wrap(
+        alignment: WrapAlignment.center,
+        children: [
+          for (final link in {
+            'Discord': 'https://discord.gg/n8n',
+            'Forum': 'https://community.n8n.io/c/n8n-labs/48',
+          }.entries)
+            TextButton.icon(
+              onPressed: () => launchUrl(
+                Uri.parse(link.value),
+                mode: LaunchMode.externalApplication,
+              ),
+              icon: const Icon(Icons.open_in_new, size: 18),
+              label: Text(link.key),
+            ),
+        ],
+      ),
       button('Start chatting', finish),
       TextButton(
         onPressed: busy ? null : () => run(() => finish(skipEmail: true)),
@@ -421,6 +459,7 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
+      titleSpacing: step > 0 && !busy ? null : NodSpacing.md,
       title: const Text('Set up Nod'),
       leading: step > 0 && !busy
           ? BackButton(
@@ -429,16 +468,15 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
               }),
             )
           : null,
+      bottom: NodProgressLine(active: busy),
     ),
     body: SafeArea(
       child: loading
           ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              padding: const EdgeInsets.all(20),
+          : NodPageBody(
+              spacing: NodSpacing.md,
               children: [
-                if (busy) const LinearProgressIndicator(),
-                if (error != null)
-                  Text(error!, semanticsLabel: 'Error: $error'),
+                if (error != null) NodNotice(error!, tone: NodTone.error),
                 if (session == null)
                   button('Try again', reload)
                 else
@@ -446,22 +484,29 @@ class _NodMobileOnboardingState extends State<NodMobileOnboarding>
                     absorbing: busy,
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
-                      spacing: 16,
+                      spacing: NodSpacing.md,
                       children: [
                         ...content(),
-                        TextButton(
-                          onPressed: () => launchUrl(
-                            Uri.parse('https://n8n.io/legal/privacy/'),
-                            mode: LaunchMode.externalApplication,
-                          ),
-                          child: const Text('Privacy policy'),
-                        ),
-                        TextButton(
-                          onPressed: () => launchUrl(
-                            Uri.parse('https://n8n.io/legal/nod-terms-of-use/'),
-                            mode: LaunchMode.externalApplication,
-                          ),
-                          child: const Text('Terms of use'),
+                        Wrap(
+                          alignment: WrapAlignment.center,
+                          children: [
+                            TextButton(
+                              onPressed: () => launchUrl(
+                                Uri.parse('https://n8n.io/legal/privacy/'),
+                                mode: LaunchMode.externalApplication,
+                              ),
+                              child: const Text('Privacy policy'),
+                            ),
+                            TextButton(
+                              onPressed: () => launchUrl(
+                                Uri.parse(
+                                  'https://n8n.io/legal/nod-terms-of-use/',
+                                ),
+                                mode: LaunchMode.externalApplication,
+                              ),
+                              child: const Text('Terms of use'),
+                            ),
+                          ],
                         ),
                       ],
                     ),

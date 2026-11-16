@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../../api/private_requests_repository.dart';
 import '../../core/private_requests.dart';
+import '../../design_system/design_system.dart';
 
 class NodPrivateBrowser extends StatefulWidget {
   const NodPrivateBrowser({
@@ -215,14 +216,29 @@ class _NodPrivateBrowserState extends State<NodPrivateBrowser>
       appBar: AppBar(title: const Text('Browser')),
       body: Column(
         children: [
-          const Padding(
-            padding: EdgeInsets.all(12),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              NodSpacing.md,
+              0,
+              NodSpacing.md,
+              NodSpacing.sm,
+            ),
             child: Text(
               'You control Nod’s browser, not your phone’s browser. Return control when finished.',
+              style: Theme.of(context).textTheme.bodyMedium
+                  ?.copyWith(color: context.nodColors.textSecondary),
             ),
           ),
           if (_error != null)
-            Padding(padding: const EdgeInsets.all(12), child: Text(_error!)),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                NodSpacing.md,
+                0,
+                NodSpacing.md,
+                NodSpacing.sm,
+              ),
+              child: NodNotice(_error!, tone: NodTone.error),
+            ),
           Expanded(
             child: image == null
                 ? Center(
@@ -323,7 +339,12 @@ class _NodPrivateBrowserState extends State<NodPrivateBrowser>
                   ),
           ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
+            padding: const EdgeInsets.fromLTRB(
+              NodSpacing.md,
+              NodSpacing.sm,
+              NodSpacing.md,
+              0,
+            ),
             child: TextField(
               controller: _text,
               enabled: _enabled,
@@ -405,11 +426,22 @@ class _NodPrivateBrowserState extends State<NodPrivateBrowser>
                       },
                 child: const Text('Reconnect view'),
               ),
-              FilledButton(
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              NodSpacing.md,
+              NodSpacing.xxs,
+              NodSpacing.md,
+              NodSpacing.sm,
+            ),
+            child: SizedBox(
+              width: double.infinity,
+              child: FilledButton(
                 onPressed: _enabled ? _returnControl : null,
                 child: const Text('Return to Nod'),
               ),
-            ],
+            ),
           ),
           SizedBox(height: MediaQuery.paddingOf(context).bottom),
         ],

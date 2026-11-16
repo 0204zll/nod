@@ -8,11 +8,8 @@ import '../../design_system/design_system.dart';
 import '../usage/usage_summary.dart' show usageMoney;
 import 'schedule_tile.dart';
 
-String scheduleDate(BuildContext context, DateTime date) {
-  final local = date.toLocal();
-  final material = MaterialLocalizations.of(context);
-  return '${material.formatMediumDate(local)} · ${material.formatTimeOfDay(TimeOfDay.fromDateTime(local), alwaysUse24HourFormat: MediaQuery.alwaysUse24HourFormatOf(context))}';
-}
+String scheduleDate(BuildContext context, DateTime date) =>
+    nodDateTime(context, date);
 
 class NodScheduledPage extends StatefulWidget {
   const NodScheduledPage({
@@ -265,9 +262,6 @@ class _NodScheduledPageState extends State<NodScheduledPage>
           runSpacing: NodSpacing.xs,
           children: [
             OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(
-                foregroundColor: theme.colorScheme.onSurface,
-              ),
               onPressed: disabled || (!schedule.enabled && !schedule.canResume)
                   ? null
                   : () => _change(
@@ -326,150 +320,130 @@ class _NodScheduledPageState extends State<NodScheduledPage>
           schedules?.where((s) => s.enabled && s.nextRun == null).toList() ??
           [],
     };
-    return ListView(
-      padding: const EdgeInsets.all(NodSpacing.lg),
+    return NodPageBody(
       children: [
-        Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 840),
+        Text(
+          'A little planning. More off your plate.',
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: colors.textSecondary,
+          ),
+        ),
+        const SizedBox(height: NodSpacing.md),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: FilledButton.icon(
+            onPressed: widget.onOpenChat,
+            icon: const Icon(Icons.add, size: 20),
+            label: const Text('Plan something in chat'),
+          ),
+        ),
+        if (_loading && schedules == null)
+          const Padding(
+            padding: EdgeInsets.only(top: NodSpacing.lg),
+            child: LinearProgressIndicator(),
+          ),
+        if (_error != null)
+          Padding(
+            padding: const EdgeInsets.only(top: NodSpacing.lg),
+            child: Semantics(
+              liveRegion: true,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.cloud_off_outlined,
+                    color: colors.textSecondary,
+                    size: 20,
+                  ),
+                  const SizedBox(width: NodSpacing.sm),
+                  Expanded(
+                    child: Text(
+                      _error!,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: colors.textSecondary,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        if (schedules != null && schedules.isEmpty)
+          Container(
+            margin: const EdgeInsets.only(top: NodSpacing.xl),
+            padding: const EdgeInsets.symmetric(
+              horizontal: NodSpacing.lg,
+              vertical: NodSpacing.xxl,
+            ),
+            decoration: BoxDecoration(
+              color: colors.surfaceSubtle,
+              borderRadius: BorderRadius.circular(NodRadii.card),
+            ),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Scheduled', style: theme.textTheme.headlineMedium),
-                const SizedBox(height: NodSpacing.xs),
+                Icon(
+                  Icons.event_available_outlined,
+                  size: 44,
+                  color: colors.textSecondary,
+                ),
+                const SizedBox(height: NodSpacing.lg),
+                Text('Make room for later', style: theme.textTheme.titleLarge),
+                const SizedBox(height: NodSpacing.sm),
                 Text(
-                  'A little planning. More off your plate.',
-                  style: theme.textTheme.bodyLarge?.copyWith(
+                  'A morning briefing, a weekly check-in, a reminder at just the right time. Tell Nod what you need and when.',
+                  style: theme.textTheme.bodyMedium?.copyWith(
                     color: colors.textSecondary,
                   ),
                 ),
                 const SizedBox(height: NodSpacing.lg),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: colors.accent,
-                      foregroundColor: theme.colorScheme.onSecondary,
-                    ),
-                    onPressed: widget.onOpenChat,
-                    icon: const Icon(Icons.add, size: 20),
-                    label: const Text('Plan something in chat'),
-                  ),
-                ),
-                if (_loading && schedules == null)
-                  const Padding(
-                    padding: EdgeInsets.only(top: NodSpacing.lg),
-                    child: LinearProgressIndicator(),
-                  ),
-                if (_error != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: NodSpacing.lg),
-                    child: Semantics(
-                      liveRegion: true,
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Icon(
-                            Icons.cloud_off_outlined,
-                            color: colors.textSecondary,
-                            size: 20,
-                          ),
-                          const SizedBox(width: NodSpacing.sm),
-                          Expanded(
-                            child: Text(
-                              _error!,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: colors.textSecondary,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                if (schedules != null && schedules.isEmpty)
-                  Container(
-                    margin: const EdgeInsets.only(top: NodSpacing.xl),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: NodSpacing.lg,
-                      vertical: NodSpacing.xxl,
-                    ),
-                    decoration: BoxDecoration(
-                      color: colors.surfaceSubtle,
-                      borderRadius: BorderRadius.circular(NodRadii.card),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Icon(
-                          Icons.event_available_outlined,
-                          size: 44,
-                          color: colors.textSecondary,
-                        ),
-                        const SizedBox(height: NodSpacing.lg),
-                        Text(
-                          'Make room for later',
-                          style: theme.textTheme.titleLarge,
-                        ),
-                        const SizedBox(height: NodSpacing.sm),
-                        Text(
-                          'A morning briefing, a weekly check-in, a reminder at just the right time. Tell Nod what you need and when.',
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            color: colors.textSecondary,
-                          ),
-                        ),
-                        const SizedBox(height: NodSpacing.lg),
-                        const Text('Your schedules will appear here.'),
-                      ],
-                    ),
-                  ),
-                for (final group in groups.entries.where(
-                  (group) => group.value.isNotEmpty,
-                )) ...[
-                  const SizedBox(height: NodSpacing.xl),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          group.key,
-                          style: theme.textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                      Text(
-                        '${group.value.length}',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: colors.textSecondary,
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (group.key == 'Upcoming')
-                    Padding(
-                      padding: const EdgeInsets.only(top: NodSpacing.xxs),
-                      child: Text(
-                        'Next runs in your device’s local time',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: colors.textSecondary,
-                        ),
-                      ),
-                    ),
-                  const SizedBox(height: NodSpacing.md),
-                  for (final schedule in group.value)
-                    Padding(
-                      key: ValueKey(schedule.id),
-                      padding: const EdgeInsets.only(bottom: NodSpacing.sm),
-                      child: ScheduleTile(
-                        schedule: schedule,
-                        details: _details(schedule, disabled),
-                      ),
-                    ),
-                ],
+                const Text('Your schedules will appear here.'),
               ],
             ),
           ),
-        ),
+        for (final group in groups.entries.where(
+          (group) => group.value.isNotEmpty,
+        )) ...[
+          const SizedBox(height: NodSpacing.xl),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  group.key,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              Text(
+                '${group.value.length}',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: colors.textSecondary,
+                ),
+              ),
+            ],
+          ),
+          if (group.key == 'Upcoming')
+            Padding(
+              padding: const EdgeInsets.only(top: NodSpacing.xxs),
+              child: Text(
+                'Next runs in your device’s local time',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: colors.textSecondary,
+                ),
+              ),
+            ),
+          const SizedBox(height: NodSpacing.md),
+          for (final schedule in group.value)
+            Padding(
+              key: ValueKey(schedule.id),
+              padding: const EdgeInsets.only(bottom: NodSpacing.sm),
+              child: ScheduleTile(
+                schedule: schedule,
+                details: _details(schedule, disabled),
+              ),
+            ),
+        ],
       ],
     );
   }
@@ -547,9 +521,6 @@ class _ScheduleHistoryState extends State<_ScheduleHistory> {
         Align(
           alignment: Alignment.centerLeft,
           child: TextButton(
-            style: TextButton.styleFrom(
-              foregroundColor: context.nodColors.accent,
-            ),
             onPressed: _loading ? null : _load,
             child: Text(
               _failed
@@ -627,6 +598,7 @@ class _ScheduleEditorState extends State<_ScheduleEditor> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              const SizedBox(height: NodSpacing.xs),
               TextFormField(
                 controller: _title,
                 decoration: const InputDecoration(labelText: 'Title'),

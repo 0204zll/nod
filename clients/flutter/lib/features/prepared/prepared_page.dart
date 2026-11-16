@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../api/prepared_repository.dart';
 import '../../core/api_transport.dart';
 import '../../core/prepared.dart';
+import '../../design_system/design_system.dart';
 import '../tasks/task_text.dart';
 
 class NodPreparedPage extends StatefulWidget {
@@ -106,82 +107,124 @@ class _NodPreparedPageState extends State<NodPreparedPage>
   @override
   Widget build(BuildContext context) {
     final work = _work;
-    return RefreshIndicator(
-      onRefresh: _load,
-      child: ListView(
-        padding: const EdgeInsets.all(20),
-        children: [
-          Text(
-            work?.title ?? 'Prepared work',
-            style: Theme.of(context).textTheme.headlineMedium,
-          ),
-          if (_loading) const LinearProgressIndicator(),
-          if (_error != null) Text(_error!),
-          TextButton(
+    final theme = Theme.of(context);
+    final colors = context.nodColors;
+    final secondary = theme.textTheme.bodyMedium?.copyWith(
+      color: colors.textSecondary,
+    );
+    return Scaffold(
+      appBar: NodPageBar(
+        title: widget.issueId == null ? 'Prepared' : 'Prepared work',
+        busy: _loading,
+        actions: [
+          IconButton(
             onPressed: _loading ? null : _load,
-            child: const Text('Refresh'),
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
           ),
+        ],
+      ),
+      body: NodPageBody(
+        onRefresh: _load,
+        children: [
+          if (_error != null) ...[
+            NodNotice(_error!, tone: NodTone.error),
+            const SizedBox(height: NodSpacing.md),
+          ],
           if (widget.issueId == null) ...[
-            const Text(
+            Text(
               'Findings from recent chat. Older findings remain available through their original messages.',
+              style: secondary,
             ),
+            const SizedBox(height: NodSpacing.md),
             if (_findings?.isEmpty == true)
-              const Text('No prepared findings in recent chat.'),
-            for (final finding in _findings ?? <NodPreparedFinding>[])
-              Card(
-                child: ListTile(
-                  title: Text(
-                    finding.text,
-                    maxLines: 4,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () => Navigator.of(context).push<void>(
-                    MaterialPageRoute(
-                      builder: (_) => Scaffold(
-                        appBar: AppBar(title: const Text('Prepared work')),
-                        body: NodPreparedPage(
-                          transport: widget.transport,
-                          issueId: finding.id,
+              const NodEmptyState(
+                icon: Icons.drafts_outlined,
+                title: 'No prepared findings in recent chat',
+                message: 'When Nod prepares work for you, its finding appears here with the saved result.',
+              ),
+            if (_findings?.isNotEmpty == true)
+              NodGroup(
+                children: [
+                  for (final finding in _findings!)
+                    ListTile(
+                      title: Text(
+                        _findingTitle(finding.text),
+                        maxLines: 4,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () => Navigator.of(context).push<void>(
+                        MaterialPageRoute(
+                          builder: (_) => NodPreparedPage(
+                            transport: widget.transport,
+                            issueId: finding.id,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ),
+                ],
               ),
           ],
           if (work != null) ...[
-            Text('Last updated ${work.updatedAt}'),
-            if (work.state == 'resolved')
-              const Text('This matter is resolved.'),
-            if (work.state == 'dismissed')
-              const Text('You dismissed this matter.'),
-            const SizedBox(height: 16),
+            Text(work.title, style: theme.textTheme.headlineSmall),
+            const SizedBox(height: NodSpacing.xs),
+            Text(
+              'Last updated ${nodTimestamp(context, work.updatedAt)}',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: colors.mutedForeground,
+              ),
+            ),
+            if (work.state == 'resolved') ...[
+              const SizedBox(height: NodSpacing.md),
+              const NodNotice(
+                'This matter is resolved.',
+                tone: NodTone.success,
+              ),
+            ],
+            if (work.state == 'dismissed') ...[
+              const SizedBox(height: NodSpacing.md),
+              const NodNotice('You dismissed this matter.'),
+            ],
+            const SizedBox(height: NodSpacing.md),
             TaskText(text: work.draft, transport: widget.transport),
             if (work.unknowns.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              Text(
-                'Needs checking',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
+              const SizedBox(height: NodSpacing.lg),
+              Text('Needs checking', style: theme.textTheme.titleMedium),
+              const SizedBox(height: NodSpacing.xs),
               for (final unknown in work.unknowns) SelectableText('• $unknown'),
             ],
-            const SizedBox(height: 16),
-            Text('Sources', style: Theme.of(context).textTheme.titleMedium),
-            for (final source in work.sources)
-              ListTile(
-                title: Text(source.label),
-                subtitle: Text('Checked ${source.checkedAt}'),
-                trailing: source.externalUri == null
-                    ? null
-                    : const Icon(Icons.open_in_new),
-                onTap: _loading || source.externalUri == null
-                    ? null
-                    : () => _openSource(source),
+            const SizedBox(height: NodSpacing.lg),
+            Text('Sources', style: theme.textTheme.titleMedium),
+            const SizedBox(height: NodSpacing.xs),
+            if (work.sources.isNotEmpty)
+              NodGroup(
+                children: [
+                  for (final source in work.sources)
+                    ListTile(
+                      title: Text(source.label),
+                      subtitle: Text(
+                        'Checked ${nodTimestamp(context, source.checkedAt)}',
+                      ),
+                      trailing: source.externalUri == null
+                          ? null
+                          : const Icon(Icons.open_in_new, size: 20),
+                      onTap: _loading || source.externalUri == null
+                          ? null
+                          : () => _openSource(source),
+                    ),
+                ],
               ),
           ],
         ],
       ),
     );
   }
+}
+
+String _findingTitle(String text) {
+  final title = text
+      .replaceAll(RegExp(r'\s*\[[^\]]*\]\(/prepared/[^)]*\)'), '')
+      .trim();
+  return title.isEmpty ? text : title;
 }

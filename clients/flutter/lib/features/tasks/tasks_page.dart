@@ -7,12 +7,21 @@ import '../../core/api_transport.dart';
 import '../../core/nod_errors.dart';
 import '../../core/nod_repository.dart';
 import '../../core/tasks.dart';
+import '../../design_system/design_system.dart';
 import 'task_schedule_form.dart';
 import 'task_text.dart';
 
 String _failure(Object error) => error is NodException
     ? error.message
     : 'Could not load this work. Try again.';
+
+NodTone _tone(NodTask task) => switch (task.status) {
+  'needs_you' => NodTone.warning,
+  'working' || 'queued' => NodTone.info,
+  'done' => NodTone.success,
+  'failed' => NodTone.error,
+  _ => NodTone.neutral,
+};
 
 class NodTasksPage extends StatefulWidget {
   const NodTasksPage({required this.transport, this.onShowMessage, super.key});
@@ -75,25 +84,57 @@ class _NodTasksPageState extends State<NodTasksPage>
   }
 
   @override
-  Widget build(BuildContext context) => RefreshIndicator(
-    onRefresh: _load,
-    child: ListView(
-      padding: const EdgeInsets.all(20),
+  Widget build(BuildContext context) => Scaffold(
+    appBar: const NodPageBar(title: 'Tasks'),
+    body: NodPageBody(
+      onRefresh: _load,
+      spacing: NodSpacing.sm,
       children: [
-        Text('Tasks', style: Theme.of(context).textTheme.headlineMedium),
         if (_error != null) ...[
-          Text(_error!),
-          TextButton(onPressed: _load, child: const Text('Try again')),
+          NodNotice(_error!, tone: NodTone.error),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton(
+              onPressed: _load,
+              child: const Text('Try again'),
+            ),
+          ),
         ],
-        if (_tasks == null && _error == null)
-          const Center(child: CircularProgressIndicator()),
-        if (_tasks?.isEmpty == true) const Text('No saved tasks.'),
+        if (_tasks == null && _error == null) const LinearProgressIndicator(),
+        if (_tasks?.isEmpty == true)
+          const NodEmptyState(
+            icon: Icons.task_outlined,
+            title: 'No saved tasks',
+            message: 'Substantial work, an outside wait, or work you ask Nod to track becomes a saved task and appears here.',
+          ),
         for (final task in _tasks ?? <NodTask>[])
           Card(
             child: ListTile(
-              title: Text(task.title),
-              subtitle: Text('${task.statusLabel}\n${task.now}'),
-              isThreeLine: true,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: NodSpacing.md,
+                vertical: NodSpacing.xs,
+              ),
+              title: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  NodStatusLabel(task.statusLabel, tone: _tone(task)),
+                  const SizedBox(height: NodSpacing.xs),
+                  Text(
+                    task.title,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ],
+              ),
+              subtitle: task.now.isEmpty
+                  ? null
+                  : Padding(
+                      padding: const EdgeInsets.only(top: NodSpacing.xxs),
+                      child: Text(
+                        task.now,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
               trailing: const Icon(Icons.chevron_right),
               onTap: () async {
                 await Navigator.of(context).push<void>(
@@ -263,6 +304,11 @@ class _NodTaskPageState extends State<NodTaskPage> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final task = _detail?.task;
     final disabled = _busy || _unconfirmed;
+    final theme = Theme.of(context);
+    final colors = context.nodColors;
+    final meta = theme.textTheme.bodyMedium?.copyWith(
+      color: colors.textSecondary,
+    );
     return Scaffold(
       appBar: AppBar(
         title: Text(task?.title ?? 'Task'),
@@ -273,41 +319,86 @@ class _NodTaskPageState extends State<NodTaskPage> with WidgetsBindingObserver {
             tooltip: 'Refresh',
           ),
         ],
+        bottom: NodProgressLine(active: _busy),
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(20),
+      body: NodPageBody(
         children: [
-          if (_busy) const LinearProgressIndicator(),
-          if (_error != null) Text(_error!),
+          if (_error != null) ...[
+            NodNotice(_error!, tone: NodTone.error),
+            const SizedBox(height: NodSpacing.md),
+          ],
           if (task != null) ...[
-            Text(
-              task.statusLabel,
-              style: Theme.of(context).textTheme.titleLarge,
+            Align(
+              alignment: Alignment.centerLeft,
+              child: NodStatusLabel(task.statusLabel, tone: _tone(task)),
             ),
-            if (task.now.isNotEmpty) SelectableText(task.now),
-            if (task.question != null) SelectableText(task.question!),
+            if (task.now.isNotEmpty) ...[
+              const SizedBox(height: NodSpacing.sm),
+              SelectableText(task.now, style: theme.textTheme.titleMedium),
+            ],
+            if (task.question != null) ...[
+              const SizedBox(height: NodSpacing.md),
+              Container(
+                padding: const EdgeInsets.all(NodSpacing.md),
+                decoration: BoxDecoration(
+                  color: colors.surfaceSubtle,
+                  borderRadius: BorderRadius.circular(NodRadii.card),
+                ),
+                child: SelectableText(
+                  task.question!,
+                  style: theme.textTheme.bodyLarge,
+                ),
+              ),
+            ],
             if (task.result.isNotEmpty) ...[
-              const SizedBox(height: 16),
+              const SizedBox(height: NodSpacing.md),
               TaskText(text: task.result, transport: widget.transport),
             ],
+            if (task.steps.isNotEmpty) const SizedBox(height: NodSpacing.sm),
             for (var i = 0; i < task.steps.length; i++)
-              ListTile(
-                leading: Icon(
-                  task.status == 'done' || i < task.stepIndex
-                      ? Icons.check_circle_outline
-                      : Icons.radio_button_unchecked,
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: NodSpacing.xxs),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      task.status == 'done' || i < task.stepIndex
+                          ? Icons.check_circle_outline
+                          : Icons.radio_button_unchecked,
+                      size: 20,
+                      color: task.status == 'done' || i < task.stepIndex
+                          ? colors.success
+                          : colors.mutedForeground,
+                    ),
+                    const SizedBox(width: NodSpacing.sm),
+                    Expanded(child: Text(task.steps[i])),
+                  ],
                 ),
-                title: Text(task.steps[i]),
               ),
-            if (task.doneWhen.isNotEmpty) Text('Done when: ${task.doneWhen}'),
+            const SizedBox(height: NodSpacing.md),
+            if (task.doneWhen.isNotEmpty)
+              Text('Done when: ${task.doneWhen}', style: meta),
             for (final wait in task.waitingFor)
-              Text('Waiting on: ${wait.who} · ${wait.via}'),
-            if (task.nextCheck != null) Text('Next check: ${task.nextCheck}'),
+              Text('Waiting on: ${wait.who} · ${wait.via}', style: meta),
+            if (task.nextCheck != null)
+              Text(
+                'Next check: ${nodTimestamp(context, task.nextCheck!)}',
+                style: meta,
+              ),
             if (task.updateQueued && !task.closed)
-              const Text('Owner update queued'),
+              Text('Owner update queued', style: meta),
+            const SizedBox(height: NodSpacing.lg),
             Wrap(
-              spacing: 8,
+              spacing: NodSpacing.xs,
+              runSpacing: NodSpacing.xs,
               children: [
+                if (task.replyTarget != null)
+                  FilledButton(
+                    onPressed: disabled ? null : _reply,
+                    child: Text(
+                      task.closed ? 'Continue task' : 'Reply to task',
+                    ),
+                  ),
                 if (task.status == 'done')
                   OutlinedButton(
                     onPressed: disabled
@@ -322,11 +413,13 @@ class _NodTaskPageState extends State<NodTaskPage> with WidgetsBindingObserver {
                           ),
                     child: const Text('Schedule task'),
                   ),
-                if (task.replyTarget != null)
-                  FilledButton(
-                    onPressed: disabled ? null : _reply,
+                if (task.replyTarget != null && widget.onShowMessage != null)
+                  OutlinedButton(
+                    onPressed: () => widget.onShowMessage!(task.replyTarget!),
                     child: Text(
-                      task.closed ? 'Continue task' : 'Reply to task',
+                      task.browserHandoff
+                          ? 'Open browser in chat'
+                          : 'Show in chat',
                     ),
                   ),
                 TextButton(
@@ -335,36 +428,45 @@ class _NodTaskPageState extends State<NodTaskPage> with WidgetsBindingObserver {
                 ),
                 if (!task.closed)
                   TextButton(
+                    style: TextButton.styleFrom(
+                      foregroundColor: theme.colorScheme.error,
+                    ),
                     onPressed: disabled
                         ? null
                         : () => _mutate(() => _repository.stop(task.id)),
                     child: const Text('Stop this task'),
                   ),
-                if (task.replyTarget != null && widget.onShowMessage != null)
-                  TextButton(
-                    onPressed: () => widget.onShowMessage!(task.replyTarget!),
-                    child: Text(
-                      task.browserHandoff
-                          ? 'Open browser in chat'
-                          : 'Show in chat',
-                    ),
-                  ),
               ],
             ),
-            if (task.browserHandoff && widget.onShowMessage == null)
-              const Text(
+            if (task.browserHandoff && widget.onShowMessage == null) ...[
+              const SizedBox(height: NodSpacing.md),
+              const NodNotice(
                 'Open this task’s question in chat to use its private browser controls.',
               ),
+            ],
+            const SizedBox(height: NodSpacing.md),
+            const Divider(height: 1),
             ExpansionTile(
+              tilePadding: EdgeInsets.zero,
               title: const Text('Activity'),
               children: [
+                if (_detail!.events.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: NodSpacing.md),
+                    child: Text('No activity recorded yet.', style: meta),
+                  ),
                 for (final event in _detail!.events)
                   ListTile(
+                    contentPadding: EdgeInsets.zero,
                     leading: event.type == 'tool_failed'
-                        ? const Icon(Icons.error_outline)
+                        ? Icon(
+                            Icons.error_outline,
+                            color: theme.colorScheme.error,
+                          )
                         : null,
                     title: SelectableText(
                       '${event.helper ? 'Helper · ' : ''}${event.summary}',
+                      style: theme.textTheme.bodyMedium,
                     ),
                     subtitle: event.site == null ? null : Text(event.site!),
                   ),
@@ -420,24 +522,32 @@ class _TaskReplyState extends State<_TaskReply> {
   @override
   Widget build(BuildContext context) => AlertDialog(
     title: Text('Reply to ${widget.context.task.title}'),
-    content: SingleChildScrollView(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (widget.context.task.question != null)
-            Text(widget.context.task.question!),
-          const Text(
-            'Use private entry in chat for passwords, codes, and card details.',
-          ),
-          TextField(
-            controller: _text,
-            enabled: !_sent,
-            minLines: 2,
-            maxLines: 6,
-            decoration: const InputDecoration(labelText: 'Your reply'),
-          ),
-          if (_error != null) Text(_error!),
-        ],
+    content: SizedBox(
+      width: 480,
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          spacing: NodSpacing.md,
+          children: [
+            if (widget.context.task.question != null)
+              Text(
+                widget.context.task.question!,
+                style: Theme.of(context).textTheme.bodyLarge,
+              ),
+            TextField(
+              controller: _text,
+              enabled: !_sent,
+              minLines: 3,
+              maxLines: 6,
+              decoration: const InputDecoration(
+                labelText: 'Your reply',
+                helperText: 'Use private entry in chat for passwords, codes, and card details.',
+              ),
+            ),
+            if (_error != null) NodNotice(_error!, tone: NodTone.error),
+          ],
+        ),
       ),
     ),
     actions: [

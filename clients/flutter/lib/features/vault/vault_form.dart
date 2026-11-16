@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../api/vault_repository.dart';
 import '../../core/vault.dart';
+import '../../design_system/design_system.dart';
 
 class NodVaultForm extends StatefulWidget {
   const NodVaultForm({
@@ -108,41 +109,40 @@ class _NodVaultFormState extends State<NodVaultForm>
     bool secret = false,
     bool required = false,
     bool numeric = false,
-  }) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 8),
-    child: TextFormField(
-      controller: _fields[name],
-      decoration: InputDecoration(
-        labelText: label,
-        border: const OutlineInputBorder(),
-      ),
-      enabled: !_busy,
-      obscureText: secret,
-      autocorrect: false,
-      enableSuggestions: false,
-      enableIMEPersonalizedLearning: !secret,
-      keyboardType: numeric
-          ? TextInputType.number
-          : secret
-          ? TextInputType.visiblePassword
-          : TextInputType.text,
-      validator: (value) {
-        if (required && (value == null || value.trim().isEmpty)) {
-          return 'Enter a value.';
+    String? helper,
+  }) => TextFormField(
+    controller: _fields[name],
+    decoration: InputDecoration(labelText: label, helperText: helper),
+    enabled: !_busy,
+    obscureText: secret,
+    autocorrect: false,
+    enableSuggestions: false,
+    enableIMEPersonalizedLearning: !secret,
+    keyboardType: numeric
+        ? TextInputType.number
+        : secret
+        ? TextInputType.visiblePassword
+        : TextInputType.text,
+    validator: (value) {
+      if (required && (value == null || value.trim().isEmpty)) {
+        return 'Enter a value.';
+      }
+      if (numeric) {
+        final number = int.tryParse(value ?? '');
+        if (number == null ||
+            (name == 'expiryMonth'
+                ? number < 1 || number > 12
+                : number < 2000 || number > 9999)) {
+          return 'Enter a valid ${name == 'expiryMonth' ? 'month' : 'year'}.';
         }
-        if (numeric) {
-          final number = int.tryParse(value ?? '');
-          if (number == null ||
-              (name == 'expiryMonth'
-                  ? number < 1 || number > 12
-                  : number < 2000 || number > 9999)) {
-            return 'Enter a valid ${name == 'expiryMonth' ? 'month' : 'year'}.';
-          }
-        }
-        return null;
-      },
-    ),
+      }
+      return null;
+    },
   );
+
+  TextStyle? _note(BuildContext context) =>
+      Theme.of(context).textTheme.bodyMedium
+          ?.copyWith(color: context.nodColors.textSecondary);
 
   @override
   void dispose() {
@@ -159,27 +159,36 @@ class _NodVaultFormState extends State<NodVaultForm>
     appBar: AppBar(title: Text('${_editing ? 'Edit' : 'Add'} ${widget.kind}')),
     body: Form(
       key: _form,
-      child: ListView(
-        padding: const EdgeInsets.all(20),
+      child: NodPageBody(
+        spacing: NodSpacing.md,
         children: [
-          const Text(
+          Text(
             'Private Vault entry. Values go directly to your Nod server, never to chat. Closing or leaving the app clears unsent secret fields.',
+            style: _note(context),
           ),
           _field('label', 'Name', required: true),
           if (!_card && !_editing)
             _field('origin', 'Website domain or HTTPS URL', required: true),
           if (!_card && _editing)
-            ListTile(
-              title: const Text('Website'),
-              subtitle: Text(widget.item!.origin),
+            InputDecorator(
+              decoration: const InputDecoration(
+                labelText: 'Website',
+                enabled: false,
+              ),
+              child: Text(
+                widget.item!.origin,
+                style: Theme.of(context).textTheme.bodyLarge
+                    ?.copyWith(color: context.nodColors.mutedForeground),
+              ),
             ),
           if (_card) ...[
             _field('cardholder', 'Cardholder', required: true),
             _field(
               'cardNumber',
-              _editing ? 'Replacement card number (optional)' : 'Card number',
+              _editing ? 'Replacement card number' : 'Card number',
               secret: true,
               required: !_editing,
+              helper: _editing ? 'Optional' : null,
             ),
             _field(
               'expiryMonth',
@@ -188,8 +197,9 @@ class _NodVaultFormState extends State<NodVaultForm>
               numeric: true,
             ),
             _field('expiryYear', 'Expiry year', required: true, numeric: true),
-            const Text(
+            Text(
               'Nod never stores the security code. Payments need a separate private approval.',
+              style: _note(context),
             ),
           ] else ...[
             _field(
@@ -199,19 +209,25 @@ class _NodVaultFormState extends State<NodVaultForm>
             ),
             _field(
               'password',
-              _editing ? 'Replacement password (optional)' : 'Password',
+              _editing ? 'Replacement password' : 'Password',
               secret: true,
+              helper: _editing ? 'Optional' : null,
             ),
             if (!_removeAuthenticator)
               _field(
                 'authenticatorKey',
                 _editing
-                    ? 'Replacement authenticator key (optional)'
-                    : 'Authenticator setup key or otpauth link (optional)',
+                    ? 'Replacement authenticator key'
+                    : 'Authenticator key',
                 secret: true,
+                helper: _editing
+                    ? 'Optional'
+                    : 'Optional. Setup key or otpauth link.',
               ),
             if (_editing)
               CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
                 value: _removeAuthenticator,
                 title: const Text('Remove saved authenticator key'),
                 onChanged: _busy
@@ -222,11 +238,12 @@ class _NodVaultFormState extends State<NodVaultForm>
                       }),
               ),
             if (_editing)
-              const Text(
+              Text(
                 'Leave replacement fields blank to keep saved values.',
+                style: _note(context),
               ),
           ],
-          if (_error != null) Text(_error!),
+          if (_error != null) NodNotice(_error!, tone: NodTone.error),
           FilledButton(
             onPressed: _busy ? null : _save,
             child: Text(_busy ? 'Saving' : 'Save'),

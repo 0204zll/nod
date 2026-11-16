@@ -21,10 +21,7 @@ class TaskText extends StatelessWidget {
       if (id != null) {
         await Navigator.of(context).push<void>(
           MaterialPageRoute(
-            builder: (_) => Scaffold(
-              appBar: AppBar(title: const Text('Prepared work')),
-              body: NodPreparedPage(transport: transport, issueId: id),
-            ),
+            builder: (_) => NodPreparedPage(transport: transport, issueId: id),
           ),
         );
         return;

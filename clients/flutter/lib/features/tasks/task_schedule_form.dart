@@ -6,6 +6,7 @@ import '../../core/api_transport.dart';
 import '../../core/nod_errors.dart';
 import '../../core/schedules.dart';
 import '../../core/tasks.dart';
+import '../../design_system/design_system.dart';
 import '../scheduled/scheduled_page.dart' show scheduleDate;
 import '../usage/usage_summary.dart' show usageMoney;
 
@@ -131,48 +132,59 @@ class _NodTaskSchedulePageState extends State<NodTaskSchedulePage> {
   @override
   Widget build(BuildContext context) {
     final saved = _saved;
+    final theme = Theme.of(context);
+    final secondary = theme.textTheme.bodyMedium?.copyWith(
+      color: context.nodColors.textSecondary,
+    );
     return Scaffold(
-      appBar: AppBar(title: const Text('Schedule task')),
-      body: ListView(
-        padding: const EdgeInsets.all(20),
+      appBar: AppBar(
+        title: const Text('Schedule task'),
+        bottom: NodProgressLine(active: _loading || _busy),
+      ),
+      body: NodPageBody(
+        spacing: NodSpacing.md,
         children: [
-          if (_loading || _busy) const LinearProgressIndicator(),
-          if (_error != null && !_submitted) Text(_error!),
+          if (_error != null && !_submitted)
+            NodNotice(_error!, tone: NodTone.error),
           if (saved != null) ...[
-            Text(
-              'Scheduled ${saved.title}',
-              style: Theme.of(context).textTheme.titleLarge,
+            NodNotice(
+              [
+                '${saved.cron} · ${saved.timeZone}',
+                if (saved.nextRun != null)
+                  'Next run ${scheduleDate(context, saved.nextRun!)} (device time)',
+                if (saved.monthlyUsd != null)
+                  'Projected cost ≈ ${usageMoney(saved.monthlyUsd!)} / month',
+              ].join('\n'),
+              title: 'Scheduled ${saved.title}',
+              tone: NodTone.success,
             ),
             SelectableText(saved.prompt),
-            Text('${saved.cron} · ${saved.timeZone}'),
-            if (saved.nextRun != null)
-              Text(
-                'Next run ${scheduleDate(context, saved.nextRun!)} (device time)',
-              ),
-            if (saved.monthlyUsd != null)
-              Text('Projected cost ≈ ${usageMoney(saved.monthlyUsd!)} / month'),
             FilledButton(
               onPressed: () => Navigator.pop(context),
               child: const Text('Done'),
             ),
           ] else if (!_loading && _error != null && _title.text.isEmpty) ...[
-            TextButton(onPressed: _load, child: const Text('Try again')),
+            OutlinedButton(onPressed: _load, child: const Text('Try again')),
           ] else if (!_loading)
             Form(
               key: _form,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
+                spacing: NodSpacing.md,
                 children: [
-                  const Text(
+                  Text(
                     'Review the original requests and adapt them for future runs. The instructions authorize future schedule actions.',
+                    style: secondary,
                   ),
                   if (_omittedSensitive)
-                    const Text(
+                    const NodNotice(
                       'Messages with sensitive details and sign-in codes were left out. Review the remaining instructions.',
+                      tone: NodTone.warning,
                     ),
                   if (_hasAttachments)
-                    const Text(
+                    const NodNotice(
                       'Attachments are not added to this schedule. Include the details each run needs.',
+                      tone: NodTone.warning,
                     ),
                   TextFormField(
                     controller: _title,
@@ -192,6 +204,9 @@ class _NodTaskSchedulePageState extends State<NodTaskSchedulePage> {
                   ),
                   DropdownButtonFormField<String>(
                     initialValue: _frequency,
+                    isExpanded: true,
+                    style: theme.textTheme.bodyLarge,
+                    dropdownColor: context.nodColors.surfaceOverlay,
                     decoration: const InputDecoration(labelText: 'Repeat'),
                     items: const [
                       DropdownMenuItem(value: 'daily', child: Text('Daily')),
@@ -218,6 +233,9 @@ class _NodTaskSchedulePageState extends State<NodTaskSchedulePage> {
                     DropdownButtonFormField<int>(
                       key: ValueKey(_frequency),
                       initialValue: _day,
+                      isExpanded: true,
+                      style: theme.textTheme.bodyLarge,
+                      dropdownColor: context.nodColors.surfaceOverlay,
                       decoration: InputDecoration(
                         labelText: _frequency == 'weekly'
                             ? 'Day'
@@ -252,21 +270,25 @@ class _NodTaskSchedulePageState extends State<NodTaskSchedulePage> {
                           ? null
                           : (value) => setState(() => _day = value!),
                     ),
-                  ListTile(
-                    title: const Text('Run time'),
-                    subtitle: Text(_time.format(context)),
-                    trailing: const Icon(Icons.schedule),
-                    onTap: _submitted
-                        ? null
-                        : () async {
-                            final time = await showTimePicker(
-                              context: context,
-                              initialTime: _time,
-                            );
-                            if (time != null && mounted) {
-                              setState(() => _time = time);
-                            }
-                          },
+                  NodGroup(
+                    children: [
+                      ListTile(
+                        title: const Text('Run time'),
+                        subtitle: Text(_time.format(context)),
+                        trailing: const Icon(Icons.schedule),
+                        onTap: _submitted
+                            ? null
+                            : () async {
+                                final time = await showTimePicker(
+                                  context: context,
+                                  initialTime: _time,
+                                );
+                                if (time != null && mounted) {
+                                  setState(() => _time = time);
+                                }
+                              },
+                      ),
+                    ],
                   ),
                   TextFormField(
                     controller: _zone,
@@ -277,11 +299,12 @@ class _NodTaskSchedulePageState extends State<NodTaskSchedulePage> {
                     ),
                     validator: _required,
                   ),
-                  const SizedBox(height: 16),
-                  const Text(
+                  Text(
                     'The server validates the timing. Run time uses the schedule time zone, not the device clock.',
+                    style: secondary,
                   ),
-                  if (_error != null && _submitted) Text(_error!),
+                  if (_error != null && _submitted)
+                    NodNotice(_error!, tone: NodTone.error),
                   FilledButton(
                     onPressed: _submitted ? null : _save,
                     child: const Text('Create schedule'),

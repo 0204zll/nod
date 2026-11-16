@@ -32,7 +32,7 @@ When a session needs sign-in or hasn't finished signing in, select **Sign in aga
 
 ## Add or import logins
 
-Use **Add to Vault → Add login** or **Add card**. These private forms send values directly to the server's existing Vault routes. They don't send chat messages. Cards have no security-code field: payment approval is a separate private step.
+Select **Add to Vault**, the plus in the top bar, then **Add login** or **Add card**. These private forms send values directly to the server's existing Vault routes. They don't send chat messages. Cards have no security-code field: payment approval is a separate private step.
 
 To import passwords:
 

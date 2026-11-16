@@ -270,9 +270,9 @@ class _NodClientAppState extends State<NodClientApp> {
       return;
     }
     final page = switch (route.destination) {
-      NodMobileDestination.prepared => Scaffold(
-        appBar: AppBar(title: const Text('Prepared work')),
-        body: NodPreparedPage(transport: transport, issueId: route.id),
+      NodMobileDestination.prepared => NodPreparedPage(
+        transport: transport,
+        issueId: route.id,
       ),
       NodMobileDestination.credentials ||
       NodMobileDestination.payment => NodPrivateRequestsPage(
@@ -663,9 +663,15 @@ class _ConnectedShell extends StatelessWidget {
       );
     }
 
+    Widget page(Widget body) => Scaffold(
+      appBar: NodPageBar(title: destinations[selectedIndex].label),
+      body: body,
+    );
+
     return NodAdaptiveShell(
       destinations: destinations,
       selectedIndex: selectedIndex,
+      bodyOwnsBar: selectedIndex != 0,
       onDestinationSelected: (index) {
         FocusManager.instance.primaryFocus?.unfocus();
         onDestinationSelected(index);
@@ -689,33 +695,27 @@ class _ConnectedShell extends StatelessWidget {
             focusMessageId: focusMessageId,
           ),
           selectedIndex == 1 && repository is NodSchedulesRepository
-              ? NodScheduledPage(
-                  repository: repository as NodSchedulesRepository,
-                  onOpenChat: () => onDestinationSelected(0),
+              ? page(
+                  NodScheduledPage(
+                    repository: repository as NodSchedulesRepository,
+                    onOpenChat: () => onDestinationSelected(0),
+                  ),
                 )
               : selectedIndex == 3 && repository is NodUsageRepository
-              ? NodUsagePage(repository: repository as NodUsageRepository)
+              ? page(NodUsagePage(repository: repository as NodUsageRepository))
               : selectedIndex == 2 && repository is NodAppsRepository
-              ? Column(
-                  children: [
-                    if (transport != null)
-                      ListTile(
-                        leading: const Icon(Icons.manage_accounts_outlined),
-                        title: const Text('Manage accounts and channels'),
-                        trailing: const Icon(Icons.chevron_right),
-                        onTap: () => Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) =>
-                                NodConnectionsPage(transport: transport),
+              ? page(
+                  NodAppsPage(
+                    repository: repository as NodAppsRepository,
+                    onManage: transport == null
+                        ? null
+                        : () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) =>
+                                  NodConnectionsPage(transport: transport),
+                            ),
                           ),
-                        ),
-                      ),
-                    Expanded(
-                      child: NodAppsPage(
-                        repository: repository as NodAppsRepository,
-                      ),
-                    ),
-                  ],
+                  ),
                 )
               : selectedIndex == 4 && transport != null
               ? NodTasksPage(transport: transport, onShowMessage: showMessage)
@@ -733,7 +733,9 @@ class _ConnectedShell extends StatelessWidget {
               ? NodVaultPage(transport: transport, onAsk: onAsk)
               : selectedIndex == 9 && transport != null
               ? NodNotificationSettingsPage(transport: transport)
-              : _SectionPlaceholder(destination: destinations[selectedIndex]),
+              : page(
+                  _SectionPlaceholder(destination: destinations[selectedIndex]),
+                ),
         ],
       ),
     );

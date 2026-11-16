@@ -34,7 +34,7 @@ class NodFlowDialog extends StatelessWidget {
                 namesRoute: true,
                 child: Text(
                   title,
-                  style: Theme.of(context).textTheme.headlineSmall,
+                  style: Theme.of(context).textTheme.titleLarge,
                 ),
               ),
               const SizedBox(height: NodSpacing.md),

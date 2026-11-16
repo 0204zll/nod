@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../../api/private_requests_repository.dart';
 import '../../core/api_transport.dart';
 import '../../core/private_requests.dart';
+import '../../design_system/design_system.dart';
 import 'private_browser.dart';
 
 class NodPrivateRequestsPage extends StatefulWidget {
@@ -91,8 +92,8 @@ class _NodPrivateRequestsPageState extends State<NodPrivateRequestsPage>
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      title: const Text('Private requests'),
+    appBar: NodPageBar(
+      title: 'Private requests',
       actions: [
         IconButton(
           onPressed: _refresh,
@@ -101,33 +102,44 @@ class _NodPrivateRequestsPageState extends State<NodPrivateRequestsPage>
         ),
       ],
     ),
-    body: ListView(
-      padding: const EdgeInsets.all(20),
+    body: NodPageBody(
       children: [
-        const Text(
+        Text(
           'Passwords, verification codes, and payment approvals go directly to your Nod server, never through chat.',
+          style: Theme.of(context).textTheme.bodyMedium
+              ?.copyWith(color: context.nodColors.textSecondary),
         ),
-        if (_error != null) Text(_error!),
+        const SizedBox(height: NodSpacing.md),
+        if (_error != null) ...[
+          NodNotice(_error!, tone: NodTone.error),
+          const SizedBox(height: NodSpacing.md),
+        ],
         if (_requests == null && _error == null)
-          const Center(child: CircularProgressIndicator()),
+          const LinearProgressIndicator(),
         if (_requests?.isEmpty == true)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 24),
-            child: Text('No private requests in this conversation.'),
+          const NodEmptyState(
+            icon: Icons.lock_outline,
+            title: 'No private requests in this conversation',
+            message: 'When a task needs a sign-in, a verification code, or a payment approval, its request opens here.',
           ),
-        for (final ref in _requests ?? <NodPrivateRequestRef>[])
-          ListTile(
-            leading: Icon(
-              ref.kind == NodPrivateRequestKind.browser
-                  ? Icons.web
-                  : Icons.lock_outline,
-            ),
-            title: Text(ref.title),
-            subtitle: const Text(
-              'Open to check the current request and website',
-            ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _open(ref),
+        if (_requests?.isNotEmpty == true)
+          NodGroup(
+            children: [
+              for (final ref in _requests!)
+                ListTile(
+                  leading: Icon(
+                    ref.kind == NodPrivateRequestKind.browser
+                        ? Icons.web
+                        : Icons.lock_outline,
+                  ),
+                  title: Text(ref.title),
+                  subtitle: const Text(
+                    'Open to check the current request and website',
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => _open(ref),
+                ),
+            ],
           ),
       ],
     ),
@@ -408,23 +420,34 @@ class _NodPrivateEntryState extends State<NodPrivateEntry>
         details.savedEntries.isNotEmpty &&
         !_newLogin &&
         details.kind != 'otp';
+    final theme = Theme.of(context);
+    final colors = context.nodColors;
     return Scaffold(
-      appBar: AppBar(title: Text(_ref.title)),
-      body: ListView(
-        padding: const EdgeInsets.all(20),
+      appBar: AppBar(
+        title: Text(_ref.title),
+        bottom: NodProgressLine(
+          active: details == null && _error == null || _busy,
+        ),
+      ),
+      body: NodPageBody(
+        spacing: NodSpacing.md,
         children: [
-          if (_error != null) Text(_error!),
-          if (details == null && _error == null || _busy)
-            const Center(child: CircularProgressIndicator()),
+          if (_error != null) NodNotice(_error!, tone: NodTone.error),
           if (details != null) ...[
-            Text(details.origin, style: Theme.of(context).textTheme.titleLarge),
-            const SizedBox(height: 16),
+            Text(details.origin, style: theme.textTheme.titleLarge),
             if (!_active)
-              const Text('Return to the app to check this request.'),
+              const NodNotice('Return to the app to check this request.'),
             if (!details.pending || attempted)
-              Text(_status(details, attempted)),
+              NodNotice(
+                _status(details, attempted),
+                tone: switch (details.status) {
+                  'filled' || 'submitted' => NodTone.success,
+                  'expired' || 'uncertain' => NodTone.warning,
+                  _ => NodTone.neutral,
+                },
+              ),
             if (_retrying)
-              const Text(
+              const NodNotice(
                 'Waiting for a fresh sign-in step from the same task.',
               ),
             if (!details.payment &&
@@ -432,26 +455,24 @@ class _NodPrivateEntryState extends State<NodPrivateEntry>
                 !_retrying &&
                 _active &&
                 ['uncertain', 'expired'].contains(details.status))
-              TextButton(
+              OutlinedButton(
                 onPressed: _freshStep,
                 child: const Text('Request a fresh sign-in step'),
               ),
             if (enabled && details.data['passwordManager'] != null)
-              TextButton(
+              OutlinedButton(
                 onPressed: _managed,
                 child: Text(
                   'Use ${privateObject(details.data['passwordManager'])['name']} on the Nod server',
                 ),
               ),
             if (enabled) ...[
-              if (details.payment) ...[
-                Text(
-                  '${details.data['amount']} at ${details.origin} with ${details.data['card']}',
-                ),
-                Text(
+              if (details.payment)
+                NodNotice(
                   'Card details go to ${(details.data['destinations'] as List? ?? []).join(' and ')}.',
+                  title:
+                      '${details.data['amount']} at ${details.origin} with ${details.data['card']}',
                 ),
-              ],
               if (details.kind == 'method')
                 for (final method in details.methods)
                   OutlinedButton(
@@ -475,6 +496,7 @@ class _NodPrivateEntryState extends State<NodPrivateEntry>
                   key: _form,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
+                    spacing: NodSpacing.xs,
                     children: [
                       if (!details.payment && details.kind != 'otp')
                         TextFormField(
@@ -530,7 +552,6 @@ class _NodPrivateEntryState extends State<NodPrivateEntry>
                               : null,
                           onFieldSubmitted: (_) => _submitForm(),
                         ),
-                      const SizedBox(height: 16),
                       FilledButton(
                         onPressed: _submitForm,
                         child: Text(
@@ -546,9 +567,12 @@ class _NodPrivateEntryState extends State<NodPrivateEntry>
                 ),
             ],
           ],
-          const SizedBox(height: 24),
-          const Text(
+          const Divider(height: NodSpacing.md),
+          Text(
             'Closing clears unsent values. It does not cancel an entry already submitted. Use Stop on the owning task to stop its work.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: colors.mutedForeground,
+            ),
           ),
           TextButton(
             onPressed: () {

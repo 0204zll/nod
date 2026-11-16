@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../api/settings_repository.dart';
 import '../../core/nod_errors.dart';
 import '../../core/settings.dart';
+import '../../design_system/design_system.dart';
 import 'settings_widgets.dart';
 
 const _providers = [
@@ -146,42 +147,27 @@ class _NodModelSettingsPageState extends State<NodModelSettingsPage> {
           ? null
           : settingsMap(data['selection']);
       final connections = settingsRows(data['connections']);
-      return ListView(
-        padding: const EdgeInsets.all(12),
+      return NodPageBody(
         children: [
-          const Text(
+          Text(
             'Choose the model and connection Nod uses next. Running tasks keep their original model. Connecting checks provider access and may contact that service.',
+            style: Theme.of(context).textTheme.bodyMedium
+                ?.copyWith(color: context.nodColors.textSecondary),
           ),
-          ExpansionTile(
-            title: const Text('Add connection'),
-            children: [
-              for (final provider in _providers)
-                ListTile(
-                  title: Text(provider),
-                  onTap: () => connect(context, state, provider),
-                  trailing: ['openai', 'openrouter'].contains(provider)
-                      ? TextButton(
-                          onPressed: () => signIn(context, state, provider),
-                          child: Text(
-                            provider == 'openai'
-                                ? 'ChatGPT sign-in'
-                                : 'Browser sign-in',
-                          ),
-                        )
-                      : null,
-                ),
-            ],
-          ),
+          const SizedBox(height: NodSpacing.md),
           TextField(
             decoration: const InputDecoration(
               labelText: 'Search models and connections',
+              prefixIcon: Icon(Icons.search),
             ),
             onChanged: (value) => setState(() => search = value.toLowerCase()),
           ),
-          for (final connection in connections)
+          const SizedBox(height: NodSpacing.md),
+          for (final connection in connections) ...[
             Card(
               child: ExpansionTile(
                 initiallyExpanded: true,
+                expandedCrossAxisAlignment: CrossAxisAlignment.start,
                 title: Text(
                   '${connection['provider']} · ${_connectionIdentity(connection)}',
                 ),
@@ -203,7 +189,10 @@ class _NodModelSettingsPageState extends State<NodModelSettingsPage> {
                       leading:
                           selection?['connectionId'] == connection['id'] &&
                               selection?['modelId'] == model['id']
-                          ? const Icon(Icons.check_circle)
+                          ? Icon(
+                              Icons.check_circle,
+                              color: context.nodColors.accent,
+                            )
                           : const Icon(Icons.circle_outlined),
                       onTap: () async {
                         final efforts = (model['efforts'] as List)
@@ -235,50 +224,81 @@ class _NodModelSettingsPageState extends State<NodModelSettingsPage> {
                         }
                       },
                     ),
-                  Wrap(
-                    children: [
-                      TextButton(
-                        onPressed: () => state.change(
-                          () => repository.refreshConnection(
-                            settingsText(connection, 'id'),
-                          ),
-                        ),
-                        child: const Text('Load models'),
-                      ),
-                      if (connection['managed'] != true) ...[
-                        if (connection['method'] == 'subscription' ||
-                            connection['method'] == 'oauth')
-                          TextButton(
-                            onPressed: () => signIn(
-                              context,
-                              state,
-                              settingsText(connection, 'provider'),
-                              connectionId: settingsText(connection, 'id'),
-                            ),
-                            child: const Text('Reconnect'),
-                          ),
+                  const Divider(height: 1),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: NodSpacing.xs,
+                    ),
+                    child: Wrap(
+                      children: [
                         TextButton(
-                          onPressed: () async {
-                            if (await confirmSettings(
-                              context,
-                              'Remove connection?',
-                              'Remove ${_connectionIdentity(connection)}? If selected, choose a new model before continuing.',
-                            )) {
-                              await state.change(
-                                () => repository.removeConnection(
-                                  settingsText(connection, 'id'),
-                                ),
-                              );
-                            }
-                          },
-                          child: const Text('Remove connection'),
+                          onPressed: () => state.change(
+                            () => repository.refreshConnection(
+                              settingsText(connection, 'id'),
+                            ),
+                          ),
+                          child: const Text('Load models'),
                         ),
+                        if (connection['managed'] != true) ...[
+                          if (connection['method'] == 'subscription' ||
+                              connection['method'] == 'oauth')
+                            TextButton(
+                              onPressed: () => signIn(
+                                context,
+                                state,
+                                settingsText(connection, 'provider'),
+                                connectionId: settingsText(connection, 'id'),
+                              ),
+                              child: const Text('Reconnect'),
+                            ),
+                          TextButton(
+                            onPressed: () async {
+                              if (await confirmSettings(
+                                context,
+                                'Remove connection?',
+                                'Remove ${_connectionIdentity(connection)}? If selected, choose a new model before continuing.',
+                              )) {
+                                await state.change(
+                                  () => repository.removeConnection(
+                                    settingsText(connection, 'id'),
+                                  ),
+                                );
+                              }
+                            },
+                            child: const Text('Remove connection'),
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
                 ],
               ),
             ),
+            const SizedBox(height: NodSpacing.sm),
+          ],
+          Card(
+            child: ExpansionTile(
+              leading: const Icon(Icons.add),
+              title: const Text('Add connection'),
+              children: [
+                for (final provider in _providers)
+                  ListTile(
+                    title: Text(provider),
+                    onTap: () => connect(context, state, provider),
+                    trailing: ['openai', 'openrouter'].contains(provider)
+                        ? TextButton(
+                            onPressed: () => signIn(context, state, provider),
+                            child: Text(
+                              provider == 'openai'
+                                  ? 'ChatGPT sign-in'
+                                  : 'Browser sign-in',
+                            ),
+                          )
+                        : const Icon(Icons.chevron_right),
+                  ),
+              ],
+            ),
+          ),
         ],
       );
     },
@@ -401,19 +421,22 @@ class _ModelSignInPageState extends State<_ModelSignInPage> {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: Text('${widget.provider} sign-in')),
-    body: ListView(
-      padding: const EdgeInsets.all(16),
+    body: NodPageBody(
       children: [
         if (connected) ...[
-          const Text('Connection saved.'),
+          const NodNotice('Connection saved.', tone: NodTone.success),
+          const SizedBox(height: NodSpacing.md),
           FilledButton(
             onPressed: () => Navigator.pop(context),
             child: const Text('Done'),
           ),
         ] else ...[
-          const Text(
+          Text(
             'Open the provider in your browser. Only its sign-in address is opened; your Nod access token is never passed to the browser. Return here after signing in. Leaving this page cancels the pending attempt.',
+            style: Theme.of(context).textTheme.bodyMedium
+                ?.copyWith(color: context.nodColors.textSecondary),
           ),
+          const SizedBox(height: NodSpacing.md),
           if (url != null)
             FilledButton(
               onPressed: () async {
@@ -435,9 +458,13 @@ class _ModelSignInPageState extends State<_ModelSignInPage> {
               child: const Text('Open sign-in'),
             ),
           if (widget.provider == 'openai') ...[
-            const Text(
+            const SizedBox(height: NodSpacing.lg),
+            Text(
               'If the browser ends at a page that cannot load, paste its full callback address privately here.',
+              style: Theme.of(context).textTheme.bodyMedium
+                  ?.copyWith(color: context.nodColors.textSecondary),
             ),
+            const SizedBox(height: NodSpacing.sm),
             TextField(
               controller: callback,
               obscureText: true,
@@ -446,18 +473,26 @@ class _ModelSignInPageState extends State<_ModelSignInPage> {
               enableIMEPersonalizedLearning: false,
               decoration: const InputDecoration(labelText: 'Callback URL'),
             ),
-            TextButton(
+            const SizedBox(height: NodSpacing.xs),
+            OutlinedButton(
               onPressed: busy || attempt == null ? null : complete,
               child: const Text('Complete sign-in'),
             ),
           ],
+          const SizedBox(height: NodSpacing.xs),
           TextButton(
             onPressed: busy || attempt == null ? null : poll,
             child: const Text('Check status'),
           ),
-          if (busy) const LinearProgressIndicator(),
+          SizedBox(
+            height: 2,
+            child: busy ? const LinearProgressIndicator(minHeight: 2) : null,
+          ),
         ],
-        if (error != null) Text(error!),
+        if (error != null) ...[
+          const SizedBox(height: NodSpacing.md),
+          NodNotice(error!, tone: NodTone.error),
+        ],
       ],
     ),
   );

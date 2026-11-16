@@ -63,6 +63,8 @@ abstract final class NodBreakpoints {
 abstract final class NodSizes {
   static const control = 40.0;
   static const touchTarget = 48.0;
+  static const appBar = 64.0;
+  static const page = 760.0;
   static const sidebar = 224.0;
   static const content = 880.0;
 }
@@ -244,5 +246,11 @@ class NodColors extends ThemeExtension<NodColors> {
 }
 
 extension NodThemeColors on BuildContext {
-  NodColors get nodColors => Theme.of(this).extension<NodColors>()!;
+  NodColors get nodColors {
+    final theme = Theme.of(this);
+    return theme.extension<NodColors>() ??
+        (theme.brightness == Brightness.dark
+            ? NodColors.dark
+            : NodColors.light);
+  }
 }

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../../api/vault_repository.dart';
 import '../../core/vault.dart';
+import '../../design_system/design_system.dart';
 
 class NodVaultImportPage extends StatefulWidget {
   const NodVaultImportPage({super.key, required this.repository});
@@ -125,20 +126,22 @@ class _NodVaultImportPageState extends State<NodVaultImportPage>
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Import passwords')),
-    body: ListView(
-      padding: const EdgeInsets.all(20),
+    body: NodPageBody(
+      spacing: NodSpacing.md,
       children: [
-        const Text(
+        Text(
           'Choose a CSV exported from Chrome, 1Password, or another password manager. The export is not encrypted. Delete it after importing.',
+          style: Theme.of(context).textTheme.bodyMedium
+              ?.copyWith(color: context.nodColors.textSecondary),
         ),
-        const SizedBox(height: 16),
-        const Text(
+        const NodNotice(
           '1Password app integration runs beside your Nod server, not on this phone. To select a login through its desktop helper, open the task’s private Sign in request. A phone-local integration is not provided.',
         ),
         if (_result == null) ...[
-          OutlinedButton(
+          OutlinedButton.icon(
             onPressed: _busy ? null : _choose,
-            child: const Text('Choose CSV file'),
+            icon: const Icon(Icons.upload_file_outlined, size: 20),
+            label: const Text('Choose CSV file'),
           ),
           if (_input != null)
             Text(
@@ -151,16 +154,20 @@ class _NodVaultImportPageState extends State<NodVaultImportPage>
             child: Text(_busy ? 'Working' : 'Import'),
           ),
         ] else ...[
-          Text(
+          NodNotice(
             'Imported ${_result!['imported']} · ${_result!['existing']} already saved · ${(_result!['skipped']! as num) + _skipped} skipped · ${_result!['authenticatorKeys']} with authenticator keys',
+            tone: NodTone.success,
           ),
-          const Text('Now delete the exported file. It is not encrypted.'),
+          const NodNotice(
+            'Now delete the exported file. It is not encrypted.',
+            tone: NodTone.warning,
+          ),
           FilledButton(
             onPressed: () => Navigator.pop(context),
             child: const Text('Done'),
           ),
         ],
-        if (_error != null) Text(_error!),
+        if (_error != null) NodNotice(_error!, tone: NodTone.error),
       ],
     ),
   );

@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../../api/vault_repository.dart';
 import '../../core/api_transport.dart';
 import '../../core/vault.dart';
+import '../../design_system/design_system.dart';
 import '../private_requests/private_requests_page.dart';
 import 'vault_form.dart';
 import 'vault_import.dart';
@@ -54,8 +55,8 @@ class _NodVaultPageState extends State<NodVaultPage> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      title: const Text('Vault'),
+    appBar: NodPageBar(
+      title: 'Vault',
       actions: [
         IconButton(
           onPressed: _refresh,
@@ -64,6 +65,7 @@ class _NodVaultPageState extends State<NodVaultPage> {
         ),
         PopupMenuButton<String>(
           tooltip: 'Add to Vault',
+          icon: const Icon(Icons.add),
           onSelected: (kind) => _open(
             kind == 'import'
                 ? NodVaultImportPage(repository: _repository)
@@ -77,62 +79,76 @@ class _NodVaultPageState extends State<NodVaultPage> {
         ),
       ],
     ),
-    body: RefreshIndicator(
+    body: NodPageBody(
       onRefresh: _refresh,
-      child: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          const Text(
-            'Manage saved logins, cards, and browser sessions. Secrets go directly to your Nod server, never through chat.',
-          ),
-          TextButton(
-            onPressed: () =>
-                _open(NodPrivateRequestsPage(transport: widget.transport)),
-            child: const Text('Open private requests'),
-          ),
-          if (_error != null) Text(_error!),
-          if (_items == null && _error == null)
-            const Center(child: CircularProgressIndicator()),
-          if (_items?.isEmpty == true)
-            const ListTile(
-              title: Text('No saved items'),
-              subtitle: Text(
-                'Add a login or card, or import a password-manager CSV.',
-              ),
-            ),
-          for (final item in _items ?? <NodVaultItem>[])
-            ListTile(
-              leading: Icon(
-                item.session
-                    ? Icons.language
-                    : item.card
-                    ? Icons.credit_card
-                    : Icons.key,
-              ),
-              title: Text(item.label),
-              subtitle: Text(
-                '${item.subtitle}${item.session
-                    ? '\n${item.sessionState}'
-                    : item.unreadable
-                    ? '\nCannot be opened with the current Vault key'
-                    : ''}',
-              ),
-              isThreeLine: item.session || item.unreadable,
-              onTap: () => _open(
-                NodVaultDetails(
-                  repository: _repository,
-                  item: item,
-                  onAsk: widget.onAsk,
-                ),
-              ),
-            ),
-          const Divider(),
-          NodVaultActivityView(
-            repository: _repository,
-            key: ValueKey(_generation),
-          ),
+      children: [
+        Text(
+          'Manage saved logins, cards, and browser sessions. Secrets go directly to your Nod server, never through chat.',
+          style: Theme.of(context).textTheme.bodyMedium
+              ?.copyWith(color: context.nodColors.textSecondary),
+        ),
+        const SizedBox(height: NodSpacing.md),
+        if (_error != null) ...[
+          NodNotice(_error!, tone: NodTone.error),
+          const SizedBox(height: NodSpacing.md),
         ],
-      ),
+        if (_items == null && _error == null) const LinearProgressIndicator(),
+        if (_items?.isEmpty == true)
+          const NodEmptyState(
+            icon: Icons.shield_outlined,
+            title: 'No saved items',
+            message: 'Add a login or card, or import a password-manager CSV.',
+          ),
+        if (_items?.isNotEmpty == true)
+          NodGroup(
+            children: [
+              for (final item in _items!)
+                ListTile(
+                  leading: Icon(
+                    item.session
+                        ? Icons.language
+                        : item.card
+                        ? Icons.credit_card
+                        : Icons.key,
+                  ),
+                  title: Text(item.label),
+                  subtitle: Text(
+                    '${item.subtitle}${item.session
+                        ? '\n${item.sessionState}'
+                        : item.unreadable
+                        ? '\nCannot be opened with the current Vault key'
+                        : ''}',
+                  ),
+                  isThreeLine: item.session || item.unreadable,
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => _open(
+                    NodVaultDetails(
+                      repository: _repository,
+                      item: item,
+                      onAsk: widget.onAsk,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        const SizedBox(height: NodSpacing.md),
+        NodGroup(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.lock_outline),
+              title: const Text('Open private requests'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () =>
+                  _open(NodPrivateRequestsPage(transport: widget.transport)),
+            ),
+          ],
+        ),
+        const SizedBox(height: NodSpacing.lg),
+        NodVaultActivityView(
+          repository: _repository,
+          key: ValueKey(_generation),
+        ),
+      ],
     ),
   );
 }
@@ -379,6 +395,7 @@ class _NodVaultDetailsState extends State<NodVaultDetails>
   @override
   Widget build(BuildContext context) {
     final item = _details ?? widget.item;
+    final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(
         title: Text(item.label),
@@ -388,91 +405,124 @@ class _NodVaultDetailsState extends State<NodVaultDetails>
               onPressed: _details == null || _busy ? null : _edit,
               child: const Text('Edit'),
             ),
+          const SizedBox(width: NodSpacing.xxs),
         ],
+        bottom: NodProgressLine(active: _details == null && _error == null),
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(20),
+      body: NodPageBody(
         children: [
-          Text(item.subtitle, style: Theme.of(context).textTheme.titleMedium),
-          if (_details == null && _error == null)
-            const LinearProgressIndicator(),
+          Text(
+            item.subtitle,
+            style: theme.textTheme.bodyLarge?.copyWith(
+              color: context.nodColors.textSecondary,
+            ),
+          ),
+          const SizedBox(height: NodSpacing.md),
           if (_details != null && !item.session) ...[
-            ListTile(
-              title: Text(item.card ? 'Cardholder' : 'Username'),
-              subtitle: Text(
-                item.identity.isEmpty ? 'Not saved' : item.identity,
-              ),
-              trailing: IconButton(
-                onPressed: _busy ? null : () => _copy(identity: true),
-                icon: const Icon(Icons.copy),
-                tooltip: item.card ? 'Copy cardholder' : 'Copy username',
-              ),
-            ),
-            if (item.card)
-              ListTile(
-                title: const Text('Expiry'),
-                subtitle: Text(
-                  '${item.data['expiryMonth']}/${item.data['expiryYear']}',
+            NodGroup(
+              children: [
+                ListTile(
+                  title: Text(item.card ? 'Cardholder' : 'Username'),
+                  subtitle: Text(
+                    item.identity.isEmpty ? 'Not saved' : item.identity,
+                  ),
+                  trailing: IconButton(
+                    onPressed: _busy ? null : () => _copy(identity: true),
+                    icon: const Icon(Icons.copy, size: 20),
+                    tooltip: item.card ? 'Copy cardholder' : 'Copy username',
+                  ),
                 ),
-              ),
-            if (!item.card)
-              ListTile(
-                title: const Text('Authenticator key'),
-                subtitle: Text(
-                  item.data['hasAuthenticator'] == true
-                      ? 'Saved on server'
-                      : 'Not saved',
+                if (item.card)
+                  ListTile(
+                    title: const Text('Expiry'),
+                    subtitle: Text(
+                      '${item.data['expiryMonth']}/${item.data['expiryYear']}',
+                    ),
+                  ),
+                if (!item.card)
+                  ListTile(
+                    title: const Text('Authenticator key'),
+                    subtitle: Text(
+                      item.data['hasAuthenticator'] == true
+                          ? 'Saved on server'
+                          : 'Not saved',
+                    ),
+                  ),
+                ListTile(
+                  title: Text(item.card ? 'Card number' : 'Password'),
+                  subtitle: Text(
+                    _secret ??
+                        (item.data['hasPassword'] == false
+                            ? 'Not saved'
+                            : '••••••••'),
+                  ),
+                  trailing: item.card || item.data['hasPassword'] != false
+                      ? IconButton(
+                          onPressed: _busy ? null : _copy,
+                          icon: const Icon(Icons.copy, size: 20),
+                          tooltip: item.card
+                              ? 'Copy card number'
+                              : 'Copy password',
+                        )
+                      : null,
                 ),
-              ),
-            ListTile(
-              title: Text(item.card ? 'Card number' : 'Password'),
-              subtitle: Text(
-                _secret ??
-                    (item.data['hasPassword'] == false
-                        ? 'Not saved'
-                        : '••••••••'),
-              ),
-              trailing: item.card || item.data['hasPassword'] != false
-                  ? IconButton(
-                      onPressed: _busy ? null : _copy,
-                      icon: const Icon(Icons.copy),
-                      tooltip: item.card ? 'Copy card number' : 'Copy password',
-                    )
-                  : null,
+              ],
             ),
-            TextButton(
-              onPressed: _busy
-                  ? null
-                  : _secret == null
-                  ? _reveal
-                  : () => setState(() => _secret = null),
-              child: Text(
-                _secret == null
-                    ? 'Show saved value privately'
-                    : 'Hide saved value',
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed: _busy
+                    ? null
+                    : _secret == null
+                    ? _reveal
+                    : () => setState(() => _secret = null),
+                child: Text(
+                  _secret == null
+                      ? 'Show saved value privately'
+                      : 'Hide saved value',
+                ),
               ),
             ),
           ],
           if (item.session)
-            ListTile(
-              title: const Text('Saved session'),
-              subtitle: Text(item.sessionState),
+            NodGroup(
+              children: [
+                ListTile(
+                  title: const Text('Saved session'),
+                  subtitle: Text(item.sessionState),
+                ),
+              ],
             ),
           if (item.session &&
               widget.onAsk != null &&
-              ['needs_sign_in', 'pending'].contains(item.data['state']))
+              ['needs_sign_in', 'pending'].contains(item.data['state'])) ...[
+            const SizedBox(height: NodSpacing.sm),
             OutlinedButton(
               onPressed: _busy || _signInRequested ? null : _signInAgain,
               child: const Text('Sign in again'),
             ),
-          if (_error != null) Text(_error!),
-          if (_notice != null)
-            Semantics(liveRegion: true, child: Text(_notice!)),
-          FilledButton.tonal(
+          ],
+          if (_error != null) ...[
+            const SizedBox(height: NodSpacing.sm),
+            NodNotice(_error!, tone: NodTone.error),
+          ],
+          if (_notice != null) ...[
+            const SizedBox(height: NodSpacing.sm),
+            NodNotice(_notice!, tone: NodTone.success),
+          ],
+          const SizedBox(height: NodSpacing.sm),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: theme.colorScheme.error,
+            ),
             onPressed: _busy ? null : _remove,
-            child: Text(item.session ? 'Sign out' : 'Delete ${item.kind}'),
+            icon: Icon(
+              item.session ? Icons.logout : Icons.delete_outline,
+              size: 18,
+            ),
+            label: Text(item.session ? 'Sign out' : 'Delete ${item.kind}'),
           ),
-          const Divider(),
+          const SizedBox(height: NodSpacing.lg),
           NodVaultActivityView(repository: widget.repository, item: item),
         ],
       ),
@@ -526,41 +576,66 @@ class _NodVaultActivityViewState extends State<NodVaultActivityView> {
   }
 
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Text('Activity', style: Theme.of(context).textTheme.titleMedium),
-      if (widget.item == null && _activity != null)
-        Text(
-          'This week: ${_activity!.week['signIns']} sign-ins · ${_activity!.week['payments']} card submissions · ${_activity!.week['held']} held',
-        ),
-      for (final entry in _entries)
-        ListTile(
-          title: Text(
-            '${entry['action'].toString().replaceAll('_', ' ')} · ${entry['origin']}',
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final secondary = theme.textTheme.bodyMedium?.copyWith(
+      color: context.nodColors.textSecondary,
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Activity', style: theme.textTheme.titleMedium),
+        const SizedBox(height: NodSpacing.xxs),
+        if (widget.item == null && _activity != null)
+          Text(
+            'This week: ${_activity!.week['signIns']} sign-ins · ${_activity!.week['payments']} card submissions · ${_activity!.week['held']} held',
+            style: secondary,
           ),
-          subtitle: Text(
-            [
-              '${entry['at']}',
-              if (entry['task'] != '') '${entry['task']}',
-              entry['reason'].toString().replaceAll('_', ' '),
-              if (entry['amount'] is Map)
-                '${(entry['amount'] as Map)['minor']} minor units ${(entry['amount'] as Map)['currency']}',
-              if (entry['because'] is Map &&
-                  (entry['because'] as Map)['text'] is String)
-                '“${(entry['because'] as Map)['text']}”',
-            ].join('\n'),
+        if (_entries.isNotEmpty) ...[
+          const SizedBox(height: NodSpacing.sm),
+          NodGroup(
+            children: [
+              for (final entry in _entries)
+                ListTile(
+                  title: Text(
+                    '${entry['action'].toString().replaceAll('_', ' ')} · ${entry['origin']}',
+                  ),
+                  subtitle: Text(
+                    [
+                      nodTimestamp(context, '${entry['at']}'),
+                      if (entry['task'] != '') '${entry['task']}',
+                      entry['reason'].toString().replaceAll('_', ' '),
+                      if (entry['amount'] is Map)
+                        '${(entry['amount'] as Map)['minor']} minor units ${(entry['amount'] as Map)['currency']}',
+                      if (entry['because'] is Map &&
+                          (entry['because'] as Map)['text'] is String)
+                        '“${(entry['because'] as Map)['text']}”',
+                    ].join('\n'),
+                  ),
+                ),
+            ],
           ),
-        ),
-      if (_entries.isEmpty && !_busy && _error == null)
-        const Text('No activity yet.'),
-      if (_error != null) Text(_error!),
-      if (_busy) const LinearProgressIndicator(),
-      if (!_busy && (_error != null || _activity?.next != null))
-        TextButton(
-          onPressed: _load,
-          child: Text(_error == null ? 'Load more activity' : 'Try again'),
-        ),
-    ],
-  );
+        ],
+        if (_entries.isEmpty && !_busy && _error == null)
+          Text('No activity yet.', style: secondary),
+        if (_error != null) ...[
+          const SizedBox(height: NodSpacing.sm),
+          NodNotice(_error!, tone: NodTone.error),
+        ],
+        if (_busy)
+          const Padding(
+            padding: EdgeInsets.only(top: NodSpacing.sm),
+            child: LinearProgressIndicator(),
+          ),
+        if (!_busy && (_error != null || _activity?.next != null))
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: _load,
+              child: Text(_error == null ? 'Load more activity' : 'Try again'),
+            ),
+          ),
+      ],
+    );
+  }
 }

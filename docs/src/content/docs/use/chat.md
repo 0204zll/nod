@@ -34,6 +34,16 @@ Nod loads earlier messages automatically as you scroll toward the top and keeps 
 
 Action confirmations show the question without extra status labels. [Usage](/use/spending/) shows the recorded action results.
 
+## Catch up in the Flutter mobile app
+
+Select **Updates** above the conversation to scan Nod’s messages, newest first. **Unread** shows messages you have not seen in this app; **All** also includes read messages. Select a preview to open that message in the conversation without starting a reply. Select **Back to latest** to return to the newest messages.
+
+A message becomes read when it is visible in the active conversation. Opening Updates alone does not mark its previews read. Use **Mark loaded updates as read** to clear the unread list in one step. Read status stays on this device, separately for each paired server and conversation. It does not sync with the web app or other devices. If secure storage is unavailable, the list tells you that read status lasts only for this session.
+
+Updates includes loaded conversation history, not a separate server notification archive. On first use, loaded messages that are not visible in chat can appear unread. This inbox does not enable push notifications, change notification rules or authorize actions.
+
+Answer choices appear as spaced, full-width rows. Select one to send that answer, or select multiple choices and then **Send selected answers** when Nod allows more than one. **Write an answer** lets you reply in your own words. Approval questions keep their separate approval and decline actions.
+
 ## Send an audio message
 
 Press and hold the microphone beside the send button and allow microphone access. Release to finish recording, then select **Send**. You can also press Command+D on macOS or Ctrl+D elsewhere to start recording, then press it again to stop into preview. The shortcut does not send the message or replace an existing preview. To listen first, select **Preview**. You can discard the recording before sending. Recordings can be up to five minutes long. They stay in this window until you send them and are not restored after a reload.

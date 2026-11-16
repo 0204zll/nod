@@ -32,6 +32,7 @@ import 'attachment_view.dart';
 import 'audio_message.dart';
 import 'audio_playback.dart';
 import 'chat_controller.dart';
+import 'chat_inbox.dart';
 import 'chat_models.dart';
 import 'voice_draft.dart';
 
@@ -68,6 +69,11 @@ class _NodChatState extends State<NodChat>
   final ScrollController _scrollController = ScrollController(
     keepScrollOffset: false,
   );
+  final _inbox = ChatInbox();
+  final _messageKeys = <String, GlobalKey>{};
+  final _conversationKey = GlobalKey();
+  bool _inboxOpen = false;
+  bool _visibilityScheduled = false;
   final _composerBoundsKey = GlobalKey();
   final _flightHostKey = GlobalKey();
   final _flightTargetKey = GlobalKey();
@@ -92,6 +98,8 @@ class _NodChatState extends State<NodChat>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _inbox.addListener(_inboxChanged);
+    _scrollController.addListener(_scheduleReadVisible);
     _sendFlight =
         AnimationController(
           vsync: this,
@@ -122,6 +130,7 @@ class _NodChatState extends State<NodChat>
   void didUpdateWidget(NodChat oldWidget) {
     super.didUpdateWidget(oldWidget);
     assert(oldWidget.repository == widget.repository);
+    _scheduleReadVisible();
     if (oldWidget.focusMessageId != widget.focusMessageId ||
         oldWidget.active != widget.active ||
         oldWidget.replyToFocusedMessage != widget.replyToFocusedMessage) {
@@ -141,6 +150,68 @@ class _NodChatState extends State<NodChat>
     }
   }
 
+  void _inboxChanged() {
+    if (!mounted) return;
+    setState(() {});
+    _scheduleReadVisible();
+  }
+
+  void _scheduleReadVisible() {
+    if (_visibilityScheduled) return;
+    _visibilityScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _visibilityScheduled = false;
+      if (!mounted ||
+          !widget.active ||
+          _inboxOpen ||
+          !_inbox.ready ||
+          (WidgetsBinding.instance.lifecycleState != null &&
+              WidgetsBinding.instance.lifecycleState !=
+                  AppLifecycleState.resumed) ||
+          ModalRoute.of(context)?.isCurrent == false) {
+        return;
+      }
+      final viewport = _conversationKey.currentContext?.findRenderObject();
+      if (viewport is! RenderBox || !viewport.hasSize) return;
+      final bounds = viewport.localToGlobal(Offset.zero) & viewport.size;
+      final read = <String>[];
+      for (final message in inboxMessages(_controller.messages)) {
+        final box = _messageKeys[message.id]?.currentContext
+            ?.findRenderObject();
+        if (box is! RenderBox || !box.attached || !box.hasSize) continue;
+        final rect = box.localToGlobal(Offset.zero) & box.size;
+        final visible = rect.intersect(bounds);
+        if (visible.width > 0 &&
+            visible.height >= math.min(rect.height * .6, 160)) {
+          read.add(message.id);
+        }
+      }
+      _inbox.markRead(read);
+    });
+  }
+
+  Future<void> _openInbox() async {
+    _composerFocus.unfocus();
+    _inboxOpen = true;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => ChatInboxPage(
+          inbox: _inbox,
+          messages: () => _controller.messages,
+          changes: _controller,
+          onOpen: (id) {
+            Navigator.of(context).pop();
+            _requestedFocusId = id;
+            unawaited(_focusMessage(id, reply: false));
+          },
+        ),
+      ),
+    );
+    if (!mounted) return;
+    _inboxOpen = false;
+    _scheduleReadVisible();
+  }
+
   void _requestMessageFocus() {
     final id = widget.focusMessageId;
     if (!widget.active ||
@@ -153,15 +224,14 @@ class _NodChatState extends State<NodChat>
     unawaited(_focusMessage(id));
   }
 
-  Future<void> _focusMessage(String id) async {
+  Future<void> _focusMessage(String id, {bool? reply}) async {
     final attempt = ++_focusAttempt;
     final target = await _controller.focusMessage(
       id,
-      reply: widget.replyToFocusedMessage,
+      reply: reply ?? widget.replyToFocusedMessage,
     );
     if (!mounted ||
         attempt != _focusAttempt ||
-        widget.focusMessageId != id ||
         _requestedFocusId != id ||
         !widget.active) {
       return;
@@ -182,6 +252,17 @@ class _NodChatState extends State<NodChat>
       return;
     }
     final messages = _controller.messages;
+    final thread = _controller.threadId;
+    if (thread != null) {
+      final repository = widget.repository;
+      final origin = repository is NodPairedOrigin
+          ? (repository as NodPairedOrigin).pairedOrigin.toString()
+          : 'fixture';
+      unawaited(_inbox.scope('$origin:$thread'));
+    }
+    final currentIds = messages.map((message) => message.id).toSet();
+    _messageKeys.removeWhere((id, _) => !currentIds.contains(id));
+    _scheduleReadVisible();
     if (_focusedMessageId != null &&
         !messages.any((message) => message.id == _focusedMessageId)) {
       _focusedMessageId = null;
@@ -300,6 +381,7 @@ class _NodChatState extends State<NodChat>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _scheduleReadVisible();
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden ||
         state == AppLifecycleState.detached) {
@@ -481,6 +563,8 @@ class _NodChatState extends State<NodChat>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _inbox.removeListener(_inboxChanged);
+    _inbox.dispose();
     _sendFlight.dispose();
     _voice?.removeListener(_handleComposerChanged);
     _voice?.dispose();
@@ -519,6 +603,25 @@ class _NodChatState extends State<NodChat>
               child: Column(
                 children: [
                   _StatusArea(controller: _controller),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: NodSpacing.lg,
+                      ),
+                      child: TextButton.icon(
+                        onPressed: _openInbox,
+                        icon: Badge(
+                          isLabelVisible:
+                              _inbox.ready &&
+                              inboxMessages(_controller.messages)
+                                  .any(_inbox.isUnread),
+                          child: const Icon(Icons.notifications_outlined),
+                        ),
+                        label: const Text('Updates'),
+                      ),
+                    ),
+                  ),
                   Expanded(
                     child: Stack(
                       fit: StackFit.expand,
@@ -539,6 +642,9 @@ class _NodChatState extends State<NodChat>
                               _controller.turn == NodTurnState.running,
                         ),
                         _Conversation(
+                          key: _conversationKey,
+                          messageKey: (id) =>
+                              _messageKeys.putIfAbsent(id, GlobalKey.new),
                           active: widget.active,
                           controller: _controller,
                           scrollController: _scrollController,
@@ -646,6 +752,20 @@ class _NodChatState extends State<NodChat>
                         ],
                       ),
                     ),
+                  if (_focusedMessageId != null)
+                    TextButton.icon(
+                      onPressed: () {
+                        _focusAttempt++;
+                        _controller.cancelMessageFocus();
+                        setState(() {
+                          _focusedMessageId = null;
+                          _focusUnavailable = false;
+                        });
+                        _scheduleReadVisible();
+                      },
+                      icon: const Icon(Icons.arrow_downward),
+                      label: const Text('Back to latest'),
+                    ),
                   if (_focusUnavailable)
                     const ListTile(
                       key: Key('chat-focus-unavailable'),
@@ -729,6 +849,8 @@ class _NodChatState extends State<NodChat>
 
 class _Conversation extends StatelessWidget {
   const _Conversation({
+    super.key,
+    required this.messageKey,
     required this.active,
     required this.controller,
     required this.scrollController,
@@ -739,6 +861,7 @@ class _Conversation extends StatelessWidget {
     this.focusMessageId,
   });
 
+  final GlobalKey Function(String) messageKey;
   final String? focusMessageId;
   final bool active;
   final ChatController controller;
@@ -779,7 +902,14 @@ class _Conversation extends StatelessWidget {
     }
     Widget messageItem(ChatMessageItem message) {
       return Center(
-        child: ConstrainedBox(
+        key: messageKey(message.id),
+        child: Container(
+          decoration: message.id == focusMessageId
+              ? BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(NodRadii.card),
+                )
+              : null,
           constraints: const BoxConstraints(maxWidth: 760),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1163,14 +1293,9 @@ class _MessageBubble extends StatelessWidget {
                           if (preparedId != null && transport != null) {
                             Navigator.of(context).push(
                               MaterialPageRoute<void>(
-                                builder: (_) => Scaffold(
-                                  appBar: AppBar(
-                                    title: const Text('Prepared work'),
-                                  ),
-                                  body: NodPreparedPage(
-                                    transport: transport!,
-                                    issueId: preparedId,
-                                  ),
+                                builder: (_) => NodPreparedPage(
+                                  transport: transport!,
+                                  issueId: preparedId,
                                 ),
                               ),
                             );
@@ -1454,9 +1579,10 @@ class _AnswerChoicesState extends State<_AnswerChoices> {
         widget.controller.canCompose &&
         widget.controller.connection.phase == NodConnectionPhase.connected;
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
+      padding: const EdgeInsets.fromLTRB(24, 8, 24, 16),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        spacing: NodSpacing.sm,
         children: [
           for (final option in choices.options)
             if (choices.multiple)
@@ -1484,7 +1610,27 @@ class _AnswerChoicesState extends State<_AnswerChoices> {
                         ]),
                       )
                     : null,
-                child: Text(option.answerText),
+                style: OutlinedButton.styleFrom(
+                  alignment: Alignment.centerLeft,
+                  minimumSize: const Size.fromHeight(48),
+                  padding: const EdgeInsets.all(NodSpacing.md),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(NodRadii.card),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(option.label),
+                    if (option.description?.isNotEmpty == true) ...[
+                      const SizedBox(height: NodSpacing.xs),
+                      Text(
+                        option.description!,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ],
+                ),
               ),
           if (choices.multiple)
             FilledButton(
@@ -1560,10 +1706,9 @@ class _QuestionCard extends StatelessWidget {
                   style: Theme.of(context).textTheme.bodyLarge,
                 ),
                 const SizedBox(height: NodSpacing.md),
-                Wrap(
-                  spacing: NodSpacing.xs,
-                  runSpacing: NodSpacing.xs,
-                  alignment: WrapAlignment.end,
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  spacing: NodSpacing.sm,
                   children: [
                     for (final (index, choice) in choices.indexed)
                       FocusTraversalOrder(
@@ -1576,6 +1721,15 @@ class _QuestionCard extends StatelessWidget {
                                 onPressed: enabled
                                     ? () => unawaited(onSelected(choice))
                                     : null,
+                                style: FilledButton.styleFrom(
+                                  minimumSize: const Size.fromHeight(48),
+                                  padding: const EdgeInsets.all(NodSpacing.md),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(
+                                      NodRadii.card,
+                                    ),
+                                  ),
+                                ),
                                 child: Text(choice.label),
                               )
                             : OutlinedButton(
@@ -1585,6 +1739,16 @@ class _QuestionCard extends StatelessWidget {
                                 onPressed: enabled
                                     ? () => unawaited(onSelected(choice))
                                     : null,
+                                style: OutlinedButton.styleFrom(
+                                  alignment: Alignment.centerLeft,
+                                  minimumSize: const Size.fromHeight(48),
+                                  padding: const EdgeInsets.all(NodSpacing.md),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(
+                                      NodRadii.card,
+                                    ),
+                                  ),
+                                ),
                                 child: Text(choice.label),
                               ),
                       ),
@@ -1753,73 +1917,162 @@ class _Composer extends StatelessWidget {
                                     ],
                                   ),
                                 )
-                              : FocusTraversalOrder(
-                                  key: boundsKey,
-                                  order: const NumericFocusOrder(20),
-                                  child: CallbackShortcuts(
-                                    bindings: <ShortcutActivator, VoidCallback>{
-                                      const SingleActivator(
-                                        LogicalKeyboardKey.enter,
-                                      ): onSend,
-                                    },
-                                    child: TextField(
-                                      key: const Key('chat-composer'),
-                                      controller: controller,
-                                      focusNode: focusNode,
-                                      autofocus: autofocus,
-                                      enabled: enabled && !isSending,
-                                      minLines: 1,
-                                      maxLines: 6,
-                                      textCapitalization:
-                                          TextCapitalization.sentences,
-                                      keyboardType: TextInputType.multiline,
-                                      textInputAction: TextInputAction.newline,
-                                      decoration: InputDecoration(
-                                        hintText: hasAudio
-                                            ? 'Add a message…'
-                                            : hasQuestion
-                                            ? 'Reply or choose an option above'
-                                            : 'Message Nod',
-                                        border: const OutlineInputBorder(),
-                                        prefixIcon: supportsAttachments
-                                            ? IconButton(
-                                                key: const Key('chat-attach'),
-                                                tooltip: 'Attach files',
-                                                onPressed: voiceBusy
-                                                    ? null
-                                                    : onAttach,
-                                                icon: const Icon(
-                                                  Icons.attach_file,
-                                                ),
-                                              )
-                                            : null,
-                                        suffixIcon: microphone,
+                              : LayoutBuilder(
+                                  builder: (context, constraints) {
+                                    final style = Theme.of(context)
+                                        .textTheme
+                                        .bodyLarge!;
+                                    final start = supportsAttachments
+                                        ? 56.0
+                                        : 16.0;
+                                    final end = microphone != null
+                                        ? 56.0
+                                        : 16.0;
+                                    final painter =
+                                        TextPainter(
+                                          text: TextSpan(
+                                            text: controller.text,
+                                            style: style,
+                                          ),
+                                          textDirection: Directionality.of(
+                                            context,
+                                          ),
+                                          textScaler: MediaQuery.textScalerOf(
+                                            context,
+                                          ),
+                                          maxLines: 2,
+                                        )..layout(
+                                          maxWidth: math.max(
+                                            1,
+                                            constraints.maxWidth - start - end,
+                                          ),
+                                        );
+                                    final expanded =
+                                        (supportsAttachments ||
+                                            microphone != null) &&
+                                        painter.computeLineMetrics().length > 1;
+                                    painter.dispose();
+                                    final field = Stack(
+                                      children: [
+                                        FocusTraversalOrder(
+                                          key: boundsKey,
+                                          order: const NumericFocusOrder(20),
+                                          child: CallbackShortcuts(
+                                            bindings:
+                                                <
+                                                  ShortcutActivator,
+                                                  VoidCallback
+                                                >{
+                                                  const SingleActivator(
+                                                    LogicalKeyboardKey.enter,
+                                                  ): onSend,
+                                                },
+                                            child: TextField(
+                                              key: const Key('chat-composer'),
+                                              controller: controller,
+                                              focusNode: focusNode,
+                                              autofocus: autofocus,
+                                              enabled: enabled && !isSending,
+                                              style: style,
+                                              minLines: 1,
+                                              maxLines: 6,
+                                              textAlignVertical:
+                                                  TextAlignVertical.top,
+                                              textCapitalization:
+                                                  TextCapitalization.sentences,
+                                              keyboardType:
+                                                  TextInputType.multiline,
+                                              textInputAction:
+                                                  TextInputAction.newline,
+                                              decoration: InputDecoration(
+                                                hintText: hasAudio
+                                                    ? 'Add a message…'
+                                                    : hasQuestion
+                                                    ? 'Reply or choose an option above'
+                                                    : 'Message Nod',
+                                                hintMaxLines: 1,
+                                                border:
+                                                    const OutlineInputBorder(),
+                                                contentPadding: expanded
+                                                    ? const EdgeInsets.fromLTRB(
+                                                        16,
+                                                        12,
+                                                        16,
+                                                        56,
+                                                      )
+                                                    : EdgeInsetsDirectional.fromSTEB(
+                                                        start,
+                                                        16,
+                                                        end,
+                                                        16,
+                                                      ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                        if (supportsAttachments)
+                                          PositionedDirectional(
+                                            start: 4,
+                                            bottom: 4,
+                                            child: IconButton(
+                                              key: const Key('chat-attach'),
+                                              tooltip: 'Attach files',
+                                              onPressed: voiceBusy
+                                                  ? null
+                                                  : onAttach,
+                                              icon: const Icon(
+                                                Icons.attach_file,
+                                              ),
+                                            ),
+                                          ),
+                                        if (microphone != null)
+                                          PositionedDirectional(
+                                            end: 4,
+                                            bottom: 4,
+                                            child: microphone,
+                                          ),
+                                      ],
+                                    );
+                                    if (MediaQuery.disableAnimationsOf(
+                                      context,
+                                    )) {
+                                      return field;
+                                    }
+                                    return AnimatedSize(
+                                      duration: const Duration(
+                                        milliseconds: 180,
                                       ),
-                                    ),
-                                  ),
+                                      curve: Curves.easeOutCubic,
+                                      alignment: Alignment.bottomCenter,
+                                      child: field,
+                                    );
+                                  },
                                 ),
                         ),
                         const SizedBox(width: 8),
-                        FocusTraversalOrder(
-                          order: const NumericFocusOrder(21),
-                          child: IconButton.filled(
-                            key: Key(showStop ? 'chat-stop' : 'chat-send'),
-                            tooltip: showStop ? 'Stop Nod' : 'Send',
-                            onPressed: showStop
-                                ? (isStopping ? null : onStop)
-                                : (canSend ? onSend : null),
-                            icon: busy
-                                ? const SizedBox.square(
-                                    dimension: 18,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: FocusTraversalOrder(
+                            order: const NumericFocusOrder(21),
+                            child: IconButton.filled(
+                              key: Key(showStop ? 'chat-stop' : 'chat-send'),
+                              tooltip: showStop ? 'Stop Nod' : 'Send',
+                              onPressed: showStop
+                                  ? (isStopping ? null : onStop)
+                                  : (canSend ? onSend : null),
+                              icon: busy
+                                  ? const SizedBox.square(
+                                      dimension: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : Icon(
+                                      showStop
+                                          ? Icons.stop_rounded
+                                          : Icons.arrow_upward_rounded,
                                     ),
-                                  )
-                                : Icon(
-                                    showStop
-                                        ? Icons.stop_rounded
-                                        : Icons.arrow_upward_rounded,
-                                  ),
+                            ),
                           ),
                         ),
                       ],

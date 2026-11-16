@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../api/connections_management_repository.dart';
 import '../../core/connections_management.dart';
+import '../../design_system/design_system.dart';
 
 class NodLinkedWhatsAppSetup extends StatefulWidget {
   const NodLinkedWhatsAppSetup({
@@ -360,23 +361,29 @@ class _NodLinkedWhatsAppSetupState extends State<NodLinkedWhatsAppSetup>
   Widget build(BuildContext context) {
     final canRestart = {'failed', 'expired', 'logged_out'}.contains(_state);
     final busy = _busy || _closing;
+    final secondary = Theme.of(context).textTheme.bodyMedium
+        ?.copyWith(color: context.nodColors.textSecondary);
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
         if (!didPop) unawaited(_leave());
       },
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        spacing: NodSpacing.md,
         children: [
-          if (busy) const LinearProgressIndicator(),
-          if (_error != null) Semantics(liveRegion: true, child: Text(_error!)),
+          if (busy) const LinearProgressIndicator(minHeight: 2),
+          if (_error != null) NodNotice(_error!, tone: NodTone.error),
           if (_managed)
-            const Text(
+            const NodNotice(
               'Managed by the server. You can scan or renew this pairing, but change or remove its configuration on the server.',
             ),
           if (!_saved && !_managed) ...[
             DropdownButtonFormField<String>(
               initialValue: _mode,
+              isExpanded: true,
+              style: Theme.of(context).textTheme.bodyLarge,
+              dropdownColor: context.nodColors.surfaceOverlay,
               decoration: const InputDecoration(
                 labelText: 'How you will message Nod',
               ),
@@ -395,29 +402,39 @@ class _NodLinkedWhatsAppSetupState extends State<NodLinkedWhatsAppSetup>
                   : (value) => setState(() => _mode = value!),
             ),
             if (_mode == 'bot') ...[
-              const Text(
+              Text(
                 'Register a second number in WhatsApp or WhatsApp Business. Link that account, then message it from your personal number.',
+                style: secondary,
               ),
               TextField(
                 controller: _number,
                 enabled: !busy,
                 keyboardType: TextInputType.phone,
                 decoration: const InputDecoration(
-                  labelText: 'Your personal number (country code, digits only)',
+                  labelText: 'Your personal number',
+                  helperText: 'Country code, digits only',
                 ),
               ),
             ] else
-              const Text(
+              Text(
                 'Use Message yourself to chat with Nod. Your other chats stay outside Nod.',
+                style: secondary,
               ),
-            const Text(
+            const NodNotice(
               'WhatsApp does not officially support this connection. There is a risk of account restrictions. Nod only messages you; a separate bot number keeps your own chats separate.',
+              tone: NodTone.warning,
             ),
-            TextButton(
-              onPressed: busy ? null : _terms,
-              child: const Text('Read WhatsApp terms'),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: busy ? null : _terms,
+                icon: const Icon(Icons.open_in_new, size: 18),
+                label: const Text('Read WhatsApp terms'),
+              ),
             ),
             CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
               value: _policy,
               onChanged: busy
                   ? null
@@ -434,19 +451,26 @@ class _NodLinkedWhatsAppSetupState extends State<NodLinkedWhatsAppSetup>
           if (_saved) ...[
             Semantics(
               liveRegion: true,
-              child: Text(switch (_state) {
-                'connected' =>
-                  '${_account ?? 'Your WhatsApp account'} connected',
-                'awaiting_scan' => 'In WhatsApp, open Settings → Linked Devices → Link a Device, then scan this code from another screen.',
-                'expired' =>
-                  'The QR setup expired. Start again to get a new code.',
-                'logged_out' =>
-                  'WhatsApp signed out this device. Link it again.',
-                'failed' => 'WhatsApp could not connect. Check the connection and start again.',
-                'disconnected' =>
-                  'WhatsApp is disconnected. Nod is trying to reconnect.',
-                _ => 'Connecting to WhatsApp…',
-              }),
+              child: NodNotice(
+                tone: switch (_state) {
+                  'connected' => NodTone.success,
+                  'expired' || 'logged_out' || 'failed' => NodTone.warning,
+                  _ => NodTone.neutral,
+                },
+                switch (_state) {
+                  'connected' =>
+                    '${_account ?? 'Your WhatsApp account'} connected',
+                  'awaiting_scan' => 'In WhatsApp, open Settings → Linked Devices → Link a Device, then scan this code from another screen.',
+                  'expired' =>
+                    'The QR setup expired. Start again to get a new code.',
+                  'logged_out' =>
+                    'WhatsApp signed out this device. Link it again.',
+                  'failed' => 'WhatsApp could not connect. Check the connection and start again.',
+                  'disconnected' =>
+                    'WhatsApp is disconnected. Nod is trying to reconnect.',
+                  _ => 'Connecting to WhatsApp…',
+                },
+              ),
             ),
             if (_active &&
                 _state == 'awaiting_scan' &&
@@ -471,16 +495,21 @@ class _NodLinkedWhatsAppSetupState extends State<NodLinkedWhatsAppSetup>
                 ),
               ),
             if (_state == 'awaiting_scan' && _qr == null)
-              const Text('Waiting for a new QR code. Refresh to check again.'),
+              Text(
+                'Waiting for a new QR code. Refresh to check again.',
+                style: secondary,
+              ),
             if (_state != 'connected' && !_managed)
-              const Text(
+              Text(
                 'Closing this panel cancels unfinished setup. Codes expire automatically; the setup lasts five minutes.',
+                style: secondary,
               ),
             if (_state == 'connected')
               Text(
                 _mode == 'self-chat'
                     ? 'Open WhatsApp and use Message yourself.'
                     : 'Message the linked account from your personal WhatsApp number.',
+                style: secondary,
               ),
             if (canRestart)
               FilledButton(
@@ -491,6 +520,9 @@ class _NodLinkedWhatsAppSetupState extends State<NodLinkedWhatsAppSetup>
               ),
             if (!_managed)
               TextButton(
+                style: TextButton.styleFrom(
+                  foregroundColor: Theme.of(context).colorScheme.error,
+                ),
                 onPressed: busy ? null : _disconnect,
                 child: const Text('Disconnect'),
               ),

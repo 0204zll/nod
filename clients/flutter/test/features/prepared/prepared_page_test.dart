@@ -84,7 +84,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('A private synthetic draft'), findsOneWidget);
       transport.sourceRemoved = true;
-      await tester.tap(find.text('Refresh').last);
+      await tester.tap(find.byTooltip('Refresh').last);
       await tester.pumpAndSettle();
       expect(find.text('A private synthetic draft'), findsNothing);
       expect(find.text('Synthetic source'), findsNothing);
