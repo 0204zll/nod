@@ -44,6 +44,7 @@ import {
 } from '../src/ports/integrations.ts';
 import { createComposioProvider } from '../src/providers/composio/integrations.ts';
 import { createComposioProxy } from '../src/providers/composio/proxy.ts';
+import { logFailure } from '../src/server/failure-log.ts';
 import { serviceEnvironment } from '../src/providers/process.ts';
 import { createIntegrationIdentityCheckpoint } from '../src/server/integration-identity.ts';
 import { createIntegrationBrowser } from '../src/server/integration-browser.ts';
@@ -1212,6 +1213,206 @@ test('managed integration requests bind SDK calls to a private persisted install
   }
 });
 
+test('a refused broker request keeps the broker status and only known codes', async (t) => {
+  const refusingProxy = async (
+    t: TestContext,
+    respond: (path: string, body: Record<string, unknown>, signal: AbortSignal) => Response,
+  ) => {
+    const root = await mkdtemp(join(tmpdir(), 'nod-connect-refusal-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const proxy = createComposioProxy({
+      dataRoot: root,
+      ownerId: 'fixture-owner',
+      keyStore: installationKeyStore,
+      checkpoint: fixtureIdentityCheckpoint,
+      url: 'https://proxy.example.test',
+      browser: eagerConnectionBrowser(),
+      request: async (input, init) => {
+        const request = new Request(input, init);
+        const path = new URL(request.url).pathname;
+        if (path === '/v2/access/enroll')
+          return Response.json({ state: 'enabled', userId: proxy.userId });
+        return respond(path, JSON.parse(await request.text()), request.signal);
+      },
+    });
+    await proxy.initialize();
+    return proxy;
+  };
+  const start = (proxy: ReturnType<typeof createComposioProxy>) =>
+    proxy.authorize(
+      'gmail',
+      `http://localhost:4310/api/apps/callback?state=${randomBytes(32).toString('base64url')}`,
+    );
+  const refusal = (proxy: ReturnType<typeof createComposioProxy>) =>
+    start(proxy).then(
+      () => assert.fail('The refused connection start resolved.'),
+      (error: unknown) => error,
+    );
+  for (const [status, body, reason, code] of [
+    [429, '{"error":"rate_limited"}', 'rate_limit', 'rate_limited'],
+    [429, '{"error":"public_budget_exceeded"}', 'rate_limit', 'public_budget_exceeded'],
+    [429, '{"error":"provider_rate_limited"}', 'rate_limit', 'provider_rate_limited'],
+    [503, '{"error":"service_unavailable"}', 'unavailable', 'service_unavailable'],
+    [503, '{"error":"provider_unavailable"}', 'unavailable', 'provider_unavailable'],
+    [502, '{"error":"provider_request_failed"}', 'unavailable', 'provider_request_failed'],
+    [503, '{"error":"connections_unavailable"}', 'unavailable', 'connections_unavailable'],
+    [403, '{"error":"installation_revoked"}', 'permission', 'installation_revoked'],
+    [409, '{"error":"account_revoking"}', 'invalid_request', 'account_revoking'],
+    [400, '{"error":"invalid_callback"}', 'invalid_request', 'invalid_callback'],
+    [401, '{"error":"expired_authentication"}', 'authorization', 'expired_authentication'],
+    [415, '{"error":"json_required"}', 'invalid_request', 'json_required'],
+    [413, '{"error":"request_too_large"}', 'invalid_request', 'request_too_large'],
+    [408, '{"error":"request_timeout"}', 'timeout', 'request_timeout'],
+    [403, '{"error":"synthetic-private-detail"}', 'permission', undefined],
+    [500, 'synthetic upstream page', 'unavailable', undefined],
+  ] as const) {
+    await t.test(`HTTP ${status}`, async (t) => {
+      const proxy = await refusingProxy(t, (path) => {
+        assert.equal(path, '/v2/connect/start');
+        return new Response(body, {
+          status,
+          headers: { 'Content-Type': body.startsWith('{') ? 'application/json' : 'text/html' },
+        });
+      });
+      const error = await refusal(proxy);
+      assert.ok(error instanceof IntegrationConnectionError);
+      assert.equal(error.status, status);
+      assert.equal(error.reason, reason);
+      assert.equal(error.code, code);
+      assert.equal(error.phase, 'link');
+      assert.doesNotMatch(error.message, /synthetic/);
+    });
+  }
+  for (const variant of ['declared', 'streamed'] as const) {
+    await t.test(`${variant} refusal body over the size limit`, async (t) => {
+      let pulled = 0;
+      let cancelled = false;
+      const chunk = new TextEncoder().encode(
+        `{"error":"public_budget_exceeded","padding":"${'x'.repeat(8_000)}`,
+      );
+      const proxy = await refusingProxy(
+        t,
+        () =>
+          new Response(
+            new ReadableStream<Uint8Array>(
+              {
+                pull(controller) {
+                  pulled += chunk.byteLength;
+                  controller.enqueue(chunk);
+                },
+                cancel() {
+                  cancelled = true;
+                },
+              },
+              { highWaterMark: 0 },
+            ),
+            {
+              status: 503,
+              headers: {
+                'Content-Type': 'application/json',
+                ...(variant === 'declared' ? { 'Content-Length': '40000' } : {}),
+              },
+            },
+          ),
+      );
+      const error = await refusal(proxy);
+      assert.ok(error instanceof IntegrationConnectionError);
+      assert.equal(error.status, 503);
+      assert.equal(error.code, undefined);
+      assert.equal(cancelled, true);
+      if (variant === 'declared') assert.equal(pulled, 0);
+      else assert.ok(pulled <= 32_768 + chunk.byteLength, `read ${pulled} bytes`);
+    });
+  }
+  await t.test('a caller cancellation while the refusal is read', async (t) => {
+    const controller = new AbortController();
+    const cancellation = new Error('Synthetic caller cancellation.');
+    const proxy = await refusingProxy(t, (path, body) => {
+      if (path === '/v2/connect/start')
+        return Response.json({
+          redirectUrl: 'https://proxy.example.test/v2/connect/pair?ticket=synthetic',
+          transactionId: body.transactionId,
+        });
+      assert.equal(path, '/v2/connect/status');
+      controller.abort(cancellation);
+      return Response.json({ error: 'service_unavailable' }, { status: 503 });
+    });
+    const attempt = await start(proxy);
+    await assert.rejects(proxy.connectionStatus(attempt.url, controller.signal), (error) => {
+      assert.equal(error, cancellation);
+      return true;
+    });
+  });
+  await t.test('an internal timeout while the refusal is read', async (t) => {
+    const timeout = new AbortController();
+    const expired = new DOMException('Synthetic deadline.', 'TimeoutError');
+    let pulls = 0;
+    const proxy = await refusingProxy(t, (path, body) => {
+      if (path === '/v2/connect/start')
+        return Response.json({
+          redirectUrl: 'https://proxy.example.test/v2/connect/pair?ticket=synthetic',
+          transactionId: body.transactionId,
+        });
+      assert.equal(path, '/v2/connect/status');
+      return new Response(
+        new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              pulls++;
+              timeout.abort(expired);
+              controller.error(expired);
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+        { status: 503 },
+      );
+    });
+    const attempt = await start(proxy);
+    t.mock.method(AbortSignal, 'timeout', () => timeout.signal);
+    await assert.rejects(proxy.connectionStatus(attempt.url), (error) => {
+      assert.equal(error, expired);
+      return true;
+    });
+    assert.equal(pulls, 1);
+  });
+  await t.test('failure logging keeps only numeric HTTP status', (t) => {
+    const entries: Array<{ status?: number }> = [];
+    t.mock.method(console, 'error', (line: string) => {
+      entries.push(JSON.parse(line));
+    });
+    for (const status of [429, 'synthetic-private-status', 0, 600, 429.5])
+      logFailure('app_connection_start', { status });
+    assert.deepEqual(
+      entries.map((entry) => entry.status),
+      [429, undefined, undefined, undefined, undefined],
+    );
+  });
+  await t.test('enrollment during an app catalog request', async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'nod-enroll-refusal-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const proxy = createComposioProxy({
+      dataRoot: root,
+      ownerId: 'fixture-owner',
+      keyStore: installationKeyStore,
+      checkpoint: fixtureIdentityCheckpoint,
+      url: 'https://proxy.example.test',
+      request: async (input, init) => {
+        assert.equal(new URL(new Request(input, init).url).pathname, '/v2/access/enroll');
+        return Response.json({ error: 'public_budget_exceeded' }, { status: 429 });
+      },
+    });
+    await proxy.initialize();
+    await assert.rejects(
+      createComposioProvider({ proxy }).listServices!(),
+      (error: unknown) =>
+        error instanceof IntegrationCatalogFailure &&
+        error.status === 429 &&
+        error.code === 'public_budget_exceeded',
+    );
+  });
+});
+
 test('hosted app connection bridge keeps browser proof on the configured origin', async (t) => {
   for (const [origin, service] of [
     ['https://nod.customer.example', 'gmail'],
@@ -1377,6 +1578,7 @@ test('hosted connection attempts fail closed after expiry or invalid startup', a
   for (const variant of [
     'expired',
     'broker-failure',
+    'broker-refusal',
     'foreign-broker',
     'invalid-key',
     'cancelled-start',
@@ -1400,6 +1602,13 @@ test('hosted connection attempts fail closed after expiry or invalid startup', a
             await continueStart;
           }
           if (variant === 'broker-failure') throw new Error('Synthetic broker failure.');
+          if (variant === 'broker-refusal')
+            throw new IntegrationConnectionError(
+              'rate_limit',
+              'link',
+              429,
+              'public_budget_exceeded',
+            );
           return variant === 'foreign-broker'
             ? 'https://attacker.example.test/v2/connect/pair?ticket=synthetic'
             : brokerOrigin + '/v2/connect/pair?ticket=synthetic';
@@ -1433,6 +1642,11 @@ test('hosted connection attempts fail closed after expiry or invalid startup', a
         }
         const started = await pending;
         assert.equal(started.statusCode, variant === 'expired' ? 403 : 400, started.body);
+        if (variant === 'broker-refusal') {
+          assert.match(started.json().error, /public_budget_exceeded/);
+          assert.match(started.json().error, /HTTP 429/);
+        }
+        if (variant === 'broker-failure') assert.doesNotMatch(started.body, /Synthetic/);
         assert.equal(starts, ['expired', 'invalid-key'].includes(variant) ? 0 : 1);
         assert.equal(browser.owns(url.href), false);
         assert.equal(browser.remote(url.href), undefined);
