@@ -60,7 +60,7 @@ Both the workspace and browser containers drop all capabilities, set `no-new-pri
 
 For source installs, `pnpm start` uses the Docker daemon's CPU count when it is lower than these caps. It also respects lower `NOD_WORKSPACE_CPUS` and `NOD_BROWSER_CPUS` values from the shell or `.env`. Direct Compose commands keep the listed defaults; set those variables when using a smaller Docker VM.
 
-The self-hosted server reaches Docker through a restricted proxy for its workspace and browser containers. Its Compose configuration allows separate memory limits through `NOD_WORKSPACE_MEMORY` and `NOD_BROWSER_MEMORY`.
+The self-hosted server reaches Docker through a restricted proxy for its workspace and browser containers. The proxy hands each running command's stream over as a raw connection, so its HTTP time limits don't close commands that run longer. Its Compose configuration allows separate memory limits through `NOD_WORKSPACE_MEMORY` and `NOD_BROWSER_MEMORY`.
 
 ## The command supervisor
 
@@ -69,7 +69,7 @@ Every command goes through a small supervisor inside the container, in [`src/pro
 - It owns the command's session and signals every process in it, even ones that left the process group.
 - A command also ends the processes it detached, when the command itself ends, so work it left behind never outlives it. Stop ends the whole tree the same way, and escalates to `SIGKILL` for a process that ignores the first signal.
 - It enforces the timeout: 59 minutes for `bash` by default. The model can ask for longer.
-- It acknowledges when the command ends. If that acknowledgement is lost, the server fences the workspace: no more commands run until Nod restarts.
+- It acknowledges when the command ends. If that acknowledgement is lost, the command fails as uncertain with the specific reason, such as the command stream closing early, and never runs again. The server cancels the other running commands, and new commands wait. From `/var/tmp`, a folder the command can't remove, a check then stops every process owned by the command's Linux user, `node` or the connected CLI's own user, including background processes earlier commands started. It spares only the container's init process, the check's own chain of parent processes, and, when init is `docker-init` or `tini`, the container's main process: the earliest started child of init. When the check confirms none remain, the workspace reopens. When it can't prove that, for example because it can't read a running process's owner or parent, the server fences the workspace with the reason: no more commands run until Nod restarts.
 
 ## Command output
 
