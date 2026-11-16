@@ -37,6 +37,8 @@ Agreeing on the approach first saves you from building something that can't merg
    pnpm run dev
    ```
 
+   Stop `pnpm start` with Ctrl-C before you run this. Both use the same port (4310 by default), so the second one fails with `EADDRINUSE`.
+
 4. Connect your own model key and accounts. Never use shared, production or customer credentials.
 
 </Steps>
@@ -110,6 +112,10 @@ For how a request moves through these parts, read [Architecture](/how-it-works/a
 
 Coding agents follow [AGENTS.md](https://github.com/n8n-io/nod/blob/main/AGENTS.md), and so does everyone else. It holds the rules every change follows, including the safety invariants. The same checks and review apply whether you or an agent wrote the change.
 
+## Describe errors
+
+An error must state what failed and keep the service's specific reason, status and useful details. Identify the model and provider when a model request fails. Add a next step only when the error supports it. A quota or rate limit alone does not establish a billing problem. Remove secrets before an error is shown or stored.
+
 ## License
 
 Nod is licensed under the [Apache License 2.0](https://github.com/n8n-io/nod/blob/main/LICENSE). Contributions you submit are licensed under the same terms, as section 5 of the license describes.
@@ -117,7 +123,6 @@ Nod is licensed under the [Apache License 2.0](https://github.com/n8n-io/nod/blo
 ## In this section
 
 - [Checks and tests](/contribute/checks-and-tests/): the commands to run, Git hooks, the test policy and what CI checks.
-- [Try the Flutter client](/contribute/mobile-evaluation/): run the evaluation-only native POC with its matching server.
 - [Capability evals](/contribute/evals/): real tasks against real Nod, and what the nightly verdict means.
 - [Pull requests](/contribute/pull-requests/): title rules, review, merging and dependency updates.
 - [Desktop releases](/contribute/desktop-releases/): publish a new version of the desktop app.

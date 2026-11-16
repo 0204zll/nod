@@ -37,7 +37,7 @@ The title matters beyond the check. Desktop release notes group merged changes b
 ## Prepare the pull request
 
 - **Keep it focused** on one change, and fill in the template.
-- **Explain why** the change is needed and how you tested it. Add screenshots or a short video for UI changes.
+- **Explain why** the change is needed and how you tested it. Add screenshots or a short video for UI changes. For a new feature, make a [feature video](/contribute/feature-videos/).
 - **Call out safety-sensitive changes.** Changes to approvals, the trust check, Vault, sign-in, the sandbox or owner isolation get a closer review and need tests.
 - **Keep secrets out.** No keys, credentials, real accounts or private content in code, tests, logs or screenshots.
 - **Follow the existing style.** Nod's code has no comments or JSDoc, and its docs use short, plain sentences.
@@ -49,13 +49,13 @@ The template's checklist asks you to review the change, take responsibility for 
 ```mermaid
 flowchart LR
   open([Open the PR]):::accent --> ci[CI and<br/>title check]
-  ci --> review[Review by<br/>n8n-labs]
+  ci --> review[Maintainer<br/>review]
   review --> merge[Squash merge<br/>to main]:::go
   merge --> after[Next desktop release<br/>or server update]:::muted
 ```
 
 - Workflows from first-time contributors start after a maintainer approves them.
-- A member of [@n8n-io/n8n-labs](https://github.com/n8n-io/nod/blob/main/.github/CODEOWNERS) reviews every change.
+- A maintainer reviews every change.
 - Use a squash merge for a normal pull request. Merge commits are also allowed. Rebase merges are turned off.
 - Keep the pull request title as the commit title when you merge.
 
@@ -65,7 +65,7 @@ Require **Conventional PR title** in the status checks for `main`. In the merge 
 
 ## From merge to release
 
-Merged changes reach desktop users in the next desktop release. A maintainer runs **Release desktop**, merges its version pull request, and CI publishes one GitHub release. Installed Mac and Windows apps then update on their own. See [Desktop releases](/contribute/desktop-releases/). Self-hosted servers follow the [server update procedure](/deploy/server-operations/); merging does not update a running server.
+Merged changes reach desktop users in the next desktop release. A maintainer runs **Release desktop**, merges its version pull request, and CI publishes one GitHub release. Installed Mac and Windows apps then update on their own. Linux x64 preview users install the next Flatpak bundle. See [Desktop releases](/contribute/desktop-releases/). Self-hosted servers follow the [server update procedure](/deploy/server-operations/); merging does not update a running server.
 
 ## Dependency updates
 
@@ -88,7 +88,7 @@ flowchart TD
   merge --> main[Run CI on main]
 ```
 
-Major updates, pre-1.0 npm versions, npm prereleases and unclassified updates always wait for a person. So do GitHub Actions updates, because they change workflow files, which need a code owner's review. A passing CI run lowers the risk of an update, but it doesn't guarantee compatibility.
+Major updates, pre-1.0 npm versions, npm prereleases and unclassified updates always wait for a person. So do GitHub Actions updates, because they change workflow files. A passing CI run lowers the risk of an update, but it doesn't guarantee compatibility.
 
 The [merge workflow](https://github.com/n8n-io/nod/blob/main/.github/workflows/dependabot-auto-merge.yml) never checks out pull request code. It binds the approval and merge to one signed Dependabot commit and waits up to 60 minutes for checks. If checks fail or the commit changes, the pull request stays open. After you fix or rerun CI, rerun the merge workflow if needed.
 
@@ -98,9 +98,8 @@ GitHub doesn't trigger workflows from a merge made with `GITHUB_TOKEN`, so the w
 <summary>Repository settings auto-merge needs</summary>
 
 - `Checks, tests and build`, `Secret scanning` and `Conventional PR title` are required on `main`, and the branch must be up to date.
-- `main` requires one approving review and a code owner's review.
-- GitHub Actions is allowed to approve pull requests. Its approval satisfies the one-review rule, but it isn't a code owner.
-- [CODEOWNERS](https://github.com/n8n-io/nod/blob/main/.github/CODEOWNERS) leaves npm manifests, lockfiles, Dockerfiles and `compose.yaml` without owners, so the workflow's approval can merge them.
+- `main` requires one approving review.
+- GitHub Actions is allowed to approve pull requests. Its approval satisfies the one-review rule.
 - The `auto-merge` job itself isn't a required check, because it waits for the required checks.
 
 </details>

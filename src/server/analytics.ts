@@ -183,8 +183,9 @@ export async function createAnalytics(options: {
     const config = configuration(owner);
     if (!config.enabled || !config.distinctId) return;
     const current = consent(owner);
-    const run = runs.getStore();
-    const system = systems.getStore();
+    const independent = event.event === 'owner_message_accepted';
+    const run = independent ? undefined : runs.getStore();
+    const system = independent ? undefined : systems.getStore();
     const context = run ?? system;
     if (
       context &&
@@ -194,7 +195,7 @@ export async function createAnalytics(options: {
         context.consent.version !== current.version)
     )
       return;
-    const runId = delivery.runId ?? run?.id;
+    const runId = independent ? undefined : (delivery.runId ?? run?.id);
     if (runId !== undefined && !z.uuid().safeParse(runId).success) return;
     if (run && delivery.runId !== undefined && delivery.runId !== run.id) return;
     if (delivery.consentRevision !== undefined && delivery.consentRevision !== current.revision)
@@ -211,7 +212,12 @@ export async function createAnalytics(options: {
         if (data.properties.provider)
           run.model ??= analyticsModel(data.properties.provider, data.properties.model);
       }
-      if (data.event === 'model_used' && data.properties.purpose === 'agent')
+      if (
+        data.event === 'model_used' &&
+        data.properties.purpose === 'agent' &&
+        (!data.properties.request_kind ||
+          ['chat', 'task', 'observer'].includes(data.properties.request_kind))
+      )
         run.model = analyticsModel(data.properties.provider, data.properties.model);
       if (data.event === 'turn_completed' && run.model) {
         const { provider: _, model: __, ...properties } = data.properties;
@@ -254,10 +260,21 @@ export async function createAnalytics(options: {
     owner: string,
     properties: Record<string, string | number | boolean | string[]>,
     unset?: readonly string[],
+    expected?: ReturnType<typeof consent>,
   ) {
     const current = consent(owner);
     const distinctId = configuration(owner).distinctId;
-    if (!personProfileAvailable || !current.enabled || !distinctId) return false;
+    if (
+      !personProfileAvailable ||
+      !current.enabled ||
+      !distinctId ||
+      (expected &&
+        (expected.signal.aborted ||
+          current.signal !== expected.signal ||
+          current.version !== expected.version ||
+          current.revision !== expected.revision))
+    )
+      return false;
     try {
       const sent = await options.provider?.setPersonProperties?.(
         { distinctId, properties, ...(unset?.length ? { unset } : {}) },
@@ -269,21 +286,34 @@ export async function createAnalytics(options: {
     }
   }
   function setOnboardingProfileAnswers(owner: string, profile: OnboardingProfile) {
+    return setOnboardingProfileProperties(owner, onboardingPersonProperties(profile));
+  }
+  function setOnboardingProfileProperties(
+    owner: string,
+    properties: ReturnType<typeof onboardingPersonProperties>,
+    expected?: ReturnType<typeof consent>,
+  ) {
+    return setOwnerPersonProperties(owner, properties, legacyOnboardingChoiceProperties, expected);
+  }
+  function setUpdatesEmail(
+    owner: string,
+    email: string,
+    consentAt = new Date().toISOString(),
+    expected?: ReturnType<typeof consent>,
+  ) {
     return setOwnerPersonProperties(
       owner,
-      onboardingPersonProperties(profile),
-      legacyOnboardingChoiceProperties,
+      {
+        email,
+        nod_updates_email_consent: true,
+        nod_updates_email_consent_at: consentAt,
+        nod_updates_email_consent_version: updatesEmailConsent.version,
+        nod_updates_email_consent_text: updatesEmailConsent.text,
+        nod_updates_email_consent_privacy_url: updatesEmailConsent.privacyUrl,
+      },
+      undefined,
+      expected,
     );
-  }
-  function setUpdatesEmail(owner: string, email: string) {
-    return setOwnerPersonProperties(owner, {
-      email,
-      nod_updates_email_consent: true,
-      nod_updates_email_consent_at: new Date().toISOString(),
-      nod_updates_email_consent_version: updatesEmailConsent.version,
-      nod_updates_email_consent_text: updatesEmailConsent.text,
-      nod_updates_email_consent_privacy_url: updatesEmailConsent.privacyUrl,
-    });
   }
   function setUsageData(owner: string, enabled: boolean, revision = state(owner).revision) {
     const current = state(owner);
@@ -303,6 +333,7 @@ export async function createAnalytics(options: {
     consent,
     personProfileAvailable,
     setOnboardingProfileAnswers,
+    setOnboardingProfileProperties,
     setUpdatesEmail,
     withRun<T>(owner: string, operation: () => T): T {
       return runs.run({ owner, id: randomUUID(), consent: consent(owner) }, operation);
@@ -412,6 +443,7 @@ export const analyticsRoutes = new Map<
   ['POST /api/channel-settings/telegram/confirm', channel('update')],
   ['POST /api/channel-settings/telegram/user', channel('update')],
   ['POST /api/channel-settings/whatsapp/pairing', channel('connect_started')],
+  ['POST /api/channel-settings/:provider/reconnect', channel('connect_started')],
   ['DELETE /api/channel-settings/whatsapp/pairing', channel('disconnect')],
   ['DELETE /api/channel-settings/:provider', channel('disconnect')],
   ['POST /api/models/keys', settings('models', 'update')],

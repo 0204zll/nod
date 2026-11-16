@@ -22,7 +22,7 @@ import { ChatTools } from '../components/chat-tools';
 import { ServiceLogo } from '../components/service-logo';
 import { Composer, type ComposerHandle, type ComposerSendResult } from '../components/composer';
 import { TaskCard } from './tasks';
-import { MessageBubble } from '../components/message';
+import { MessageBubble, type MessageWork } from '../components/message';
 import { conversationFiles } from '../components/attachment-card';
 import { ArtifactWorkspace } from '../components/artifact-drawer';
 import { PrivateEntryWorkspace } from '../components/private-entry';
@@ -30,6 +30,7 @@ import { ChatNotifications } from '../components/chat-notifications';
 import { BrandMark } from '../components/brand';
 import { FeedbackLauncher } from '../components/feedback-discovery';
 import { Button, Notice } from '../components/ui';
+import type { ModelSelection } from '../../shared/models';
 import { desktopSettingsAvailable } from '../lib/desktop';
 import { usePageData } from '../hooks/use-page-data';
 import { api, apiResponse, ApiError, errorMessage, post } from '../lib/api';
@@ -45,6 +46,7 @@ import { NodGlyph, Rise, prefersReducedMotion } from '../components/motion';
 import { LiveLine } from '../components/live-line';
 import { TaskDots } from '../components/task-dots';
 import { recordingSource } from '../lib/recording';
+import { money } from '../lib/money';
 import type { ImagePreview } from '../components/attachment-images';
 import { reuseFile } from '../components/file-actions';
 import { ownedArtifactUrl } from '../lib/attachment-url';
@@ -356,6 +358,8 @@ export function Chat({
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const [recovering, setRecovering] = useState(false);
+  const [recovered, setRecovered] = useState<string>();
   const [connectionNotice, setConnectionNotice] = useState<{
     text: string;
     kind: 'success' | 'error';
@@ -694,7 +698,60 @@ export function Chat({
   ];
   const live = state.activity ?? [];
   const working = live.some((item) => !item.background);
-  const chatWork = connected ? live.find((item) => !item.background && !item.taskId) : undefined;
+  const lastMessage = allMessages.at(-1);
+  const beforeLast = allMessages.at(-2);
+  const modelFailed =
+    lastMessage?.role === 'assistant' &&
+    lastMessage.id !== recovered &&
+    lastMessage.streamId?.startsWith('model-failure:') &&
+    beforeLast?.role === 'user' &&
+    beforeLast.turnId === lastMessage.turnId;
+  const failedRequest =
+    modelFailed &&
+    beforeLast &&
+    !beforeLast.attachments.length &&
+    !beforeLast.replyToMessageId &&
+    !beforeLast.choiceAnswer &&
+    !beforeLast.cardAnswer
+      ? beforeLast.text
+      : undefined;
+  const chatWork = connected
+    ? live.find((item) => !item.background && !item.taskId && !item.runId)
+    : undefined;
+  const workOf = (message: Message): MessageWork | undefined => {
+    const work = message.work;
+    if (!work) return undefined;
+    const item = live.find((entry) =>
+      work.kind === 'task' ? entry.taskId === work.id : entry.runId === work.id,
+    );
+    const task =
+      work.kind === 'task' ? state.tasks?.find((entry) => entry.id === work.id) : undefined;
+    return {
+      title: work.title,
+      status:
+        message.approval?.state === 'pending' || message.answerChoicesPending
+          ? 'needs_you'
+          : item
+            ? 'working'
+            : 'idle',
+      live: item,
+      ...(task?.messageId
+        ? {
+            onOpen: () => {
+              const opened = !window.dispatchEvent(
+                new CustomEvent('nod:open-task', { detail: { taskId: task.id }, cancelable: true }),
+              );
+              if (!opened)
+                window.dispatchEvent(
+                  new CustomEvent('nod:focus-message', {
+                    detail: { messageId: task.messageId, taskId: task.id },
+                  }),
+                );
+            },
+          }
+        : {}),
+    };
+  };
   const lastChatWork = useRef<{ threadId: string; item: Activity } | null>(null);
   if (chatWork) lastChatWork.current = { threadId, item: chatWork };
   const finishing = lastChatWork.current?.threadId === threadId ? lastChatWork.current.item : null;
@@ -758,8 +815,16 @@ export function Chat({
   };
   for (const id of streamTimes.current.keys())
     if (!streamIds.has(id)) streamTimes.current.delete(id);
+  const codeRequests = new Map(
+    (state.verificationRequests ?? []).flatMap((request) => {
+      const target = allMessages.findLast(
+        (message) => message.role === 'assistant' && message.turnId === request.turnId,
+      );
+      return target ? [[target.id, request.kind] as const] : [];
+    }),
+  );
   const displayMessages: Message[] = [
-    ...allMessages,
+    ...allMessages.filter((message) => !message.cardAnswer),
     ...streamEntries.map(([id, value]): Message => {
       if (!streamTimes.current.has(id)) streamTimes.current.set(id, new Date().toISOString());
       return {
@@ -1103,21 +1168,48 @@ export function Chat({
     setFocusTarget(null);
     setError('Could not find that message in this chat.');
   }, [focusTarget, loadingHistory, historyPage, hasEarlier, historyError, visible]);
+  async function recover(selection?: ModelSelection) {
+    setRecovering(true);
+    setRecovered(lastMessage?.id);
+    try {
+      if (selection)
+        await api('/api/models/selection', {
+          method: 'PUT',
+          body: JSON.stringify({
+            connectionId: selection.connectionId,
+            modelId: selection.modelId,
+            effort: selection.effort,
+          }),
+        });
+      if (failedRequest) await send(failedRequest, [], null);
+    } catch (error) {
+      setError(errorMessage(error));
+    } finally {
+      setRecovering(false);
+    }
+  }
+
   async function send(
     value: string,
     attachments: Artifact[],
     reply: ComposerReply | null | undefined = replyTo,
-    source: 'composer' | 'task_card' | 'ask_nod' | 'task_reply' | 'answer_choice' = reply &&
-    reply.id === taskReply.current
-      ? 'task_reply'
-      : 'composer',
+    source:
+      | 'composer'
+      | 'task_card'
+      | 'ask_nod'
+      | 'task_reply'
+      | 'answer_choice'
+      | 'approval_card' = reply && reply.id === taskReply.current ? 'task_reply' : 'composer',
     recording?: File,
     questionAnswer?: QuestionAnswer,
+    displayText?: string,
+    approvalAnswer?: { approvalId: string; approved: boolean },
   ): Promise<ComposerSendResult & { error?: string; questionUnavailable?: true }> {
-    if (welcoming || spendingPaused) return { sent: false, restoreText: true };
+    if (welcoming) return { sent: false, restoreText: true };
     unreadPositioned.current = currentUnreadVisit.current;
     const replyId = reply?.id;
     questionAnswer ??=
+      !approvalAnswer &&
       reply &&
       !unavailableQuestions.has(reply.id) &&
       (reply.answerQuestion ||
@@ -1125,13 +1217,15 @@ export function Chat({
         state.pendingAnswerChoiceMessageIds?.includes(reply.id))
         ? { custom: true }
         : undefined;
-    const directAnswer = source === 'answer_choice';
+    const directAnswer = source === 'answer_choice' || source === 'approval_card';
     const captureAnalytics = analyticsForCurrentSession();
     const sentThread = threadId;
     const activeReply = { retired: false };
     const replyRetired = () => activeReply.retired;
     const verificationRequests = (
-      questionAnswer && 'choiceIds' in questionAnswer ? [] : (state.verificationRequests ?? [])
+      (questionAnswer && !('custom' in questionAnswer)) || approvalAnswer
+        ? []
+        : (state.verificationRequests ?? [])
     ).filter(
       (request) =>
         !reply || request.turnId === allMessages.find((message) => message.id === replyId)?.turnId,
@@ -1158,7 +1252,7 @@ export function Chat({
     const recordingId = recordingKey ? recordingIds.current.get(recordingKey) : null;
     const plainSignature = privateVerification
       ? null
-      : JSON.stringify([value, attachmentIds, null, null, false, recordingId, null]);
+      : JSON.stringify([value, attachmentIds, null, null, false, recordingId, null, displayText]);
     const signature = privateVerification
       ? null
       : JSON.stringify([
@@ -1169,6 +1263,8 @@ export function Chat({
           reply?.isQuote === true,
           recordingId,
           questionAnswer ?? null,
+          displayText,
+          approvalAnswer ?? null,
         ]);
     if (privateVerification) retry.current = null;
     const unresolvedReply =
@@ -1233,9 +1329,13 @@ export function Chat({
       id,
       role: 'user',
       text: privateVerification ? masked : value,
+      ...(!privateVerification && displayText ? { displayText } : {}),
       attachments,
       turnId: null,
       createdAt: new Date().toISOString(),
+      ...((questionAnswer || approvalAnswer) && value.trim() && !attachments.length && !recording
+        ? { cardAnswer: true as const }
+        : {}),
       ...(reply
         ? {
             replyToMessageId: reply.id,
@@ -1323,6 +1423,7 @@ export function Chat({
           threadId: sentThread,
           clientMessageId: id,
           text: value,
+          ...(displayText ? { displayText } : {}),
           attachmentIds,
           ...(replyId
             ? {
@@ -1333,6 +1434,7 @@ export function Chat({
           ...(seenMessageId ? { seenMessageId } : {}),
           ...(verificationRequestId ? { verificationRequestId } : {}),
           ...(questionAnswer ? { questionAnswer } : {}),
+          ...(approvalAnswer ? { approvalAnswer } : {}),
         });
       submittedBody = messageBody;
       let body: string | FormData = messageBody;
@@ -1365,8 +1467,8 @@ export function Chat({
               result.error === 'The reply is unavailable in this conversation.'));
         questionUnavailable =
           response.status === 409 &&
-          result.code === 'question_unavailable' &&
-          Boolean(questionAnswer && replyId) &&
+          (result.code === 'question_unavailable' || result.code === 'approval_unavailable') &&
+          Boolean((questionAnswer || approvalAnswer) && replyId) &&
           !privateVerification;
         if (response.status === 409 && verificationStatus === undefined)
           void refresh().catch(() => {});
@@ -1404,6 +1506,11 @@ export function Chat({
                   ...item.message,
                   turnId,
                   text: messageText,
+                  ...(privateVerification
+                    ? { displayText: undefined }
+                    : typeof result.displayText === 'string'
+                      ? { displayText: result.displayText }
+                      : {}),
                   ...(typeof result.audioCaption === 'string'
                     ? { audioCaption: result.audioCaption }
                     : {}),
@@ -1537,7 +1644,11 @@ export function Chat({
         .filter((item) => item.result && !item.result.sent && item.result.restoreText)
         .map((item) => item.text);
       requestedSends.current = [];
-      if (unsent.length) setText((current) => [...unsent, current].filter(Boolean).join('\n\n'));
+      if (unsent.length) {
+        const restored = unsent.join('\n\n');
+        if (!composer.current?.prependText(restored))
+          setText((current) => [restored, current].filter(Boolean).join('\n\n'));
+      }
       composer.current?.focus();
     });
   }, [requestedMessage, state.configuration.llmReady, welcoming]);
@@ -2175,9 +2286,8 @@ export function Chat({
                   ) : (
                     <MessageBubble
                       message={message}
-                      answersDisabled={
-                        sending || !state.configuration.llmReady || welcoming || spendingPaused
-                      }
+                      work={workOf(message)}
+                      answersDisabled={sending || !state.configuration.llmReady || welcoming}
                       onAnswer={async (value, answer) => {
                         if (replyTo?.id === message.id && composer.current?.hasDraft()) {
                           composer.current.focus();
@@ -2203,29 +2313,26 @@ export function Chat({
                           setReplyTo((current) => (current?.id === message.id ? null : current));
                         return result.sent;
                       }}
-                      onWriteAnswer={(value) => {
-                        const input = composer.current;
-                        if (!input) return;
-                        if (replyTo?.id === message.id) {
-                          if (!input.hasDraft()) setText(value);
-                          setReplyTo({ ...replyTo, answerQuestion: true });
-                          setReplyNotice('');
-                        } else if (replyTo || input.hasDraft()) {
-                          setReplyNotice(
-                            'Finish or clear your current draft before answering this question.',
-                          );
-                        } else {
-                          taskReply.current = null;
-                          setReplyTo({
-                            id: message.id,
-                            role: 'assistant',
-                            text: message.text,
-                            answerQuestion: true,
-                          });
-                          setText(value);
-                        }
-                        input.focus();
-                      }}
+                      onApprove={
+                        message.approval
+                          ? async (approved, label) => {
+                              const result = await send(
+                                label,
+                                [],
+                                { id: message.id, role: 'assistant', text: message.text },
+                                'approval_card',
+                                undefined,
+                                undefined,
+                                undefined,
+                                { approvalId: message.approval!.id, approved },
+                              );
+                              if (result.questionUnavailable) return 'unavailable';
+                              if (!result.sent && result.error) throw new Error(result.error);
+                              return result.sent;
+                            }
+                          : undefined
+                      }
+                      codeRequest={codeRequests.get(message.id)}
                       pendingAudio={
                         optimistic.find((item) => item.message.id === message.id)?.audio
                       }
@@ -2246,7 +2353,10 @@ export function Chat({
                         message.turnId || persistedIds.has(message.id)
                           ? (quote?: string) => {
                               taskReply.current = null;
-                              const preview = message.audioCaption ?? message.text;
+                              const preview =
+                                (message.role === 'user' ? message.displayText : undefined) ??
+                                message.audioCaption ??
+                                message.text;
                               const text =
                                 preview.trim() || !message.presentation
                                   ? preview
@@ -2367,10 +2477,44 @@ export function Chat({
               {connectionNotice.text}
             </Notice>
           )}
-          {spendingPaused && (
+          {state.configuration.llmReady &&
+            (state.configuration.modelIssue ||
+              (modelFailed && (failedRequest || state.configuration.modelAlternative))) && (
+              <Notice kind="info">
+                {state.configuration.modelIssue
+                  ? `Your model’s last request failed: ${state.configuration.modelIssue.reason.replace(/(?<![.!?])$/, '.')}`
+                  : 'Your model’s last request failed.'}
+                <span className="notice-actions">
+                  {state.configuration.modelAlternative && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={recovering || working || sending}
+                      onClick={() => void recover(state.configuration.modelAlternative)}
+                    >
+                      Use {state.configuration.modelAlternative.label}
+                    </Button>
+                  )}
+                  {failedRequest && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={recovering || working || sending}
+                      onClick={() => void recover()}
+                    >
+                      Try again
+                    </Button>
+                  )}
+                  <a href="/settings/models">Settings &gt; Models</a>
+                </span>
+              </Notice>
+            )}
+          {spendingPaused && trust?.limit && (
             <Notice kind="info">
-              Chat is paused because you reached your spending limit.{' '}
-              <a href="/usage">Raise the limit in Usage</a> to resume.
+              You reached your {money(trust.limit.monthlyUsd)} monthly spending limit. Raise or
+              remove it in <a href="/usage">Usage</a>, or ask Nod here.
             </Notice>
           )}
           <div
@@ -2388,7 +2532,7 @@ export function Chat({
               restoreReply={(saved) => {
                 if (!saved || !hiddenMessageIds.current.has(saved.id)) setReplyTo(saved);
               }}
-              ready={state.configuration.llmReady && !welcoming && !spendingPaused}
+              ready={state.configuration.llmReady && !welcoming}
               busy={connected && working}
               text={text}
               setText={setText}
@@ -2405,8 +2549,8 @@ export function Chat({
                 taskReply.current = null;
                 setReplyTo(null);
               }}
-              onSend={(value, attachments, recording) =>
-                send(value, attachments, replyTo, undefined, recording)
+              onSend={(value, attachments, recording, displayText) =>
+                send(value, attachments, replyTo, undefined, recording, undefined, displayText)
               }
               onStop={
                 working ||

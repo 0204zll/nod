@@ -1,11 +1,19 @@
 import { presentationSchema, presentationText } from '../shared/presentation.ts';
-import { answerChoicesSchema } from '../shared/answer-choices.ts';
+import {
+  answerChoicesSchema,
+  questionAnswerSchema,
+  writtenAnswer,
+  type AnswerChoice,
+} from '../shared/answer-choices.ts';
+import { approvalContent, approvalTitle } from './action-presentation.ts';
 import Fastify, { type FastifyReply } from 'fastify';
 import multipart from '@fastify/multipart';
+import rateLimit from '@fastify/rate-limit';
 import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import type { SpeechService } from './speech.ts';
 import { messageInput, registerAudioMessages } from './audio-messages.ts';
+import { messageTooLongError } from '../shared/message-limits.ts';
 import type { ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { pool } from './db.ts';
@@ -28,6 +36,7 @@ import {
   reactToAssistantMessage,
   resetThread,
   resumeAfterHandoff,
+  stopSignal,
   stopThread,
   submitUserMessage,
 } from './thread.ts';
@@ -41,6 +50,7 @@ import { browserErrorMessage } from '../shared/browser-errors.ts';
 import { browserHandoffInputs } from '../shared/browser-handoff.ts';
 import type {
   Activity,
+  ApprovalState,
   Configuration,
   Message,
   MessageHistoryPage,
@@ -52,33 +62,118 @@ import { registerWorkAdmission, type WorkAdmission } from './work-admission.ts';
 import { registerAnalyticsRoutes, snapshotAnalytics, type CaptureAnalytics } from './analytics.ts';
 import { messagePreview } from './message-preview.ts';
 
-const messageFields = `m.id,m.role,m.text,m.audio_caption AS "audioCaption",m.turn_id AS "turnId",m.created_at AS "createdAt",m.attachments,m.stream_id AS "streamId",m.reaction,m.assistant_reaction AS "assistantReaction",m.reply_to_message_id AS "replyToMessageId",m.suggestions,m.presentation,m.answer_choices AS "answerChoices",(${pendingAnswerChoicesSql}) AS "answerChoicesPending",
- CASE WHEN target.id IS NULL THEN NULL ELSE json_build_object('id',target.id,'role',target.role,'text',COALESCE(m.reply_quote,''),'isQuote',m.reply_quote IS NOT NULL) END AS "replyTo"`;
+const reactionReplySql = (alias: 'm' | 'target') =>
+  `EXISTS (SELECT 1 FROM turns reaction_turn
+    WHERE reaction_turn.owner_id=${alias}.owner_id AND reaction_turn.message_id=${alias}.id
+      AND starts_with(reaction_turn.source_id,'reaction-reply:'))`;
+const messageFields = `m.id,m.role,m.text,CASE WHEN m.role='user' THEN m.display_text END AS "displayText",m.audio_caption AS "audioCaption",m.turn_id AS "turnId",m.created_at AS "createdAt",m.attachments,m.stream_id AS "streamId",m.reaction,m.assistant_reaction AS "assistantReaction",m.reply_to_message_id AS "replyToMessageId",m.suggestions,m.presentation,m.answer_choices AS "answerChoices",(${pendingAnswerChoicesSql}) AS "answerChoicesPending",
+ (m.role='user' AND (m.approval_answer IS NOT NULL OR (m.question_answer IS NOT NULL AND m.text<>'' AND jsonb_array_length(m.attachments)=0))) AS "cardAnswer",
+ CASE WHEN m.role='assistant' AND m.answer_choices IS NOT NULL THEN (SELECT json_build_object('answer',a.question_answer,'text',a.text) FROM messages a
+   WHERE a.reply_to_message_id=m.id AND a.owner_id=m.owner_id AND a.role='user' AND a.question_answer IS NOT NULL AND a.text<>'' AND jsonb_array_length(a.attachments)=0 ORDER BY a.created_at,a.id LIMIT 1) END AS "choiceAnswer",
+ CASE WHEN m.role='assistant' THEN (SELECT json_build_object('id',a.id,'status',a.status,'action',a.action,'title',a.title,'args',a.args,'active',u.status IN ('running','waiting'),'executionActive',e.status IN ('queued','running','waiting')) FROM approvals a
+   JOIN turns u ON u.id=a.turn_id AND u.owner_id=a.owner_id LEFT JOIN turns e ON e.id=a.execution_turn_id AND e.owner_id=a.owner_id
+   WHERE a.confirmation_message_id=m.id AND a.owner_id=m.owner_id LIMIT 1) END AS "approval",
+ CASE WHEN m.role='assistant' AND (m.answer_choices IS NOT NULL OR EXISTS (SELECT 1 FROM approvals a WHERE a.confirmation_message_id=m.id AND a.owner_id=m.owner_id))
+   THEN (SELECT COALESCE(
+     (SELECT json_build_object('kind','task','id',k.id,'title',k.title) FROM tasks k WHERE k.owner_id=m.owner_id AND k.session_id=w.session_id ORDER BY k.created_at DESC LIMIT 1),
+     (SELECT json_build_object('kind','schedule','id',r.id,'title',r.title) FROM schedule_runs r WHERE r.owner_id=m.owner_id AND r.turn_id=w.session_id LIMIT 1))
+     FROM turns w WHERE w.id=m.turn_id AND w.owner_id=m.owner_id) END AS "work",
+ CASE WHEN target.id IS NULL OR ${reactionReplySql('target')} THEN NULL ELSE json_build_object('id',target.id,'role',target.role,'text',COALESCE(m.reply_quote,''),'isQuote',m.reply_quote IS NOT NULL) END AS "replyTo"`;
+const chatMessageSql = `NOT ${reactionReplySql('m')}`;
+const textMessageOptions = {
+  bodyLimit: 8 * 1024 * 1024,
+  config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+};
 function visualText(presentation: unknown) {
   const visual = presentationSchema.safeParse(presentation);
   return visual.success ? presentationText(visual.data) : '';
 }
 
-function messageView(row: Message & { assistantReaction?: MessageReaction | null }): Message {
+type ApprovalRow = {
+  id: string;
+  status: string;
+  action: string;
+  args: unknown;
+  title?: string | null;
+  active: boolean;
+  executionActive: boolean | null;
+};
+type ChoiceAnswerRow = { answer: unknown; text: string };
+
+function approvalState(row: ApprovalRow): ApprovalState {
+  if (row.status === 'pending') return row.active ? 'pending' : 'expired';
+  if (row.status === 'confirmed') return row.executionActive ? 'working' : 'expired';
+  if (row.status === 'executing') return row.executionActive ? 'working' : 'uncertain';
+  if (row.status === 'completed') return 'done';
+  if (row.status === 'declined' || row.status === 'uncertain') return row.status;
+  return 'expired';
+}
+
+function choiceAnswerView(options: AnswerChoice[], row: ChoiceAnswerRow | null | undefined) {
+  const answer = questionAnswerSchema.safeParse(row?.answer);
+  if (!row || !answer.success) return undefined;
+  if (!('choiceIds' in answer.data)) return { choiceIds: [], text: row.text };
+  const { choiceIds, custom } = answer.data;
+  const text =
+    custom &&
+    writtenAnswer(
+      options.filter((option) => choiceIds.includes(option.id)),
+      row.text,
+    );
+  return { choiceIds, ...(text ? { text } : {}) };
+}
+
+type MessageRow = Omit<Message, 'approval' | 'choiceAnswer' | 'cardAnswer' | 'work'> & {
+  work?: Message['work'] | null;
+  assistantReaction?: MessageReaction | null;
+  approval?: ApprovalRow | null;
+  choiceAnswer?: ChoiceAnswerRow | null;
+  cardAnswer?: boolean | null;
+};
+
+function messageView(row: MessageRow): Message {
   const {
     assistantReaction,
     presentation,
+    displayText,
     audioCaption,
     answerChoices,
     answerChoicesPending,
+    approval,
+    choiceAnswer,
+    cardAnswer,
+    work,
     ...message
   } = row;
   const visual =
     message.role === 'assistant' ? presentationSchema.safeParse(presentation) : undefined;
   const choices =
     message.role === 'assistant' ? answerChoicesSchema.safeParse(answerChoices) : undefined;
+  const answered = choices?.success
+    ? choiceAnswerView(choices.data.options, choiceAnswer)
+    : undefined;
   return {
     ...message,
+    ...(message.role === 'user' && typeof displayText === 'string' ? { displayText } : {}),
     ...(typeof audioCaption === 'string' ? { audioCaption } : {}),
     ...(visual?.success ? { presentation: visual.data } : {}),
     ...(choices?.success
       ? { answerChoices: choices.data, answerChoicesPending: answerChoicesPending === true }
       : {}),
+    ...(answered ? { choiceAnswer: answered } : {}),
+    ...(approval
+      ? {
+          approval: {
+            id: approval.id,
+            state: approvalState(approval),
+            ...approvalTitle(approval.action),
+            ...(approval.title ? { title: approval.title } : {}),
+            ...approvalContent(approval.action, approval.args),
+          },
+        }
+      : {}),
+    ...(cardAnswer ? { cardAnswer: true as const } : {}),
+    ...(work ? { work } : {}),
     reactions: [
       ...(message.reaction ? [{ actor: 'user' as const, reaction: message.reaction }] : []),
       ...(assistantReaction ? [{ actor: 'assistant' as const, reaction: assistantReaction }] : []),
@@ -94,6 +189,12 @@ export interface AppDependencies {
   speech?: SpeechService;
   attributeAudioUsage?: (client: PoolClient, ids: string[], turnId: string) => Promise<void>;
   submitMessage?: typeof submitUserMessage;
+  reactToMessage?: (
+    messageId: string,
+    reaction: MessageReaction | null,
+    wake: boolean,
+    replyChannel: string,
+  ) => ReturnType<typeof reactToAssistantMessage>;
   verification?: Awaited<ReturnType<typeof createChatVerification>>;
   computer?: Pick<
     Computer,
@@ -109,9 +210,7 @@ export interface AppDependencies {
 export async function createApp(dependencies: AppDependencies = {}) {
   const publicConfiguration = dependencies.configuration ?? configuration;
   const artifacts = dependencies.artifacts ?? localArtifacts;
-  async function messageViews(
-    rows: Array<Message & { assistantReaction?: MessageReaction | null }>,
-  ) {
+  async function messageViews(rows: MessageRow[]) {
     const replyIds = [
       ...new Set(
         rows.flatMap((row) => (row.replyTo && !row.replyTo.isQuote ? [row.replyTo.id] : [])),
@@ -119,7 +218,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
     ];
     const targets = replyIds.length
       ? await pool.query<{ id: string; role: string; text: string; presentation: unknown }>(
-          'SELECT id,role,COALESCE(audio_caption,text) AS text,presentation FROM messages WHERE owner_id=$1 AND id=ANY($2::uuid[]) AND hidden_at IS NULL',
+          "SELECT id,role,COALESCE(CASE WHEN role='user' THEN display_text END,audio_caption,text) AS text,presentation FROM messages WHERE owner_id=$1 AND id=ANY($2::uuid[]) AND hidden_at IS NULL",
           [ownerId, replyIds],
         )
       : { rows: [] };
@@ -179,6 +278,15 @@ export async function createApp(dependencies: AppDependencies = {}) {
         ? (error as Error & { statusCode?: number; retryable?: boolean; code?: string })
         : undefined;
     const status = error instanceof z.ZodError ? 400 : known?.statusCode || 500;
+    const messageTooLong =
+      (request.routeOptions.url === '/api/messages' ||
+        request.routeOptions.url === '/api/messages/audio') &&
+      (known?.code === 'message_too_long' ||
+        (error instanceof z.ZodError &&
+          error.issues.some(
+            (issue) =>
+              issue.code === 'too_big' && issue.path.length === 1 && issue.path[0] === 'text',
+          )));
     if (status >= 500)
       logFailure('request_failed', error, {
         method: request.method,
@@ -190,13 +298,19 @@ export async function createApp(dependencies: AppDependencies = {}) {
       ...(status === 409 && known?.code === 'question_unavailable'
         ? { code: 'question_unavailable' }
         : {}),
-      error:
-        error instanceof z.ZodError
+      ...(messageTooLong ? { code: 'message_too_long' } : {}),
+      error: messageTooLong
+        ? messageTooLongError
+        : error instanceof z.ZodError
           ? 'Check the supplied values.'
           : status < 500
             ? known?.message
             : 'This request could not be completed. Check the local service and try again.',
     });
+  });
+  await app.register(rateLimit, {
+    global: false,
+    keyGenerator: () => ownerId,
   });
   await app.register(multipart, { limits: { fileSize: fileBytes, files: 1, fields: 5 } });
   const audioMessages = registerAudioMessages(app, dependencies);
@@ -228,7 +342,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
   app.get('/api/state', async () => {
     const thread = await activeThread(pool);
     const messageRows = pool.query(
-      `SELECT ${messageFields} FROM (SELECT m.* FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL ORDER BY date_trunc('milliseconds',m.created_at) DESC,m.id DESC LIMIT 151) m
+      `SELECT ${messageFields} FROM (SELECT m.* FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND ${chatMessageSql} ORDER BY date_trunc('milliseconds',m.created_at) DESC,m.id DESC LIMIT 151) m
          LEFT JOIN messages target ON target.id=m.reply_to_message_id AND target.owner_id=m.owner_id AND target.hidden_at IS NULL ORDER BY date_trunc('milliseconds',m.created_at),m.id`,
       [ownerId, thread.id],
     );
@@ -302,7 +416,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
            || jsonb_path_query_array(m.presentation,'strict $.** ? (@.type() == "array")[*] ? (@.type() == "string" || @.type() == "number")') AS content
          WHERE m.role='assistant' AND m.presentation->>'version'='1'
        ) visual ON true
-       WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND (
+       WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND ${chatMessageSql} AND (
          to_tsvector('english',m.text) @@ websearch_to_tsquery('english',$3) OR strpos(lower(m.text),lower($3))>0
          OR jsonb_to_tsvector('english',visual.content,'["string","numeric"]') @@ websearch_to_tsquery('english',$3)
          OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(visual.content) value WHERE strpos(lower(value),lower($3))>0)
@@ -337,13 +451,13 @@ export async function createApp(dependencies: AppDependencies = {}) {
     const thread = await activeThread(pool);
     const hit = (
       await pool.query(
-        'SELECT created_at FROM messages WHERE id=$1 AND owner_id=$2 AND thread_id=$3 AND hidden_at IS NULL',
+        `SELECT m.created_at FROM messages m WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.hidden_at IS NULL AND ${chatMessageSql}`,
         [id, ownerId, thread.id],
       )
     ).rows[0];
     if (!hit) throw Object.assign(new Error('Message not found.'), { statusCode: 404 });
     const { rows } = await pool.query(
-      `SELECT ${messageFields} FROM messages m LEFT JOIN messages target ON target.id=m.reply_to_message_id AND target.owner_id=m.owner_id AND target.hidden_at IS NULL WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND m.created_at BETWEEN $3::timestamptz-interval '1 day' AND $3::timestamptz+interval '1 day' ORDER BY (m.id=$4) DESC,abs(extract(epoch FROM m.created_at-$3::timestamptz)),m.id LIMIT 60`,
+      `SELECT ${messageFields} FROM messages m LEFT JOIN messages target ON target.id=m.reply_to_message_id AND target.owner_id=m.owner_id AND target.hidden_at IS NULL WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND ${chatMessageSql} AND m.created_at BETWEEN $3::timestamptz-interval '1 day' AND $3::timestamptz+interval '1 day' ORDER BY (m.id=$4) DESC,abs(extract(epoch FROM m.created_at-$3::timestamptz)),m.id LIMIT 60`,
       [ownerId, thread.id, hit.created_at, id],
     );
     return messageViews(rows);
@@ -365,7 +479,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
     const rows = await pool.query(
       `SELECT ${messageFields} FROM messages m
       LEFT JOIN messages target ON target.id=m.reply_to_message_id AND target.owner_id=m.owner_id AND target.hidden_at IS NULL
-      WHERE m.owner_id=$1 AND m.thread_id=$4 AND m.hidden_at IS NULL AND ($2::timestamptz IS NULL OR date_trunc('milliseconds',m.created_at) < $2 OR (date_trunc('milliseconds',m.created_at) = $2 AND $3::uuid IS NOT NULL AND m.id < $3))
+      WHERE m.owner_id=$1 AND m.thread_id=$4 AND m.hidden_at IS NULL AND ${chatMessageSql} AND ($2::timestamptz IS NULL OR date_trunc('milliseconds',m.created_at) < $2 OR (date_trunc('milliseconds',m.created_at) = $2 AND $3::uuid IS NOT NULL AND m.id < $3))
       ORDER BY date_trunc('milliseconds',m.created_at) DESC,m.id DESC LIMIT 61`,
       [ownerId, query.before ?? null, query.beforeId ?? null, thread.id],
     );
@@ -380,10 +494,15 @@ export async function createApp(dependencies: AppDependencies = {}) {
       .object({ reaction: z.string().max(64).refine(isMessageReaction).nullable() })
       .strict()
       .parse(request.body);
-    return reactToAssistantMessage(
+    const react =
+      dependencies.reactToMessage ??
+      ((id: string, value: MessageReaction | null, wake: boolean, channel: string) =>
+        reactToAssistantMessage(id, value, wake, undefined, channel));
+    return react(
       z.uuid().parse(request.params.id),
       reaction,
       publicConfiguration().llmReady,
+      'web',
     );
   });
   app.post('/api/conversation/reset', async (request, reply) => {
@@ -398,7 +517,8 @@ export async function createApp(dependencies: AppDependencies = {}) {
       return reset;
     }, threadId);
   });
-  app.post('/api/messages', async (request) => {
+  app.post('/api/messages', textMessageOptions, async (request) => {
+    const arrival = stopSignal();
     const input = messageInput
       .refine((value) => value.text.length > 0 || value.attachmentIds.length > 0)
       .refine(
@@ -406,10 +526,18 @@ export async function createApp(dependencies: AppDependencies = {}) {
           !value.questionAnswer ||
           (Boolean(value.replyToMessageId) && !value.verificationRequestId),
       )
+      .refine(
+        (value) =>
+          !value.approvalAnswer ||
+          (Boolean(value.replyToMessageId) &&
+            !value.questionAnswer &&
+            !value.verificationRequestId &&
+            value.attachmentIds.length === 0),
+      )
       .parse(request.body);
     const clientMessageId = input.clientMessageId ?? randomUUID();
     const verification =
-      input.questionAnswer && 'choiceIds' in input.questionAnswer
+      (input.questionAnswer && !('custom' in input.questionAnswer)) || input.approvalAnswer
         ? undefined
         : await dependencies.verification?.accept(input.text, {
             ...input,
@@ -439,15 +567,21 @@ export async function createApp(dependencies: AppDependencies = {}) {
       ),
       {
         channel: 'web',
+        displayText: input.displayText,
         replyToMessageId: input.replyToMessageId,
         replyQuote: input.replyQuote,
         seenMessageId: input.seenMessageId,
         threadId: input.threadId,
         clientMessageId,
         questionAnswer: input.questionAnswer,
+        approvalAnswer: input.approvalAnswer,
+        stopSignal: arrival,
       },
     );
-    return submitted;
+    return {
+      ...submitted,
+      ...(input.displayText !== undefined ? { displayText: input.displayText } : {}),
+    };
   });
   app.post('/api/thread/stop', () => {
     const capture = snapshotAnalytics(dependencies.analytics);
@@ -564,7 +698,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
     const latest = await pool.query(
       `SELECT left(COALESCE(m.text,u.prompt),100) AS title,u.status,COALESCE(e.created_at,u.created_at) AS "lastActivityAt"
        FROM turns u LEFT JOIN messages m ON m.id=u.message_id
-       LEFT JOIN LATERAL (SELECT created_at FROM turn_events WHERE turn_id=u.id AND type IN ('tool_start','tool_complete') AND summary='browser' ORDER BY created_at DESC LIMIT 1) e ON true
+       LEFT JOIN LATERAL (SELECT created_at FROM turn_events WHERE turn_id=u.id AND type IN ('tool_start','tool_complete') AND (summary='browser' OR summary LIKE 'browser %') ORDER BY created_at DESC LIMIT 1) e ON true
        WHERE u.owner_id=$1 AND u.thread_id=$2 AND u.session_id=$2 AND e.created_at IS NOT NULL
        ORDER BY e.created_at IS NULL,COALESCE(e.created_at,u.created_at) DESC LIMIT 1`,
       [ownerId, thread.id],

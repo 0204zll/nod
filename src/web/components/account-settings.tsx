@@ -21,6 +21,7 @@ import {
   Switch,
 } from './ui';
 import { DataSharing } from './data-sharing';
+import { LocalFilesSettings } from './local-files-settings';
 import { ModelSettings } from './models';
 import { VoiceSettings } from './voice-settings';
 import { Memory, type MemoryNavigationState } from '../pages/memory';
@@ -334,7 +335,7 @@ export function AccountSettings({
                   <ActionMenu
                     label="Settings options"
                     trigger={
-                      <Button variant="ghost" size="icon">
+                      <Button variant="ghost" size="icon" title="Settings options">
                         <Ellipsis size={18} />
                       </Button>
                     }
@@ -513,6 +514,7 @@ export function AccountSettings({
                         </p>
                       </section>
                     )}
+                    <LocalFilesSettings />
                     {desktopRuntimeAvailable() && (
                       <section className="account-region">
                         <div className="account-preference-row">

@@ -1,4 +1,9 @@
-import { SessionManager, type FileEntry } from '@earendil-works/pi-coding-agent';
+import {
+  SessionManager,
+  buildSessionProjection,
+  estimateTokens,
+  type FileEntry,
+} from '@earendil-works/pi-coding-agent';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { existsSync, statSync } from 'node:fs';
 import { readFile, readdir, stat } from 'node:fs/promises';
@@ -11,6 +16,8 @@ const rebaseAt = 8 * 1024 * 1024;
 export const keptImages = 4;
 export const removedImage =
   'An earlier image was removed from context. Take a new screenshot or read the file again if you need it.';
+export const recoveryContext =
+  'Earlier context remains in saved history or workspace files. Read the source before using missing facts. Do not repeat completed or uncertain actions.';
 const failure = () =>
   new Error(
     'The assistant session could not be saved. Stop and restore storage before continuing.',
@@ -129,13 +136,15 @@ function rebaseSession(source: SessionManager, next: SessionManager) {
   const copyRecording = (entry: (typeof audio)[number]) =>
     next.appendCustomMessageEntry(entry.customType, entry.content, entry.display, entry.details);
   for (const entry of audio.slice(-2)) if (!current.has(entry.id)) copyRecording(entry);
-  let images = context.reduce(
-    (count, entry) =>
-      entry.type === 'message' && entry.message.role === 'toolResult'
-        ? count + entry.message.content.filter((part) => part.type === 'image').length
-        : count,
-    0,
-  );
+  let images = [...projected.values()]
+    .flat()
+    .reduce(
+      (count, message) =>
+        message.role === 'toolResult'
+          ? count + message.content.filter((part) => part.type === 'image').length
+          : count,
+      0,
+    );
   for (const entry of context) {
     if (entry.type === 'compaction')
       next.appendCompaction(entry.summary, null, entry.tokensBefore, entry.details);
@@ -150,22 +159,72 @@ function rebaseSession(source: SessionManager, next: SessionManager) {
             timestamp: message.timestamp,
           });
     } else if (entry.type === 'message') {
-      const message = entry.message;
-      next.appendMessage(
-        ('content' in message && Array.isArray(message.content)
-          ? {
-              ...message,
-              content: message.content.map((part) =>
-                part?.type === 'image' && message.role === 'toolResult' && images-- > keptImages
-                  ? { type: 'text' as const, text: removedImage }
-                  : part,
-              ),
-            }
-          : message) as Parameters<typeof next.appendMessage>[0],
-      );
+      for (const message of projected.get(entry.id) ?? [])
+        next.appendMessage(
+          ('content' in message && Array.isArray(message.content)
+            ? {
+                ...message,
+                content: message.content.map((part) =>
+                  part?.type === 'image' && message.role === 'toolResult' && images-- > keptImages
+                    ? { type: 'text' as const, text: removedImage }
+                    : part,
+                ),
+              }
+            : message) as Parameters<typeof next.appendMessage>[0],
+        );
     }
   }
   return next;
+}
+
+export function dropFailedInput(manager: SessionManager) {
+  const projection = new Map(
+    manager.buildSessionProjection().entries.map((entry) => [entry.sourceEntry.id, entry.messages]),
+  );
+  const entries = manager.getBranch();
+  const stops = entries.map((entry) => {
+    const message =
+      projection.get(entry.id)?.find((item) => item.role === 'assistant') ??
+      (entry.type === 'message' ? entry.message : undefined);
+    return message?.role === 'assistant' ? message.stopReason : undefined;
+  });
+  const failed = stops.lastIndexOf('error');
+  const answered = stops.findLastIndex(
+    (stop) => stop === 'stop' || stop === 'toolUse' || stop === 'length',
+  );
+  if (failed <= answered) return false;
+  const compacted = entries
+    .slice(answered + 1, failed + 1)
+    .some((entry) => entry.type === 'compaction' && projection.get(entry.id)?.length);
+  let changed = false;
+  for (const entry of entries.slice(answered + 1, failed + 1))
+    if (
+      (entry.type === 'message' || entry.type === 'custom_message') &&
+      projection
+        .get(entry.id)
+        ?.some((message) => ['user', 'custom', 'toolResult', 'assistant'].includes(message.role))
+    ) {
+      manager.appendContextEdit(entry.id, null);
+      changed = true;
+    }
+  if (compacted) {
+    const before = entries.slice(0, answered + 1);
+    const prior = before.findLast((entry) => entry.type === 'compaction');
+    manager.appendCompaction(
+      prior?.type === 'compaction' ? prior.summary : recoveryContext,
+      prior?.type === 'compaction' ? prior.firstKeptEntryId : (entries[0]?.id ?? null),
+      prior?.type === 'compaction'
+        ? prior.tokensBefore
+        : buildSessionProjection(before).messages.reduce(
+            (total, message) => total + estimateTokens(message),
+            0,
+          ),
+      prior?.type === 'compaction' ? prior.details : undefined,
+      prior?.type === 'compaction' ? prior.fromHook : undefined,
+    );
+  }
+  if (changed || compacted) closeInterruptedCalls(manager);
+  return changed || compacted;
 }
 
 export function closeInterruptedCalls(manager: SessionManager) {

@@ -4,8 +4,12 @@ import {
   getSupportedThinkingLevels,
   getSystemMessageText,
   hasApi,
+  createAssistantMessageEventStream,
+  isContextOverflow,
+  isRetryableAssistantError,
   type Api,
   type AssistantMessage,
+  type Context,
   type Model,
   type CredentialStore,
 } from '@earendil-works/pi-ai';
@@ -15,6 +19,7 @@ import { z } from 'zod';
 import { createRemoteJWKSet, customFetch, jwtVerify } from 'jose';
 import { ModelAuthError, ModelWorkspaceSelectionError } from '../../ports/models.ts';
 import { ElevenLabsConnectionError, readElevenLabsVoices } from '../elevenlabs/speech.ts';
+import { openAIBaseUrl, openAIRequestError } from '../openai/api.ts';
 import type {
   ModelAccess,
   ModelBackend,
@@ -29,11 +34,14 @@ import {
   type ModelMethod,
 } from '../../shared/models.ts';
 import { signInPage } from '../../shared/sign-in-page.ts';
-import type { PiModelCall } from './traces.ts';
+import type { PiModelCall, ModelRequestFacts } from './traces.ts';
 import type { AgentSessionOptions } from '../../ports/agent.ts';
 import type { ProviderUsageEvent } from '../../ports/provider-usage.ts';
 import { piUsageMetrics } from './usage.ts';
 import { audioUsage, nativeAudioRequest, readsNativeAudio } from './audio.ts';
+import { completeAssistantMessage } from './checkpoint.ts';
+import { modelContext } from './context.ts';
+import { modelServiceError } from '../model-error.ts';
 import {
   antLingModel,
   nativeAudioModel,
@@ -43,70 +51,22 @@ import {
   nativeCatalog,
 } from './model-catalog.ts';
 
-const localModelSilenceMs = 30 * 60_000;
+export const localModelSilenceMs = 30 * 60_000;
+export const modelFirstEventMs = 90_000;
+
+function supportedModel(model: Model<Api>): Model<Api> {
+  if (model.provider === 'groq' && model.id.startsWith('qwen/'))
+    return { ...model, compat: { ...model.compat, supportsDeveloperRole: false } };
+  if (model.provider === 'openrouter' && model.id === 'xiaomi/mimo-v2.6-flash')
+    return { ...model, compat: { ...model.compat, supportsStrictMode: false } };
+  if (model.provider === 'openrouter' && model.id === 'openrouter/free')
+    return { ...model, thinkingLevelMap: { ...model.thinkingLevelMap, off: null } };
+  return model;
+}
 
 const resource = 'https://api.openai.com/v1';
 const issuer = 'https://auth.openai.com';
 
-export function modelContextBudget(model: {
-  provider: string;
-  id: string;
-  contextWindow: number;
-  maxTokens: number;
-}) {
-  const routed =
-    model.provider === 'openrouter' && ['openrouter/free', 'openrouter/auto'].includes(model.id);
-  const window = routed ? Math.min(8192, model.contextWindow) : model.contextWindow;
-  const compact = window < 65_536;
-  return {
-    window,
-    compact,
-    margin: Math.min(2048, Math.max(128, Math.floor(window / 16))),
-    output: compact ? Math.min(model.maxTokens, Math.floor(window / 4)) : model.maxTokens,
-    reserve: compact ? Math.floor(window / 2) : Math.max(16_384, window - 256_000),
-    recent: compact
-      ? Math.floor(window / 8)
-      : Math.max(0, Math.round(Math.min(256_000, window - 16_384) / 3)),
-  };
-}
-
-export function estimateModelTokens(payload: unknown) {
-  let images = 0;
-  const text = JSON.stringify(payload, (_key, value) => {
-    if (!value || typeof value !== 'object') return value;
-    if (value.type === 'image_url' && typeof value.image_url?.url === 'string') {
-      images++;
-      return { ...value, image_url: { ...value.image_url, url: '[image]' } };
-    }
-    if (value.type === 'input_image' && typeof value.image_url === 'string') {
-      images++;
-      return { ...value, image_url: '[image]' };
-    }
-    if (value.type === 'image' && value.source?.type === 'base64') {
-      images++;
-      return { ...value, source: { ...value.source, data: '[image]' } };
-    }
-    if (
-      value.type === 'image' &&
-      /^image\//.test(value.mimeType ?? '') &&
-      typeof value.data === 'string'
-    ) {
-      images++;
-      return { ...value, data: '[image]' };
-    }
-    for (const key of ['inlineData', 'inline_data'])
-      if (/^image\//.test(value[key]?.mimeType ?? value[key]?.mime_type ?? '')) {
-        images++;
-        return { ...value, [key]: { ...value[key], data: '[image]' } };
-      }
-    if (value.image?.source?.bytes && value.image?.format) {
-      images++;
-      return { ...value, image: { ...value.image, source: { bytes: '[image]' } } };
-    }
-    return value;
-  });
-  return Math.ceil(Buffer.byteLength(text) / 3) + images * 1200;
-}
 const callbackUrl = 'http://127.0.0.1:1455/auth/callback';
 const registration = 'dynamic_agent_client';
 const planScope = 'chatgpt.tokens.use.direct';
@@ -158,37 +118,16 @@ function entries<T>(value: unknown, schema: z.ZodType<T>) {
     });
 }
 
-async function modelListRestricted(response: Response) {
-  const reader = response.body?.getReader();
-  if (!reader) return false;
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      bytes += value.length;
-      if (bytes > 4096) return false;
-      chunks.push(value);
-    }
-    const body = z
-      .object({ error: z.union([z.string(), z.object({ message: z.string() })]) })
-      .parse(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-    const message = typeof body.error === 'string' ? body.error : body.error.message;
-    const scopes = [...message.matchAll(/\bMissing scopes:\s*([\s\S]*?)(?:\.(?=\s|$)|$)/g)];
-    return scopes.length === 1 && scopes[0][1].trim() === 'api.model.read';
-  } catch {
-    return false;
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
+function modelListRestricted(message = '') {
+  const scopes = [...message.matchAll(/\bMissing scopes:\s*([\s\S]*?)(?:\.(?=\s|$)|$)/g)];
+  return scopes.length === 1 && scopes[0][1].trim() === 'api.model.read';
 }
 
 const levels = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 let endpointConnections: Dispatcher1Wrapper | undefined;
 const keyless = 'nod-no-key';
 const ollamaShowSchema = z.object({
-  capabilities: z.array(z.string()).catch([]),
+  capabilities: z.array(z.string()).optional().catch(undefined),
   model_info: z.record(z.string(), z.unknown()).catch({}),
   parameters: z.string().catch(''),
   thinking: z
@@ -205,10 +144,9 @@ function ollamaModel(show: z.infer<typeof ollamaShowSchema>) {
   const contextWindow = Math.min(trained ?? Infinity, configured ?? Infinity);
   const values = show.thinking?.values;
   const named = levels.filter((level) => values?.includes(level));
-  const thinkingLevelMap = !show.capabilities.includes('thinking')
-    ? undefined
-    : !values
-      ? { off: 'none' }
+  const thinkingLevelMap =
+    show.capabilities?.includes('thinking') === false || !values
+      ? undefined
       : named.length
         ? {
             off: values.includes(false) || values.includes('none') ? 'none' : null,
@@ -218,15 +156,15 @@ function ollamaModel(show: z.infer<typeof ollamaShowSchema>) {
           }
         : values.includes(true)
           ? {
-              off: 'none',
+              off: values.includes(false) ? 'none' : null,
               ...Object.fromEntries(
-                levels.map((level) => [level, level === 'high' ? 'high' : null]),
+                levels.map((level) => [level, level === 'high' ? 'true' : null]),
               ),
             }
           : undefined;
   return {
-    usable: show.capabilities.includes('tools'),
-    images: show.capabilities.includes('vision'),
+    usable: show.capabilities?.includes('tools'),
+    images: show.capabilities?.includes('vision'),
     contextWindow: Number.isFinite(contextWindow) ? contextWindow : undefined,
     reasoning: !!thinkingLevelMap,
     thinkingLevelMap,
@@ -268,11 +206,12 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
       refreshOnCreate: false,
       allowModelNetwork: false,
     }));
-  async function jsonResponse(response: Response) {
-    if (!response.ok)
-      throw new Error(
-        'The model service rejected the request. Check the connection and account access.',
-      );
+  async function jsonResponse(
+    response: Response,
+    service = 'Model discovery',
+    secrets: string[] = [],
+  ) {
+    if (!response.ok) throw await modelServiceError(response, service, secrets);
     return response.json();
   }
   async function json(url: string, init: RequestInit = {}) {
@@ -304,6 +243,7 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
     return token;
   }
   function definition(model: Model<Api>): ModelDefinition {
+    model = supportedModel(model);
     return {
       choice: {
         id: model.id,
@@ -359,61 +299,67 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
       })
         .then((response) => (response.ok ? response.json() : undefined))
         .catch(() => undefined);
-    const ollama = z
-      .object({ version: z.string() })
-      .safeParse(await serverJson('/api/version')).success;
-    const studio = ollama
-      ? undefined
-      : z.object({ models: z.array(z.unknown()) }).safeParse(await serverJson('/api/v1/models'))
-          .data?.models;
-    const studioModels = studio ? entries(studio, lmStudioModelSchema) : [];
-    const models = await Promise.all(
-      listed.map(async (entry) => {
-        const shown = ollama
-          ? ollamaShowSchema.safeParse(
-              await serverJson('/api/show', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: entry.id }),
-              }),
-            )
-          : undefined;
-        const studioModel = studioModels.find((model) => model.key === entry.id);
-        const known = shown?.success
-          ? ollamaModel(shown.data)
-          : studioModel
-            ? lmStudioModel(studioModel)
-            : undefined;
-        if (known && !known.usable) return [];
-        const contextWindow =
-          known?.contextWindow ??
-          entry.context_length ??
-          entry.context_window ??
-          entry.max_model_len ??
-          128_000;
-        return [
-          definition({
-            id: entry.id,
-            name: entry.id,
-            api: 'openai-completions',
-            provider: 'compatible',
-            baseUrl: found.url,
-            compat: {
-              supportsStore: false,
-              supportsDeveloperRole: false,
-              maxTokensField: 'max_tokens',
-            },
-            reasoning: known?.reasoning ?? false,
-            thinkingLevelMap: known?.thinkingLevelMap,
-            input: known?.images ? ['text', 'image'] : ['text'],
-            contextWindow,
-            maxTokens: Math.min(32_768, Math.floor(contextWindow / 2)),
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          } as Model<Api>),
-        ];
-      }),
+    const [version, studio] = await Promise.all([
+      serverJson('/api/version'),
+      serverJson('/api/v1/models'),
+    ]);
+    const ollama = z.object({ version: z.string() }).safeParse(version).success;
+    const studioModels = entries(
+      z.object({ models: z.array(z.unknown()) }).safeParse(studio).data?.models ?? [],
+      lmStudioModelSchema,
     );
-    return models.flat();
+    const models: ModelDefinition[] = [];
+    for (let index = 0; index < listed.length; index += 3) {
+      const batch = await Promise.all(
+        listed.slice(index, index + 3).map(async (entry) => {
+          const studioModel = studioModels.find((model) => model.key === entry.id);
+          const shown =
+            ollama && !studioModel
+              ? ollamaShowSchema.safeParse(
+                  await serverJson('/api/show', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model: entry.id }),
+                  }),
+                )
+              : undefined;
+          const known = studioModel
+            ? lmStudioModel(studioModel)
+            : shown?.success
+              ? ollamaModel(shown.data)
+              : undefined;
+          if (known?.usable === false) return [];
+          const contextWindow =
+            known?.contextWindow ??
+            entry.context_length ??
+            entry.context_window ??
+            entry.max_model_len ??
+            128_000;
+          return [
+            definition({
+              id: entry.id,
+              name: entry.id,
+              api: 'openai-completions',
+              provider: 'compatible',
+              baseUrl: found.url,
+              compat: {
+                supportsStore: false,
+                supportsDeveloperRole: false,
+                maxTokensField: 'max_tokens',
+              },
+              reasoning: known?.reasoning ?? false,
+              thinkingLevelMap: known?.thinkingLevelMap,
+              input: known?.images ? ['text', 'image'] : ['text'],
+              contextWindow,
+              maxTokens: Math.min(32_768, Math.floor(contextWindow / 2)),
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            } as Model<Api>),
+          ];
+        }),
+      );
+      models.push(...batch.flat());
+    }
+    return models;
   }
   async function cloudResponse(url: string, init: RequestInit, rejected: string) {
     const response = await request(url, {
@@ -765,10 +711,15 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
       if (!modelProviders.includes(provider))
         throw new Error('This model provider is unavailable.');
       if (provider === 'compatible') return endpointCatalog(credential);
-      const local = assistantModels(
+      let local = assistantModels(
         provider === 'ant-ling' ? [antLingModel] : (await runtime()).getModels(provider),
       );
-      if (provider === 'openai' && method === 'api_key') local.push(nativeAudioModel);
+      if (provider === 'openai' && method === 'api_key') {
+        const baseUrl = openAIBaseUrl(
+          credential?.type === 'api_key' ? credential.region : undefined,
+        );
+        local = [...local, nativeAudioModel].map((model) => ({ ...model, baseUrl }));
+      }
       if (!credential) return local.map(definition);
       if (provider === 'amazon-bedrock') return bedrockCatalog(local, credential);
       if (provider === 'google-vertex') return vertexCatalog(local, credential);
@@ -784,7 +735,7 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
           ? 'https://openrouter.ai/api/v1/models'
           : provider === 'anthropic'
             ? 'https://api.anthropic.com/v1/models?limit=1000'
-            : `${resource}/models`;
+            : `${method === 'api_key' && credential.type === 'api_key' ? openAIBaseUrl(credential.region) : resource}/models`;
       const headers: Record<string, string> =
         provider === 'anthropic'
           ? {
@@ -796,6 +747,7 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
             }
           : { Authorization: `Bearer ${key}` };
       const accepted = async (response: Response) => {
+        if (provider === 'openai' && method === 'api_key') return response;
         if (provider === 'anthropic' && response.status === 400) {
           await response.body?.cancel();
           throw new AnthropicBadRequest(
@@ -845,15 +797,15 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
           redirect: 'error',
         }),
       );
-      if (
-        provider === 'openai' &&
-        method === 'api_key' &&
-        credential.type === 'api_key' &&
-        response.status === 403 &&
-        (await modelListRestricted(response))
-      )
-        return local.map(definition);
-      const data = await jsonResponse(response);
+      if (provider === 'openai' && method === 'api_key' && !response.ok) {
+        const error = await openAIRequestError(response, key);
+        if (response.status === 403 && modelListRestricted(error.reason))
+          return local.map(definition);
+        throw new ModelAuthError(error.message);
+      }
+      const data = await jsonResponse(response, `${modelProviderNames[provider]} model discovery`, [
+        key,
+      ]);
       if (provider !== 'openrouter') {
         const list = entries(
           method === 'subscription' ? data.models : data.data,
@@ -1024,11 +976,54 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
   };
 }
 
+function portableToolCallIds(messages: Context['messages'], model: string): Context['messages'] {
+  const portable = /^[A-Za-z0-9]{9}$/;
+  const used = new Set(
+    messages.flatMap((message) =>
+      message.role === 'assistant'
+        ? message.content.flatMap((part) =>
+            part.type === 'toolCall' && portable.test(part.id) ? [part.id] : [],
+          )
+        : [],
+    ),
+  );
+  const ids = new Map<string, string>();
+  return messages.map((message) => {
+    if (message.role === 'toolResult') {
+      const id = ids.get(message.toolCallId);
+      return id ? { ...message, toolCallId: id } : message;
+    }
+    if (message.role !== 'assistant') return message;
+    ids.clear();
+    if (message.model === model) return message;
+    return {
+      ...message,
+      content: message.content.map((part) => {
+        if (part.type !== 'toolCall' || portable.test(part.id)) return part;
+        let id = createHash('sha256').update(part.id).digest('hex').slice(0, 9);
+        for (let attempt = 1; used.has(id); attempt++)
+          id = createHash('sha256').update(`${attempt}:${part.id}`).digest('hex').slice(0, 9);
+        used.add(id);
+        ids.set(part.id, id);
+        return { ...part, id };
+      }),
+    };
+  });
+}
+
 export async function createPiModelRuntime(
   access: ModelAccess,
-  trace?: (call: PiModelCall) => void,
-  readAudio?: AgentSessionOptions['readAudio'],
-  reportCacheUsage?: (usage: ProviderUsageEvent) => void,
+  {
+    trace,
+    readAudio,
+    reportCacheUsage,
+    automatic = false,
+  }: {
+    trace?: (call: PiModelCall) => void;
+    readAudio?: AgentSessionOptions['readAudio'];
+    reportCacheUsage?: (usage: ProviderUsageEvent) => void;
+    automatic?: boolean;
+  } = {},
 ) {
   const subscription = access.method === 'subscription';
   const provider = access.provider;
@@ -1125,12 +1120,13 @@ export async function createPiModelRuntime(
       };
     };
   }
+  const limits = modelContext(
+    access.definition.spec as unknown as Model<Api>,
+    access.textModel?.definition.spec as unknown as Model<Api> | undefined,
+  ).model;
   runtime.registerProvider(provider, {
     models: [access.definition, ...(access.textModel ? [access.textModel.definition] : [])].map(
-      ({ spec }) => ({
-        ...spec,
-        contextWindow: modelContextBudget(spec as unknown as Model<Api>).window,
-      }),
+      ({ spec }) => modelContext(supportedModel(spec as unknown as Model<Api>), limits).model,
     ) as unknown as ProviderModelConfig[],
   });
   await runtime.refresh({ allowNetwork: false });
@@ -1140,33 +1136,83 @@ export async function createPiModelRuntime(
   if (access.textModel && (!textModel || readsNativeAudio(textModel)))
     throw new Error('The text companion is unavailable. Refresh the model list.');
   const stream = runtime.streamSimple.bind(runtime);
+  const requestFacts = new WeakMap<AssistantMessage, ModelRequestFacts>();
   runtime.streamSimple = (model, context, options) => {
+    context = {
+      ...context,
+      messages: context.messages.map((message) =>
+        message.role === 'assistant' ? completeAssistantMessage(message) : message,
+      ),
+    };
     const audio = readsNativeAudio(model) ? nativeAudioRequest(context, readAudio) : undefined;
-    const target = audio && !audio.active && textModel ? textModel : model;
+    const companion = audio && !audio.active ? textModel : undefined;
+    const { model: target } = modelContext(companion ?? model, limits);
     const usage = audio?.active ? audioUsage() : undefined;
-    const events = stream(target, audio?.context ?? context, {
-      ...options,
-      maxTokens:
-        options?.maxTokens && target.maxTokens > 0
-          ? Math.min(options.maxTokens, target.maxTokens)
-          : options?.maxTokens,
-      maxRetries: 0,
-      ...(target !== model
-        ? { reasoning: access.textModel!.effort === 'off' ? undefined : access.textModel!.effort }
-        : {}),
-      ...(access.provider === 'compatible' ||
+    const cacheWarm = options?.maxTokens === 1 && options.maxRetries === 0;
+    let phase: ModelRequestFacts['requestPhase'] = 'prepare';
+    let status: number | undefined;
+    let transportCause: string | undefined;
+    let completeRequest: ((error?: string) => Promise<void>) | undefined;
+    let settleBudget: ((spentUsd: number | null) => Promise<void>) | undefined;
+    const silence = new AbortController();
+    let silenceTimer: ReturnType<typeof setTimeout> | undefined;
+    const heard = () => clearTimeout(silenceTimer);
+    const guardedFetch =
+      access.provider === 'compatible' ||
       access.provider === 'radius' ||
       access.provider === 'cloudflare-workers-ai' ||
-      access.provider === 'cloudflare-ai-gateway'
+      access.provider === 'cloudflare-ai-gateway' ||
+      (access.provider === 'openai' && !subscription) ||
+      Boolean(usage);
+    const sent = audio?.context ?? context;
+    const replay =
+      access.provider === 'compatible'
+        ? { ...sent, messages: portableToolCallIds(sent.messages, target.id) }
+        : sent;
+    const output = Math.min(options?.maxTokens ?? target.maxTokens, target.maxTokens);
+    const upstream = stream(target, replay, {
+      ...options,
+      signal: options?.signal ? AbortSignal.any([options.signal, silence.signal]) : silence.signal,
+      maxTokens: output,
+      maxRetries: 0,
+      onResponse: async (response, model) => {
+        phase = 'response';
+        status = response.status;
+        await options?.onResponse?.(response, model);
+      },
+      onProviderStreamEvent: async (event, model) => {
+        heard();
+        phase = 'stream';
+        await options?.onProviderStreamEvent?.(event, model);
+      },
+      ...(target.provider === 'openrouter' && target.id === 'openrouter/free'
+        ? { reasoning: options?.reasoning ?? 'minimal' }
+        : {}),
+      ...(companion
+        ? { reasoning: access.textModel!.effort === 'off' ? undefined : access.textModel!.effort }
+        : {}),
+      ...(guardedFetch ||
+      (
+        [
+          'openai-completions',
+          'openai-responses',
+          'openai-codex-responses',
+          'azure-openai-responses',
+          'anthropic-messages',
+          'mistral-conversations',
+          'pi-messages',
+          'openrouter-images',
+        ] as const
+      ).some((api) => hasApi(target, api))
         ? {
-            fetch: (input: string | URL | Request, init?: RequestInit) => {
+            fetch: async (input: string | URL | Request, init?: RequestInit) => {
               const headers = new Headers(init?.headers);
               if (headers.get('authorization') === `Bearer ${keyless}`)
                 headers.delete('authorization');
-              return (options?.fetch ?? fetch)(input, {
+              phase = 'request';
+              const response = await (options?.fetch ?? fetch)(input, {
                 ...init,
-                headers,
-                redirect: 'error',
+                ...(guardedFetch ? { headers, redirect: 'error' } : {}),
                 ...(access.provider === 'compatible'
                   ? {
                       dispatcher: (endpointConnections ??= new Dispatcher1Wrapper(
@@ -1177,19 +1223,28 @@ export async function createPiModelRuntime(
                       )),
                     }
                   : {}),
-              } as RequestInit);
+              } as RequestInit).catch((error: unknown) => {
+                let cause = error;
+                for (let depth = 0; depth < 4 && cause instanceof Error; depth++) {
+                  const code = (cause as Error & { code?: unknown }).code;
+                  if (typeof code === 'string' && /^(?:E[A-Z_]+|UND_ERR_[A-Z_]+)$/.test(code))
+                    transportCause = code;
+                  cause = cause.cause;
+                }
+                throw error;
+              });
+              return usage ? usage.response(response) : response;
             },
           }
         : {}),
-      ...(usage
-        ? {
-            fetch: async (input: string | URL | Request, init?: RequestInit) =>
-              usage.response(await (options?.fetch ?? fetch)(input, init)),
-          }
-        : {}),
       onPayload: async (payload, target) => {
+        completeRequest = await access.prepareRequest?.(target.id, automatic || cacheWarm);
         const changed = await options?.onPayload?.(payload, target);
         const body = (changed ?? payload) as Record<string, unknown>;
+        if (access.provider === 'compatible' && target.thinkingLevelMap?.high === 'true') {
+          body.think = body.reasoning_effort !== 'none' || target.thinkingLevelMap.off === null;
+          delete body.reasoning_effort;
+        }
         if (access.provider === 'openrouter')
           body.provider = { require_parameters: true, allow_fallbacks: false };
         if (
@@ -1263,48 +1318,82 @@ export async function createPiModelRuntime(
             );
         }
 
-        const budget = modelContextBudget(target);
-        if (budget.compact) {
-          const available = budget.window - estimateModelTokens(body) - budget.margin;
-          if (available < 128)
-            throw new Error(
-              `This request does not fit the model's ${budget.window}-token context. Use a model with a larger context or a shorter request.`,
-            );
-          const output = Math.min(options?.maxTokens ?? budget.output, budget.output, available);
-          for (const field of ['max_tokens', 'max_completion_tokens', 'max_output_tokens'])
-            if (field in body) body[field] = output;
-          for (const [field, key] of [
-            ['generationConfig', 'maxOutputTokens'],
-            ['inferenceConfig', 'maxTokens'],
-          ] as const) {
-            const config = body[field];
-            if (config && typeof config === 'object')
-              (config as Record<string, unknown>)[key] = output;
-          }
-        }
-
-        return audio?.active
-          ? audio.payload(body, options?.signal ?? AbortSignal.timeout(120000))
+        const prepared = audio?.active
+          ? await audio.payload(body, options?.signal ?? AbortSignal.timeout(120000))
           : body;
+        settleBudget = await access.reserve?.(() => {
+          const prices = target.cost;
+          return prices &&
+            [prices.input, prices.output, prices.cacheRead, prices.cacheWrite].every(
+              (price) => Number.isFinite(price) && price >= 0,
+            ) &&
+            Math.max(prices.input, prices.output, prices.cacheRead, prices.cacheWrite) > 0
+            ? (Buffer.byteLength(JSON.stringify(prepared)) *
+                Math.max(prices.input * 2, prices.cacheWrite, prices.cacheRead) +
+                output * prices.output) /
+                1_000_000
+            : null;
+        });
+        phase = 'payload';
+        if (access.provider !== 'compatible') {
+          heard();
+          silenceTimer = setTimeout(() => silence.abort(), modelFirstEventMs);
+          silenceTimer.unref?.();
+        }
+        return prepared;
       },
     });
-    const push = events.push.bind(events);
-    events.push = (event) => {
-      if (usage && (event.type === 'done' || event.type === 'error'))
-        usage.apply(event.type === 'done' ? event.message.usage : event.error.usage);
-      if (event.type === 'error')
-        Object.assign(
-          event.error,
-          JSON.parse(
-            JSON.stringify(event.error, (_key, value) => {
-              if (typeof value !== 'string') return value;
-              for (const secret of secrets) value = value.replaceAll(secret, '[redacted]');
-              return value;
-            }),
-          ),
-        );
-      push(event);
-    };
+    const events = createAssistantMessageEventStream();
+    void (async () => {
+      for await (const event of upstream) {
+        if (usage && (event.type === 'done' || event.type === 'error'))
+          usage.apply(event.type === 'done' ? event.message.usage : event.error.usage);
+        if (event.type === 'error')
+          Object.assign(
+            event.error,
+            JSON.parse(
+              JSON.stringify(event.error, (_key, value) => {
+                if (typeof value !== 'string') return value;
+                for (const secret of secrets) value = value.replaceAll(secret, '[redacted]');
+                return value;
+              }),
+            ),
+          );
+        if (event.type === 'done' || event.type === 'error') heard();
+        if (event.type === 'error' && silence.signal.aborted && !options?.signal?.aborted) {
+          event.error.stopReason = 'error';
+          event.error.errorMessage = `${modelProviderNames[access.provider]} sent no response for ${modelFirstEventMs / 1000} seconds, so the request timed out.`;
+        }
+        if (event.type === 'error') {
+          const error = event.error;
+          error.errorMessage = `${error.errorMessage || 'The provider gave no reason.'}${status ? ` (HTTP ${status})` : ''}${transportCause ? ` (transport cause: ${transportCause})` : ''} [request phase: ${phase}]`;
+        }
+        if ((event.type === 'done' || event.type === 'error') && phase !== 'prepare') {
+          const message = event.type === 'done' ? event.message : event.error;
+          if (
+            message.stopReason !== 'aborted' &&
+            !options?.signal?.aborted &&
+            (message.stopReason !== 'error' ||
+              !(
+                isRetryableAssistantError(message) ||
+                isContextOverflow(message, target.contextWindow)
+              ))
+          )
+            await completeRequest?.(
+              message.stopReason === 'error' ? message.errorMessage : undefined,
+            );
+        }
+        if (event.type === 'done' || event.type === 'error') {
+          const message = event.type === 'done' ? event.message : event.error;
+          await settleBudget?.(piUsageMetrics(message.usage).costUsd ?? null);
+          requestFacts.set(message, {
+            requestPhase: phase,
+          });
+        }
+        events.push(event);
+      }
+      events.end(await upstream.result());
+    })();
     if (reportCacheUsage && options?.maxTokens === 1 && options.maxRetries === 0) {
       const id = randomUUID();
       const started = performance.now();
@@ -1343,12 +1432,19 @@ export async function createPiModelRuntime(
       const startedAt = new Date().toISOString();
       void events
         .result()
-        .then((message) => trace({ model: target, context, message, startedAt }))
+        .then((message) =>
+          trace({ model: target, context, message, startedAt, request: requestFacts.get(message) }),
+        )
         .catch(() => {});
     }
     return events;
   };
   const model = runtime.getModel(provider, access.definition.choice.id);
   if (!model) throw new Error('The selected model is unavailable. Refresh the model list.');
-  return { runtime, model, textModel };
+  return {
+    runtime,
+    model,
+    textModel,
+    requestFacts: (message: AssistantMessage) => requestFacts.get(message),
+  };
 }

@@ -7,12 +7,21 @@ import test from 'node:test';
 import pg from 'pg';
 import { accessCookie, accessKey } from '../src/server/access.ts';
 
-test('a verification code attached to any wording is intercepted in any language', async () => {
+test('a verification code is held back in any wording or language and is the code only by itself', async () => {
   const { classifyVerificationReply, securityCodeIn } =
     await import('../src/shared/verification-code.ts');
-  for (const text of ['1234', 'Your code is 1234', '验证码1234', 'رمز1234', 'otp1234', 'code:1234'])
+  for (const text of ['1234', '12 34', ' 1234. '])
     assert.deepEqual(classifyVerificationReply(text), { kind: 'code', code: '1234' });
-  for (const text of ['1234 is the code', 'Send 12 34 as the code', 'otp 1234 now'])
+  for (const text of [
+    'Your code is 1234',
+    '验证码1234',
+    'رمز1234',
+    'otp1234',
+    'code:1234',
+    'oh and while ur in there whats the status of invoice NS-1042',
+  ])
+    assert.deepEqual(classifyVerificationReply(text), { kind: 'wrapped' });
+  for (const text of ['1234 is the code', 'Send 12 34 as the code', 'otp 1234 now', '+1234'])
     assert.deepEqual(classifyVerificationReply(text), { kind: 'invalid' });
   for (const text of ['MP3', 'meeting at 10:30', 'abc123def', 'no numbers here'])
     assert.deepEqual(classifyVerificationReply(text), { kind: 'ordinary' });
@@ -80,7 +89,10 @@ test(
     const payments = await createPayments(db.pool, {
       ownerId,
       uses: await createVaultUses(db.pool, ownerId),
-      present: async () => 'Synthetic private payment step.',
+      present: async () => ({
+        question: 'Synthetic private payment step.',
+        action: 'Approve payment',
+      }),
       page: async () => ({
         origin: 'https://shop.fixture.test',
         url: 'https://shop.fixture.test/checkout',
@@ -506,7 +518,7 @@ test(
         },
       );
       await t.test(
-        'a security code sent by itself pays in Nod while other numbers are held back',
+        'a security code sent by itself pays in Nod while unrelated numbered messages reach chat',
         async () => {
           await reset();
           const threadId = (await thread.activeThread(db.pool, ownerId)).id;
@@ -530,13 +542,29 @@ test(
             (error: Error & { statusCode?: number }) => error.statusCode === 409,
           );
           assert.equal((await send('73951')).statusCode, 409);
-          for (const text of [
-            '2 hinges for 7395',
-            'mi código es 739',
+          const unrelated = [
+            'unrelated but can u remind me what invoice NS-1043 was for? the paid one',
+            '2 hinges for 2041',
             'card ending 4242',
             'The year is 2026',
-          ])
-            assert.equal((await send(text)).statusCode, 409, text);
+            'What is code abc123def?',
+            'What is code abc123?',
+          ];
+          for (const text of unrelated) assert.equal((await send(text)).statusCode, 200, text);
+          const wrappedCodes = ['my code is 1234', 'Code: 123', 'O código é 739', 'pin 8421'];
+          for (const text of wrappedCodes) {
+            const response = await send(text);
+            assert.equal(response.statusCode, 409, text);
+            assert.ok(!response.body.includes(text));
+          }
+          assert.deepEqual(ordinary, unrelated);
+          assert.deepEqual(entered, []);
+          assert.equal(
+            (await db.pool.query('SELECT text FROM messages WHERE role=$1', ['user'])).rows.some(
+              ({ text }: { text: string }) => wrappedCodes.includes(text),
+            ),
+            false,
+          );
           const earlierTurn = randomUUID();
           const earlierMessage = randomUUID();
           await db.pool.query(
@@ -549,23 +577,57 @@ test(
             [earlierMessage, ownerId, threadId, earlierTurn],
           );
           const replied = await send("it's 739", { replyToMessageId: earlierMessage });
-          assert.equal(replied.statusCode, 409);
+          assert.equal(replied.statusCode, 200);
           const prose = ['2 hinges for the door', 'Pay at 15:30'];
           for (const text of prose) assert.equal((await send(text)).statusCode, 200, text);
-          assert.deepEqual(ordinary, prose);
+          assert.deepEqual(ordinary, [...unrelated, "it's 739", ...prose]);
           assert.deepEqual(entered, []);
           const response = await send('7395');
           assert.equal(response.statusCode, 200, response.body);
           assert.equal(response.json().verificationStatus, 'submitted');
           assert.deepEqual(entered, ['7395']);
           assert.equal((await send('2026')).statusCode, 200);
-          assert.deepEqual(ordinary, [...prose, '2026']);
+          assert.deepEqual(ordinary, [...unrelated, "it's 739", ...prose, '2026']);
           assert.deepEqual(entered, ['7395']);
           const persisted = await db.pool.query(
             `SELECT text AS value FROM messages UNION ALL SELECT prompt FROM turns
              UNION ALL SELECT fields::text||status FROM vault_payments`,
           );
           assert.ok(!JSON.stringify(persisted.rows).includes('7395'));
+        },
+      );
+      await t.test(
+        'an expired payment still holds code-like replies while an invoice question reaches chat',
+        async () => {
+          await reset();
+          const threadId = (await thread.activeThread(db.pool, ownerId)).id;
+          const turnId = randomUUID();
+          await db.pool.query(
+            `INSERT INTO turns(id,owner_id,thread_id,source,prompt,channel,status,waiting_reason,started_at)
+             VALUES($1,$2,$3,'user','Buy the hinges','web','waiting','credentials',clock_timestamp())`,
+            [turnId, ownerId, threadId],
+          );
+          await payments.request(
+            { threadId, turnId },
+            {
+              amount: '43.20',
+              currency: 'EUR',
+              fields: { number: '@e4', expiry: '@e5', securityCode: '@e6' },
+            },
+          );
+          await db.pool.query(
+            `INSERT INTO turns(id,owner_id,thread_id,source,prompt,channel,status,started_at)
+             VALUES($1,$2,$3,'user','Unrelated follow-up','web','succeeded',clock_timestamp())`,
+            [randomUUID(), ownerId, threadId],
+          );
+          assert.equal((await send('739')).statusCode, 409);
+          assert.equal((await send('73951')).statusCode, 409);
+          assert.equal((await send('my code is 739')).statusCode, 409);
+          assert.equal((await send('Code: 739')).statusCode, 409);
+          const question = 'What was invoice NS-1043 for?';
+          assert.equal((await send(question)).statusCode, 200);
+          assert.deepEqual(ordinary, [question]);
+          assert.deepEqual(entered, []);
         },
       );
       await t.test(
@@ -581,7 +643,7 @@ test(
           const entering = new Promise<void>((resolve) => {
             started = resolve;
           });
-          const first = send('The code is 834 725', { clientMessageId });
+          const first = send('834 725', { clientMessageId });
           await Promise.race([
             entering,
             first.then(() => assert.fail('Expected private verification injection.')),
@@ -592,7 +654,7 @@ test(
           assert.equal(injected.length, 1);
           release();
           assert.equal((await first).statusCode, 200);
-          const after = await send('Código: 834725', {
+          const after = await send('834725.', {
             clientMessageId,
             verificationRequestId: request.requestId,
           });
@@ -610,8 +672,11 @@ test(
         'ambiguous explicit code replies stay private while a challenge is registered',
         async () => {
           await reset();
-          await seed();
+          const question = await seed();
           for (const text of [
+            'oh and while ur in there whats the status of invoice NS-1042',
+            'Your code is 482913',
+            '验证码482913',
             'Code: +123456',
             'Code: +351912345678',
             'Code: 123456 or 654321',
@@ -621,11 +686,12 @@ test(
             'Code: 123',
             'Code: 123456789',
             'Code: 2026-09-29',
-          ]) {
-            const response = await send(text);
-            assert.equal(response.statusCode, 409);
-            assert.ok(!response.body.includes(text));
-          }
+          ])
+            for (const reply of [{}, { replyToMessageId: question.messageId }]) {
+              const response = await send(text, reply);
+              assert.equal(response.statusCode, 409, text);
+              assert.ok(!response.body.includes(text));
+            }
           assert.deepEqual(ordinary, []);
           assert.equal(injected.length, 0);
           assert.equal(
@@ -636,6 +702,16 @@ test(
             (await db.pool.query('SELECT * FROM chat_verification_submissions')).rowCount,
             0,
           );
+          assert.equal((await send('482913')).json().verificationStatus, 'submitted');
+          assert.deepEqual(
+            injected.map(({ code }) => code),
+            ['482913'],
+          );
+          await reset();
+          await seed({ superseded: true });
+          assert.equal((await send('Your code is 482913')).statusCode, 409);
+          assert.deepEqual(ordinary, []);
+          assert.equal(injected.length, 0);
         },
       );
       await t.test(

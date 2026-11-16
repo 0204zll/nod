@@ -23,13 +23,13 @@ import {
   type ClientState,
 } from '../src/shared/client-api.ts';
 
-const fixtureRoot = new URL('../clients/flutter/test/fixtures/client-api/', import.meta.url);
+const fixtureRoot = new URL('./fixtures/client-api/', import.meta.url);
 
 async function fixture(name: string) {
   return JSON.parse(await readFile(new URL(name, fixtureRoot), 'utf8')) as unknown;
 }
 
-test('Flutter client fixtures match the shared server contract', async () => {
+test('external client fixtures match the shared server contract', async () => {
   const session: ClientSession = clientSessionSchema.parse(await fixture('session.json'));
   const state: ClientState = clientStateSchema.parse(await fixture('state.json'));
   const history: ClientHistory = clientHistorySchema.parse(await fixture('history.json'));

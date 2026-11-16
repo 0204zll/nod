@@ -46,6 +46,22 @@ export type ModelProvider = (typeof apiKeyConnectionProviders)[number] | 'compat
 export type ModelMethod = 'api_key' | 'subscription' | 'oauth';
 export type ModelEffort = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
+export const openAIRegions = {
+  global: 'Global',
+  eu: 'Europe (EEA + Switzerland)',
+  us: 'United States',
+  au: 'Australia',
+  ca: 'Canada',
+  in: 'India',
+  jp: 'Japan',
+  sg: 'Singapore',
+  kr: 'South Korea',
+  ae: 'United Arab Emirates',
+  gb: 'United Kingdom',
+} as const;
+
+export type OpenAIRegion = keyof typeof openAIRegions;
+
 export function lightestEffort(efforts: ModelEffort[]) {
   return efforts.find((level) => ['off', 'minimal', 'low', 'medium'].includes(level)) ?? efforts[0];
 }
@@ -58,13 +74,84 @@ export interface ModelChoice {
   audio?: boolean;
   textModelName?: string;
   contextWindow: number;
-  pricing?: { input: number; output: number } | 'variable';
+  pricing?: ModelPricing | 'variable';
+}
+
+export interface ModelPricing {
+  input: number;
+  output: number;
+  cacheRead?: number;
+  cacheWrite?: number;
 }
 
 export interface ModelSelection {
   connectionId: string;
   modelId: string;
   effort: ModelEffort;
+}
+
+export type ModelLane = 'schedule' | 'background';
+export type ModelRoute = ModelSelection | 'light';
+export type ModelRoutes = Partial<Record<ModelLane, ModelRoute | null>>;
+export type WorkKind = 'chat' | ModelLane;
+
+export interface WorkModel {
+  selection: ModelSelection;
+  follows: 'task' | 'schedule' | 'lane' | 'light' | 'chat';
+}
+
+export interface WorkUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  agentUsd: number;
+  otherUsd: number;
+  models: string[];
+}
+
+export interface WorkUsageResponse {
+  lanes: Record<WorkKind, WorkUsage>;
+  schedules: Record<string, WorkUsage>;
+  tasks: Record<string, WorkUsage>;
+  own: Array<
+    WorkUsage & { kind: WorkKind; task: ModelSelection | null; schedule: ModelSelection | null }
+  >;
+}
+
+export function routeModel(
+  models: {
+    connections: Array<{ id: string }>;
+    selection: ModelSelection | null;
+    routes?: ModelRoutes;
+    light?: ModelSelection | null;
+  },
+  kind: WorkKind,
+  own: { task?: ModelSelection | null; schedule?: ModelSelection | null } = {},
+): WorkModel | null {
+  const present = (choice: ModelSelection | null | undefined) =>
+    choice && models.connections.some((row) => row.id === choice.connectionId) ? choice : undefined;
+  const task = present(own.task);
+  if (task) return { selection: task, follows: 'task' };
+  const schedule = kind === 'schedule' ? present(own.schedule) : undefined;
+  if (schedule) return { selection: schedule, follows: 'schedule' };
+  const route = kind === 'chat' ? undefined : models.routes?.[kind];
+  if (route === 'light' && models.light) return { selection: models.light, follows: 'light' };
+  const lane = route === 'light' ? undefined : present(route);
+  if (lane) return { selection: lane, follows: 'lane' };
+  return models.selection ? { selection: models.selection, follows: 'chat' } : null;
+}
+
+export function repriceUsd(usage: WorkUsage, pricing: ModelChoice['pricing']) {
+  if (!pricing || pricing === 'variable' || pricing.input + pricing.output <= 0) return null;
+  return (
+    usage.otherUsd +
+    (usage.input * pricing.input +
+      usage.output * pricing.output +
+      usage.cacheRead * (pricing.cacheRead ?? pricing.input) +
+      usage.cacheWrite * (pricing.cacheWrite ?? pricing.input)) /
+      1e6
+  );
 }
 
 export interface ModelConnection {
@@ -76,11 +163,18 @@ export interface ModelConnection {
   models: ModelChoice[];
   managed: boolean;
   keyEnding?: string;
+  issue?: ModelIssue;
+}
+
+export interface ModelIssue {
+  reason: string;
 }
 
 export interface ModelsResponse {
   connections: ModelConnection[];
   selection: ModelSelection | null;
+  routes: ModelRoutes;
+  light: ModelSelection | null;
 }
 
 export interface ModelWorkspace {
@@ -227,7 +321,7 @@ export const modelProviderInfo: Record<
     env: 'MOONSHOT_CN_API_KEY',
     catalog: 'account',
   },
-  nvidia: { keyUrl: 'build.nvidia.com', env: 'NVIDIA_API_KEY', catalog: 'bundled' },
+  nvidia: { keyUrl: 'build.nvidia.com', env: 'NVIDIA_API_KEY', catalog: 'account' },
   opencode: { keyUrl: 'opencode.ai/auth', env: 'OPENCODE_API_KEY', catalog: 'bundled' },
   'opencode-go': { keyUrl: 'opencode.ai/auth', env: 'OPENCODE_GO_API_KEY', catalog: 'bundled' },
   'qwen-token-plan': {

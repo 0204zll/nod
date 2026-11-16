@@ -11,7 +11,11 @@ import {
   type ProfileScope,
   type ProfileWhoFor,
 } from '../../shared/onboarding';
-import { desktopSettingsAvailable } from './desktop';
+import {
+  desktopAppOpeningAvailable,
+  desktopSettingsAvailable,
+  takeDesktopAppOpening,
+} from './desktop';
 import { analyticsHost, analyticsRoute, sanitizedAnalyticsUrl } from './analytics-privacy';
 import { feedbackActivity } from './feedback-activity';
 import { requestAccountVersion } from './api';
@@ -19,6 +23,10 @@ import type { AttachmentKind } from '../../shared/attachment-kind';
 import type { Presentation } from '../../shared/presentation';
 
 type AnalyticsEvents = {
+  app_opened: {
+    entry: 'native_setup' | 'app_ui';
+    server_connection_telemetry_available?: true;
+  };
   onboarding_step_viewed: {
     step: OnboardingStep;
     direction: 'forward' | 'back';
@@ -74,7 +82,7 @@ type AnalyticsEvents = {
   chat_message_sent: {
     has_attachments: boolean;
     is_reply: boolean;
-    source: 'composer' | 'task_card' | 'ask_nod' | 'task_reply' | 'answer_choice';
+    source: 'composer' | 'task_card' | 'ask_nod' | 'task_reply' | 'answer_choice' | 'approval_card';
     input: 'text' | 'voice';
   };
   chat_stop_requested: undefined;
@@ -107,7 +115,14 @@ type AnalyticsEvents = {
     count: '1' | '2-5' | '6+';
   };
   task_action: {
-    action: 'expand' | 'stop' | 'show_in_chat' | 'open_browser' | 'show_activity' | 'reply';
+    action:
+      | 'expand'
+      | 'stop'
+      | 'show_in_chat'
+      | 'open_browser'
+      | 'show_activity'
+      | 'show_commands'
+      | 'reply';
   };
   tab_viewed: { page: 'apps'; tab: 'all' | 'connected' };
   ui_error: {
@@ -150,6 +165,7 @@ const artifactKinds = [
   'file',
 ];
 const eventProperties: Record<keyof AnalyticsEvents, Record<string, readonly unknown[]>> = {
+  app_opened: { entry: ['native_setup', 'app_ui'], server_connection_telemetry_available: [true] },
   onboarding_step_viewed: {
     step: onboardingSteps,
     direction: ['forward', 'back'],
@@ -209,7 +225,7 @@ const eventProperties: Record<keyof AnalyticsEvents, Record<string, readonly unk
   chat_message_sent: {
     has_attachments: [true, false],
     is_reply: [true, false],
-    source: ['composer', 'task_card', 'ask_nod', 'task_reply', 'answer_choice'],
+    source: ['composer', 'task_card', 'ask_nod', 'task_reply', 'answer_choice', 'approval_card'],
     input: ['text', 'voice'],
   },
   chat_stop_requested: {},
@@ -242,7 +258,15 @@ const eventProperties: Record<keyof AnalyticsEvents, Record<string, readonly unk
     count: ['1', '2-5', '6+'],
   },
   task_action: {
-    action: ['expand', 'stop', 'show_in_chat', 'open_browser', 'show_activity', 'reply'],
+    action: [
+      'expand',
+      'stop',
+      'show_in_chat',
+      'open_browser',
+      'show_activity',
+      'show_commands',
+      'reply',
+    ],
   },
   tab_viewed: {
     page: ['apps'],
@@ -254,7 +278,20 @@ const eventProperties: Record<keyof AnalyticsEvents, Record<string, readonly unk
   },
 };
 
+const appOpenRoutes = new Set([
+  '/',
+  '/onboarding',
+  '/apps',
+  '/channels',
+  '/tasks',
+  '/prepared',
+  '/usage',
+  '/vault',
+  '/settings',
+]);
+
 let configuration: AnalyticsConfiguration | undefined;
+let configurationAccount: number | undefined;
 let posthog: PostHog | undefined;
 let initialized = false;
 let identity: string | null | undefined;
@@ -264,9 +301,18 @@ let lastPage: string | undefined;
 let generation = 0;
 const eventGenerations = new WeakMap<object, number>();
 const guardedClients = new WeakSet<PostHog>();
+const opened = new Set<string>();
+const openingPending = new Set<string>();
 const viewed = new Set<string>();
 const viewListeners = new Set<() => void>();
 const discoveryConnections = new Map<string, () => void>();
+let nativeOpeningQueue: Promise<unknown> = Promise.resolve();
+
+function requestNativeOpening(consented: boolean, distinctId: string | null) {
+  const request = nativeOpeningQueue.then(() => takeDesktopAppOpening(consented, distinctId));
+  nativeOpeningQueue = request.catch(() => null);
+  return request;
+}
 
 type AnalyticsRequest = Parameters<PostHog['_send_request']>[0];
 
@@ -346,6 +392,7 @@ function suspendAnalytics() {
   viewed.clear();
   discoveryConnections.clear();
   configuration = undefined;
+  configurationAccount = undefined;
   identity = undefined;
   lastPage = undefined;
   if (!posthog || !initialized) return;
@@ -487,6 +534,8 @@ function applyConfiguration(
 ) {
   if (!posthog) return;
   if (!next?.enabled) {
+    if ((next || configuration) && desktopAppOpeningAvailable())
+      void requestNativeOpening(false, null).catch(() => {});
     suspendAnalytics();
     return;
   }
@@ -517,6 +566,7 @@ function applyConfiguration(
     posthog._retryQueue?.resume();
   }
   configuration = next;
+  configurationAccount = requestAccountVersion();
   if (!initialized) {
     posthog.init(posthogConfig.key, {
       api_host: posthogConfig.host,
@@ -563,6 +613,7 @@ function applyConfiguration(
     lastPage = undefined;
   }
   if (next.surveys && (changed || surveysChanged)) posthog.reloadFeatureFlags();
+  captureAppOpened(window.location.pathname);
 }
 
 export function captureAnalytics<Event extends keyof AnalyticsEvents>(
@@ -579,6 +630,73 @@ function captureEvent(
   try {
     feedbackActivity.record(event, properties);
     if (configuration?.enabled) posthog?.capture(event, properties);
+  } catch {}
+}
+
+function captureAppOpened(path: string) {
+  const id = configuration?.distinctId;
+  const route = analyticsRoute(path);
+  if (
+    !configuration?.enabled ||
+    !id ||
+    configurationAccount !== requestAccountVersion() ||
+    window.opener ||
+    !appOpenRoutes.has(route) ||
+    opened.has(id) ||
+    openingPending.has(id)
+  )
+    return;
+  if (surface === 'desktop' && desktopAppOpeningAvailable()) {
+    const current = generation;
+    const account = configurationAccount;
+    openingPending.add(id);
+    void requestNativeOpening(true, id)
+      .then((opening) => {
+        if (
+          current !== generation ||
+          account !== requestAccountVersion() ||
+          configurationAccount !== account ||
+          !configuration?.enabled ||
+          configuration.distinctId !== id ||
+          opened.has(id)
+        )
+          return;
+        opened.add(id);
+        if (
+          !opening ||
+          !Number.isSafeInteger(opening.openedAt) ||
+          opening.openedAt <= 0 ||
+          !surveyId.test(opening.uuid)
+        )
+          return;
+        try {
+          posthog?.capture(
+            'app_opened',
+            {
+              route: opening.entry === 'native_setup' ? '/onboarding' : route,
+              entry: opening.entry,
+              ...(opening.entry === 'native_setup' &&
+              opening.serverConnectionTelemetryAvailable === true
+                ? { server_connection_telemetry_available: true }
+                : {}),
+            },
+            {
+              timestamp: new Date(opening.openedAt),
+              uuid: opening.uuid,
+            },
+          );
+        } catch {}
+      })
+      .catch(() => {})
+      .finally(() => {
+        openingPending.delete(id);
+        if (current !== generation) captureAppOpened(window.location.pathname);
+      });
+    return;
+  }
+  opened.add(id);
+  try {
+    posthog?.capture('app_opened', { route, entry: 'app_ui' });
   } catch {}
 }
 
@@ -759,6 +877,9 @@ export function capturePageview(path: string) {
   feedbackActivity.record('screen', { screen: analyticsRoute(path) });
   if (!configuration?.enabled) return;
   const route = analyticsRoute(path);
+  try {
+    captureAppOpened(route);
+  } catch {}
   if (route === lastPage) return;
   lastPage = route;
   try {

@@ -1,6 +1,9 @@
+import { actionTarget, approvalTitle } from '../src/server/action-presentation.ts';
 import assert from 'node:assert/strict';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -9,6 +12,7 @@ import pg from 'pg';
 import type { MemoryCurator } from '../src/ports/memory-curator.ts';
 import type { AgentToolResult } from '../src/ports/agent.ts';
 import type { MessagingTransport } from '../src/ports/messaging.ts';
+import type { IntegrationBackoff } from '../src/ports/integrations.ts';
 import { createIntegrationFixture } from '../scripts/e2e-fixtures.ts';
 import { fakeComputer, fakeWorkspace } from './runtime-fixtures.ts';
 import { accessCookie, accessKey } from '../src/server/access.ts';
@@ -19,7 +23,69 @@ import { authenticatorCode } from '../src/server/authenticator.ts';
 import { transaction } from '../src/server/transaction.ts';
 import { createChannels } from '../src/server/channels.ts';
 import type { AppState, Task } from '../src/shared/contracts.ts';
+import type { WorkUsageResponse } from '../src/shared/models.ts';
 import { mergeMessages } from '../src/web/lib/chat-messages.ts';
+
+function syntheticConfirmation(input: Record<string, unknown>) {
+  const data = input.data as {
+    action: string;
+    args: Record<string, unknown>;
+    details?: Record<string, unknown>;
+    work?: { title?: string; waitsForAnswer?: boolean };
+  };
+  const { action, args } = data;
+  const details = data.details ?? {};
+  const target =
+    details.target && typeof details.target === 'object' && !Array.isArray(details.target)
+      ? (details.target as Record<string, unknown>)
+      : {};
+  const value = (item: unknown) => (typeof item === 'string' ? item.trim() : '');
+  const accountDetails =
+    details.account && typeof details.account === 'object' && !Array.isArray(details.account)
+      ? (details.account as Record<string, unknown>)
+      : {};
+  const account = value(accountDetails.identity || accountDetails.name || details.account);
+  const subject = value(args.subject || target.subject);
+  const recipient = value(args.recipient_email || args.to);
+  const title = approvalTitle(action).title;
+  let text: string;
+  let label = title;
+  if (action === 'GMAIL_SEND_EMAIL') {
+    text = `Can I send a Gmail email to ${recipient || 'the selected recipient'}${subject ? ` with subject “${subject}”` : ''}${account ? ` from ${account}` : ''}?`;
+  } else if (action === 'GMAIL_CREATE_EMAIL_DRAFT') {
+    text = `Can I save a Gmail draft to ${recipient || 'the selected recipient'}${subject ? ` with subject “${subject}”` : ''}${account ? ` in ${account}` : ''}?`;
+    label = 'Save this draft';
+  } else if (action === 'GMAIL_DELETE_MESSAGE') {
+    const from = value(target.from);
+    text = `Can I permanently delete the Gmail email${subject ? ` “${subject}”` : ''}${from ? ` from ${from}` : ''}${account ? ` in ${account}` : ''}?`;
+  } else if (action === 'GMAIL_DELETE_DRAFT') {
+    const to = value(target.to);
+    text = `Can I permanently delete the unsent Gmail draft${subject ? ` “${subject}”` : ''}${to ? ` addressed to ${to}` : ''}${account ? ` in ${account}` : ''}?`;
+  } else if (action === 'NOD_browser') {
+    const control = Array.isArray(args.control)
+      ? value((args.control as Array<{ name?: unknown }>).find((item) => value(item.name))?.name)
+      : '';
+    text = `Can I ${actionTarget(action, args, details) || 'continue on the website'}?`;
+    if (args.step === 'click' && control) label = `Click “${control.slice(0, 45)}”`;
+  } else if (action === 'NOD_vault_allow') {
+    text = `Can I use the saved sign-in for ${account || 'this account'} at ${value(args.origin)}?`;
+  } else if (action === 'NOD_memory_forget') {
+    text = `Can I forget the memory note ${value(args.path)}?`;
+    label = 'Forget note';
+  } else if (action === 'NOD_memory_control') {
+    text = `Can I turn memory saving ${args.enabled === false ? 'off' : 'on'}?`;
+  } else {
+    const operation = `${title[0]?.toLowerCase() ?? ''}${title.slice(1)}`;
+    const destination = actionTarget(action, args, details);
+    text = `Can I ${operation}${destination ? ` for ${destination}` : ''}${account ? ` in ${account}` : ''}?`;
+  }
+  if (data.work?.title)
+    text = `For ${data.work.title}, ${text[0]?.toLowerCase() ?? ''}${text.slice(1)}`;
+  if (data.work?.waitsForAnswer) text += ' This schedule skips its runs until you answer.';
+  if (Array.isArray(input.withheld) && input.withheld.length)
+    text += ' Some details are hidden. This description is incomplete.';
+  return { text, action: label };
+}
 
 test(
   'personal approvals revalidate targets before execution',
@@ -43,21 +109,25 @@ test(
     const runtimeRoot = await mkdtemp(join(tmpdir(), 'nod-test-runtime-'));
     t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
     process.env.NOD_DATA_ROOT = runtimeRoot;
+    const localHome = await realpath(await mkdtemp(join(tmpdir(), 'nod-test-home-')));
+    t.after(() => rm(localHome, { recursive: true, force: true }));
     const { createApplication } = await import('../src/server/composition.ts');
     const { pool } = await import('../src/server/db.ts');
     const { dataRoot, ownerId, port } = await import('../src/server/config.ts');
-    const { enqueueTurn } = await import('../src/server/thread.ts');
+    const { enqueueTurn, submitUserMessage } = await import('../src/server/thread.ts');
     const phases = new Map<string, number>();
     const results = new Map<string, AgentToolResult>();
     const plans = new Map<
       string,
       { tool?: string; action: string; args: Record<string, unknown> }
     >();
+    const activePlan = new AsyncLocalStorage<string>();
     const batches = new Map<
       string,
       {
         subagents: boolean;
         sequential?: boolean;
+        chatOnly?: boolean;
         calls: Array<{ tool?: string; action: string; args: Record<string, unknown> }>;
       }
     >();
@@ -71,17 +141,17 @@ test(
     const ids: string[] = [];
     const asked = new Set<string>();
     const cleared = new Set<string>();
-    const confirmationText = 'Proceed with the saved synthetic action?';
-    let confirmationValid = true;
-    let beforeConfirmation = async () => {};
+    const ownerWords: string[] = [];
     let decisionsEnabled = true;
     let replyCost: number | undefined;
     let checkCost: number | undefined;
     const connectionLabels: unknown[] = [];
+    let confirmationValid = true;
     const decisionInputs: Array<{ name: string; input: Record<string, any> }> = [];
     const fallbackChecks: object[] = [];
     const smallReplies: object[] = [];
     const executedApps: string[] = [];
+    const draftReadArgs: Array<Record<string, unknown>> = [];
     const uploads: string[] = [];
     const workspaceFiles = new Map<string, Uint8Array>();
     const browserActs: Array<Record<string, unknown>> = [];
@@ -97,9 +167,15 @@ test(
     let toolSearch: Record<string, unknown> | undefined;
     const readOnlyActions = new Set<string>();
     let appOutage = false;
+    let connectionWait: IntegrationBackoff | undefined;
+    let appSessions = 0;
     let appResult: unknown;
-    let repeatAfterConfirm: { action: string; args: Record<string, unknown> } | undefined;
+    let changeRulesOnDraftRead = false;
+    let changedRulesDuringDraftRead = 0;
+    let repeatAfterConfirm:
+      { tool?: string; action: string; args: Record<string, unknown> } | undefined;
     const prompts = new Map<string, string>();
+    const opened: Array<{ turnId: string; model?: string; helper: boolean }> = [];
     const integrationFixture = createIntegrationFixture(`http://localhost:${port}`);
     const { createModelService } = await import('../src/server/models.ts');
     const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
@@ -127,13 +203,12 @@ test(
       curate: async ({ task, input }, _signal, report) => {
         if ('purpose' in input && input.purpose === 'connection' && connectionLabels.length)
           return connectionLabels.shift();
+        if ('purpose' in input && input.purpose === 'confirmation_review')
+          return confirmationValid
+            ? { valid: true }
+            : { valid: false, reason: 'Synthetic action mismatch.' };
         if ('purpose' in input && input.purpose === 'confirmation') {
-          await beforeConfirmation();
-          return { text: confirmationText };
-        }
-        if ('purpose' in input && input.purpose === 'confirmation_review') {
-          fallbackChecks.push(input);
-          return { valid: confirmationValid };
+          return syntheticConfirmation(input as Record<string, unknown>);
         }
         if (task === 'review' && !('purpose' in input) && !('reply' in input))
           fallbackChecks.push(input);
@@ -148,6 +223,19 @@ test(
         }
         if (task === 'review' && 'action' in input && 'schema' in Object(input.action))
           return { readOnly: readOnlyActions.has(String(Object(input.action).name)) };
+        if (
+          changeRulesOnDraftRead &&
+          task === 'review' &&
+          'action' in input &&
+          Object(input.action).name === 'GMAIL_GET_DRAFT'
+        ) {
+          changeRulesOnDraftRead = false;
+          changedRulesDuringDraftRead++;
+          await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+            ownerId,
+            'Synthetic read rule changed during Trust check.',
+          ]);
+        }
         if (task === 'review' && 'action' in input && checkCost !== undefined)
           report?.({ id: randomUUID(), model: 'fixture', costUsd: checkCost });
         return task === 'review' && 'reply' in input
@@ -157,22 +245,38 @@ test(
           : task === 'review'
             ? (() => {
                 const words = input as {
-                  userMessages?: Array<{ text: string }>;
+                  userMessages?: Array<{ text: string; canAuthorize?: boolean }>;
+                  userRules?: string;
                   action?: { name?: string; arguments?: { recipient_email?: unknown } };
                 };
+                ownerWords.push(...(words.userMessages ?? []).map((message) => message.text));
+                const fileRequest = words.action?.name?.startsWith('LOCAL_FILES_')
+                  ? words.userMessages?.findLast(
+                      (message) => message.canAuthorize !== false && asked.has(message.text),
+                    )?.text
+                  : undefined;
+                const metadataRead = [
+                  'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID',
+                  'GMAIL_GET_DRAFT',
+                ].includes(words.action?.name ?? '');
+                const readRequiresConsent =
+                  metadataRead && words.userRules === 'Ask before reading Gmail.';
                 const run =
-                  (allowMethodBrowser && words.action?.name === 'NOD_browser') ||
-                  asked.has(words.userMessages?.at(-1)?.text ?? '') ||
-                  cleared.has(String(words.action?.arguments?.recipient_email));
+                  !readRequiresConsent &&
+                  (Boolean(fileRequest) ||
+                    (allowMethodBrowser && words.action?.name === 'NOD_browser') ||
+                    asked.has(words.userMessages?.at(-1)?.text ?? '') ||
+                    cleared.has(String(words.action?.arguments?.recipient_email)) ||
+                    metadataRead);
                 return run
                   ? {
                       run,
                       because:
-                        words.action?.name === 'GMAIL_FETCH_EMAILS'
+                        words.action?.name === 'GMAIL_FETCH_EMAILS' || metadataRead
                           ? 'read'
-                          : (words.userMessages?.at(-1)?.text ?? 'read'),
+                          : (fileRequest ?? words.userMessages?.at(-1)?.text ?? 'read'),
                     }
-                  : { run };
+                  : { run, ...(readRequiresConsent ? { rule: true } : {}) };
               })()
             : undefined;
       },
@@ -182,6 +286,11 @@ test(
         models,
         agent: {
           async open(options) {
+            opened.push({
+              turnId: options.turnId,
+              model: options.model?.modelId,
+              helper: options.ephemeral === true,
+            });
             reportClosingUsage = () =>
               options.onEvent({
                 type: 'provider_usage',
@@ -211,7 +320,12 @@ test(
                 if (repeatAfterConfirm && text.includes('executed once by the trusted worker')) {
                   const call = repeatAfterConfirm;
                   repeatAfterConfirm = undefined;
-                  results.set(options.turnId, await tool('apps').execute(call));
+                  results.set(
+                    options.turnId,
+                    await tool(call.tool ?? 'apps').execute(
+                      call.tool === 'files' ? { action: call.action, ...call.args } : call,
+                    ),
+                  );
                   return;
                 }
                 const part = parts.get(
@@ -225,16 +339,21 @@ test(
                     .catch(() => {});
                   return;
                 }
-                const batch =
+                const planned =
                   phase === 0
                     ? batches.get(
                         JSON.parse(text.split('Request data (JSON):\n')[1]!.split('\n')[0]!)
                           .currentInstruction,
                       )
                     : undefined;
+                const batch =
+                  planned?.chatOnly && options.sessionId !== options.threadId ? undefined : planned;
                 if (batch) {
                   if (batch.sequential) {
-                    for (const call of batch.calls) await tool('apps').execute(call);
+                    for (const call of batch.calls)
+                      await (call.tool
+                        ? tool(call.tool).execute({ action: call.action, ...call.args })
+                        : tool('apps').execute(call));
                     return;
                   }
                   await Promise.allSettled(
@@ -259,23 +378,29 @@ test(
                   assert.equal(messages.length, 1);
                   text = messages[0]!.text;
                 }
-                const plan =
+                const instruction =
                   phase === 0
-                    ? plans.get(
-                        JSON.parse(text.split('Request data (JSON):\n')[1]!.split('\n')[0]!)
-                          .currentInstruction,
-                      )
+                    ? (JSON.parse(text.split('Request data (JSON):\n')[1]!.split('\n')[0]!)
+                        .currentInstruction as string)
                     : undefined;
-                if (plan) {
-                  const result = await options.tools
-                    .find((tool) => tool.name === (plan.tool ?? 'manage_personal_context'))!
-                    .execute(
-                      plan.tool === 'read_source'
-                        ? plan.args
-                        : plan.tool === 'browser' || plan.tool === 'sign_in'
-                          ? { action: plan.action, ...plan.args }
-                          : { action: plan.action, args: plan.args },
-                    );
+                const plan = instruction === undefined ? undefined : plans.get(instruction);
+                if (plan && instruction !== undefined) {
+                  const result = await activePlan.run(instruction, () =>
+                    options.tools
+                      .find((tool) => tool.name === (plan.tool ?? 'manage_personal_context'))!
+                      .execute(
+                        plan.tool === 'send_message'
+                          ? plan.args
+                          : plan.tool === 'read_source'
+                            ? { input: plan.args }
+                            : plan.tool === 'browser' ||
+                                plan.tool === 'sign_in' ||
+                                plan.tool === 'files' ||
+                                plan.tool === 'task'
+                              ? { action: plan.action, ...plan.args }
+                              : { action: plan.action, args: plan.args },
+                      ),
+                  );
                   results.set(options.turnId, result);
                   return;
                 }
@@ -286,6 +411,11 @@ test(
           dispose() {
             if (recordClosingUsage) reportClosingUsage();
           },
+        },
+        localFilesHome: localHome,
+        trash: {
+          ready: async () => true,
+          put: (path: string) => rm(path, { recursive: true }),
         },
         computer: fakeComputer({
           signInMethods: async (_browser, origin, methods) => {
@@ -343,6 +473,9 @@ test(
           },
         }),
         workspace: fakeWorkspace({
+          writeArtifact: async (_threadId, path, bytes) => {
+            workspaceFiles.set(path, bytes);
+          },
           readArtifact: async (_threadId, path) => {
             const bytes = workspaceFiles.get(path);
             if (!bytes) throw new Error('The workspace file is unavailable.');
@@ -351,7 +484,9 @@ test(
         }),
         integrations: {
           ...integrationFixture.provider,
+          connectionBackoff: () => connectionWait,
           createSession: async (...args) => {
+            appSessions++;
             const session = await integrationFixture.provider.createSession(...args);
             session.upload = async (_action, file) => {
               uploads.push(Buffer.from(file.bytes).toString());
@@ -363,6 +498,7 @@ test(
             const execute = session.execute.bind(session);
             session.execute = async (...input) => {
               executedApps.push(input[0]);
+              if (input[0] === 'GMAIL_GET_DRAFT') draftReadArgs.push({ ...input[1] });
               if (appOutage) throw new Error('Synthetic provider outage.');
               if (appResult) return appResult;
               return execute(...input);
@@ -447,7 +583,10 @@ test(
         assert.notEqual(turn.status, 'failed', turn.error);
         await delay(20);
       }
-      assert.fail(`Synthetic turn did not become ${status}.`);
+      const turn = (await pool.query('SELECT status,error FROM turns WHERE id=$1', [id])).rows[0];
+      assert.fail(
+        `Synthetic turn did not become ${status}; status=${turn.status}, error=${turn.error ?? 'none'}.`,
+      );
     }
     async function propose(
       action: string,
@@ -465,6 +604,16 @@ test(
     }
     const approvalsFor = async (id: string) =>
       (await pool.query('SELECT * FROM approvals WHERE turn_id=$1', [id])).rows;
+    const confirmationFor = async (approval: { confirmation_message_id: string }) => {
+      const text = (
+        await pool.query<{ text: string }>(
+          'SELECT text FROM messages WHERE id=$1 AND owner_id=$2',
+          [approval.confirmation_message_id, ownerId],
+        )
+      ).rows[0]?.text;
+      assert.ok(text);
+      return text;
+    };
     async function reminder(input: Record<string, unknown> = {}) {
       const response = await request('POST', '/api/schedules', {
         title: 'Synthetic cancellation reminder',
@@ -482,7 +631,7 @@ test(
       assert.ok(jobId);
       return { id, jobId: jobId as string };
     }
-    async function assertCancelled(schedule: { id: string; jobId: string }) {
+    async function assertPaused(schedule: { id: string; jobId: string }) {
       assert.deepEqual(
         (
           await pool.query(
@@ -500,7 +649,7 @@ test(
       assert.deepEqual(
         (
           await pool.query(
-            "SELECT id FROM approvals WHERE owner_id=$1 AND action='NOD_schedule_cancel' AND args=$2::jsonb AND status<>'expired'",
+            "SELECT id FROM approvals WHERE owner_id=$1 AND action IN ('NOD_schedule_pause','NOD_schedule_cancel') AND args=$2::jsonb AND status<>'expired'",
             [ownerId, { id: schedule.id }],
           )
         ).rows,
@@ -531,13 +680,226 @@ test(
           await waitFor(response.json().turnId, 'succeeded');
           assert.deepEqual(models.view().selection, input);
           assert.equal((await approvalsFor(turn))[0].status, 'completed');
-          const directText = 'Use the first connected model again.';
+          const light = { connectionId: connection.id, modelId: 'gpt-6-luna' };
+          const directText =
+            'Use the first connected model again, your light model for your own checks, and the light model for the routed research.';
           asked.add(directText);
-          plans.set(directText, { action: 'model_select', args: { ...before! } });
+          batches.set(directText, {
+            subagents: false,
+            sequential: true,
+            chatOnly: true,
+            calls: [
+              { tool: 'manage_personal_context', action: 'model_select', args: { args: before! } },
+              {
+                tool: 'manage_personal_context',
+                action: 'model_select',
+                args: { args: { scope: 'background', use: 'light' } },
+              },
+              {
+                tool: 'task',
+                action: 'start',
+                args: {
+                  title: 'Routed research',
+                  doneWhen: 'Synthetic research is done.',
+                  now: 'Starting synthetic research.',
+                  message: 'Starting the synthetic research.',
+                  model: light,
+                },
+              },
+            ],
+          });
+          const errors = batchErrors.length;
           const direct = await request('POST', '/api/messages', { text: directText });
           await waitFor(direct.json().turnId, 'succeeded');
+          assert.deepEqual(batchErrors.slice(errors), []);
           assert.deepEqual(models.view().selection, before);
           assert.equal((await approvalsFor(direct.json().turnId)).length, 0);
+          assert.deepEqual(models.view().routes, { background: 'light' });
+          assert.equal(models.view().light?.modelId, 'gpt-6-luna');
+          assert.ok(
+            fallbackChecks.some((input) =>
+              JSON.stringify(input).includes('work Nod starts on its own'),
+            ),
+          );
+          assert.equal((await models.resolve()).definition.choice.id, 'gpt-6.1-sol');
+
+          const modelsOf = (turnId: string) =>
+            opened.filter((entry) => entry.turnId === turnId).map((entry) => entry.model);
+          const put = (url: string, payload: object) =>
+            application.app.inject({ method: 'PUT', url, headers, payload });
+          const task = (
+            await pool.query<{ id: string; model: { modelId: string } }>(
+              "SELECT id,model FROM tasks WHERE title='Routed research'",
+            )
+          ).rows[0]!;
+          assert.equal(task.model.modelId, 'gpt-6-luna');
+          const taskTurn = (
+            await pool.query<{ id: string }>('SELECT id FROM turns WHERE session_id=$1', [task.id])
+          ).rows[0]!;
+          await waitFor(taskTurn.id, 'succeeded|waiting');
+          assert.deepEqual(modelsOf(taskTurn.id), ['gpt-6-luna']);
+          const listed = (await request('GET', '/api/tasks'))
+            .json<Task[]>()
+            .find((item) => item.id === task.id)!;
+          assert.equal(listed.work, 'chat');
+
+          const unasked = `Synthetic unasked task model ${randomUUID()}`;
+          plans.set(unasked, {
+            tool: 'task',
+            action: 'start',
+            args: {
+              title: 'Unasked routed research',
+              doneWhen: 'Synthetic research is done.',
+              now: 'Starting synthetic research.',
+              message: 'Starting the synthetic research.',
+              model: light,
+            },
+          });
+          const refused = await enqueueTurn(unasked, { source: 'task', background: false });
+          await waitFor(refused, 'succeeded|failed');
+          assert.match(
+            (await pool.query('SELECT error FROM turns WHERE id=$1', [refused])).rows[0].error ??
+              JSON.stringify(results.get(refused)),
+            /did not ask for a model/,
+          );
+          assert.equal(
+            (await pool.query("SELECT 1 FROM tasks WHERE title='Unasked routed research'"))
+              .rowCount,
+            0,
+          );
+
+          const eventPrompt = `Synthetic app event ${randomUUID()}`;
+          batches.set(eventPrompt, {
+            subagents: true,
+            calls: [{ action: 'GMAIL_FETCH_EMAILS', args: { max_results: 1 } }],
+          });
+          const event = await enqueueTurn(eventPrompt, { source: 'event', background: true });
+          await waitFor(event, 'succeeded');
+          const eventOpens = opened.filter((entry) => entry.turnId === event);
+          assert.ok(eventOpens.some((entry) => entry.helper));
+          assert.ok(eventOpens.every((entry) => entry.model === 'gpt-6-luna'));
+
+          const created = await request('POST', '/api/schedules', {
+            title: 'Synthetic routed schedule',
+            prompt: 'Return the synthetic routed summary.',
+            kind: 'once',
+            runAt: '2099-01-01T09:00:00Z',
+            timeZone: 'UTC',
+          });
+          assert.equal(created.statusCode, 200, created.body);
+          const schedule = created.json();
+          const run = async () => {
+            const revision = (await request('GET', '/api/schedules'))
+              .json()
+              .find((item: { id: string }) => item.id === schedule.id).revision;
+            const response = await request('POST', `/api/schedules/${schedule.id}/run`, {
+              requestId: randomUUID(),
+              expectedRevision: revision,
+            });
+            assert.equal(response.statusCode, 200, response.body);
+            await waitFor(response.json().turnId, 'succeeded');
+            return response.json().turnId as string;
+          };
+          assert.deepEqual(modelsOf(await run()), ['gpt-6.1-sol']);
+          const lightChoice = models.view().light!;
+          const retired = await put(`/api/schedules/${schedule.id}/model`, {
+            model: { ...lightChoice, modelId: 'gpt-retired' },
+          });
+          assert.equal(retired.statusCode, 400, retired.body);
+          assert.match(retired.json<{ error: string }>().error, /available text model/);
+          const pinned = await put(`/api/schedules/${schedule.id}/model`, { model: lightChoice });
+          assert.equal(pinned.statusCode, 200, pinned.body);
+          const second = await run();
+          assert.deepEqual(modelsOf(second), ['gpt-6-luna']);
+
+          const before30 = (await request('GET', '/api/usage/work')).json<WorkUsageResponse>();
+          for (const [turnId, model, input] of [
+            [direct.json().turnId, 'gpt-6.1-sol', 1000],
+            [event, 'gpt-6-luna', 2000],
+            [second, 'gpt-6-luna', 4000],
+            [taskTurn.id, 'gpt-6-luna', 8000],
+          ] as const)
+            await pool.query(
+              'INSERT INTO model_usage(id,owner_id,turn_id,cost_usd,details) VALUES($1,$2,$3,$4,$5)',
+              [
+                randomUUID(),
+                ownerId,
+                turnId,
+                input / 1e6,
+                { category: 'agent', model, inputTokens: input, outputTokens: 0 },
+              ],
+            );
+          const after30 = (await request('GET', '/api/usage/work')).json<WorkUsageResponse>();
+          const grew = (now?: { input: number }, then?: { input: number }) =>
+            (now?.input ?? 0) - (then?.input ?? 0);
+          assert.equal(grew(after30.lanes.chat, before30.lanes.chat), 1000);
+          assert.equal(grew(after30.lanes.background, before30.lanes.background), 2000);
+          assert.equal(grew(after30.lanes.schedule, before30.lanes.schedule), 0);
+          assert.equal(grew(after30.schedules[schedule.id], before30.schedules[schedule.id]), 4000);
+          assert.equal(grew(after30.tasks[task.id], before30.tasks[task.id]), 8000);
+          const onLuna = (usage: WorkUsageResponse, kind: string) =>
+            usage.own
+              .filter(
+                (entry) =>
+                  entry.kind === kind && (entry.task ?? entry.schedule)?.modelId === 'gpt-6-luna',
+              )
+              .reduce((sum, entry) => sum + entry.input, 0);
+          assert.equal(onLuna(after30, 'schedule') - onLuna(before30, 'schedule'), 4000);
+          assert.equal(onLuna(after30, 'chat') - onLuna(before30, 'chat'), 8000);
+
+          const followUp = randomUUID();
+          const followTurn = randomUUID();
+          await pool.query(
+            `INSERT INTO turns(id,owner_id,thread_id,session_id,parent_turn_id,source,prompt,status,background)
+             SELECT $1,owner_id,thread_id,$2,id,'task','Synthetic schedule follow-up','succeeded',true FROM turns WHERE id=$3`,
+            [followTurn, followUp, second],
+          );
+          await pool.query(
+            `INSERT INTO tasks(id,owner_id,turn_id,title,done_when,now_text,session_id)
+             VALUES($1,$2,$3,'Synthetic schedule follow-up','Synthetic follow-up is done.','Waiting.',$1)`,
+            [followUp, ownerId, followTurn],
+          );
+          await pool.query(
+            'INSERT INTO model_usage(id,owner_id,turn_id,cost_usd,details) VALUES($1,$2,$3,$4,$5)',
+            [
+              randomUUID(),
+              ownerId,
+              followTurn,
+              0.01,
+              { category: 'agent', model: 'gpt-6.1-sol', inputTokens: 1000, outputTokens: 0 },
+            ],
+          );
+          const inherited = (await request('GET', '/api/tasks'))
+            .json<Task[]>()
+            .find((item) => item.id === followUp)!;
+          assert.equal(inherited.work, 'schedule');
+          assert.equal(inherited.scheduleModel?.modelId, 'gpt-6-luna');
+          const lunaPrice = models
+            .view()
+            .connections[0]!.models.find((item) => item.id === 'gpt-6-luna')!.pricing as {
+            input: number;
+          };
+          const followDefault = (await application.personal.manage('model_select', {
+            scope: 'task',
+            id: followUp,
+            use: 'same',
+          })) as { last30Days?: { withChoiceUsd: number | null } };
+          assert.equal(followDefault.last30Days?.withChoiceUsd, (1000 * lunaPrice.input) / 1e6);
+          await pool.query('DELETE FROM tasks WHERE id=$1', [followUp]);
+
+          const back = await put(`/api/tasks/${task.id}/model`, { model: null });
+          assert.equal(back.statusCode, 200, back.body);
+          assert.equal(back.json<Task>().model, null);
+          assert.equal(
+            (await put(`/api/tasks/${randomUUID()}/model`, { model: null })).statusCode,
+            404,
+          );
+          await request('POST', `/api/tasks/${task.id}/stop`);
+          await pool.query('UPDATE turns SET task_id=NULL WHERE task_id=$1', [task.id]);
+          await pool.query('DELETE FROM tasks WHERE id=$1', [task.id]);
+          await request('DELETE', `/api/schedules/${schedule.id}`);
+          const reset = await put('/api/models/routes', { lane: 'background', route: null });
+          assert.equal(reset.statusCode, 200, reset.body);
           await assert.rejects(
             application.personal.manage('model_select', {
               ...input,
@@ -578,6 +940,10 @@ test(
           const [card] = cards;
           assert.equal(card.status, 'pending');
           assert.equal(card.args.recipient_email, 'collector@example.test');
+          const question = await confirmationFor(card);
+          assert.match(question, /collector@example\.test/);
+          assert.match(question, /Synthetic invoices/);
+          assert.doesNotMatch(question, /GMAIL_SEND_EMAIL|recipient_email|\{"args"/);
           assert.equal(sends(), 0);
           const declined = await request('POST', '/api/messages', {
             text: 'No',
@@ -588,6 +954,64 @@ test(
           await waitFor(declined.json().turnId, 'succeeded');
           assert.equal((await approvalsFor(held))[0].status, 'declined');
           assert.equal(sends(), 0);
+
+          const clicked = await propose('GMAIL_SEND_EMAIL', email('click@example.test'), 'apps');
+          const [clickCard] = await approvalsFor(clicked);
+          const listed = async (id: string) =>
+            (await request('GET', `/api/messages/around/${id}`))
+              .json()
+              .find((message: { id: string }) => message.id === id);
+          assert.deepEqual((await listed(clickCard.confirmation_message_id)).approval, {
+            id: clickCard.id,
+            state: 'pending',
+            title: 'Send email',
+            app: 'Gmail',
+            slug: 'gmail',
+            fields: [
+              { label: 'To', value: 'click@example.test' },
+              { label: 'Subject', value: 'Synthetic invoices' },
+            ],
+            body: 'Synthetic forwarded content.',
+          });
+          const click = (approvalId: string) =>
+            request('POST', '/api/messages', {
+              text: 'Send',
+              replyToMessageId: clickCard.confirmation_message_id,
+              clientMessageId: randomUUID(),
+              approvalAnswer: { approvalId, approved: true },
+            });
+          const stale = await click(randomUUID());
+          assert.equal(stale.statusCode, 409, stale.body);
+          assert.equal((await approvalsFor(clicked))[0].status, 'pending');
+          assert.equal(sends(), 0);
+          const accepted = await click(clickCard.id);
+          assert.equal(accepted.statusCode, 200, accepted.body);
+          await waitFor(accepted.json().turnId, 'succeeded');
+          assert.equal((await approvalsFor(clicked))[0].status, 'completed');
+          assert.equal(sends(), 1);
+          const answer = await pool.query(
+            'SELECT approval_answer FROM messages WHERE id=$1 AND owner_id=$2',
+            [accepted.json().messageId, ownerId],
+          );
+          assert.equal(answer.rows[0]?.approval_answer, true);
+          assert.equal((await listed(accepted.json().messageId)).cardAnswer, true);
+          ownerWords.length = 0;
+          const afterClick = await propose(
+            'GMAIL_SEND_EMAIL',
+            email('after-click@example.test'),
+            'apps',
+          );
+          assert.doesNotMatch(prompts.get(afterClick) ?? '', /"role":"user","text":"Send"/);
+          assert.ok(
+            !(await application.personal.recall('Send', undefined, null)).some(
+              (message) => message.id === accepted.json().messageId,
+            ),
+          );
+          assert.ok(ownerWords.length > 0);
+          assert.ok(!ownerWords.includes('Send'));
+          const again = await click(clickCard.id);
+          assert.equal(again.statusCode, 409, again.body);
+          assert.equal(sends(), 1);
         },
       );
 
@@ -736,12 +1160,17 @@ test(
             expectOrigin: 'https://bank.example.test',
           };
           const before = clicks().length;
+          const since = new Date();
           const held = await propose('click', { selector: '@e7' }, 'browser');
           const [card] = await approvalsFor(held);
           assert.equal(card.status, 'pending');
           assert.equal(card.action, 'NOD_browser');
           assert.equal(card.args.website, 'https://bank.example.test');
           assert.deepEqual(card.args.control, [{ role: 'button', name: 'Authorize payment' }]);
+          const question = await confirmationFor(card);
+          assert.match(question, /Authorize payment/);
+          assert.match(question, /bank\\?\.example\\?\.test/);
+          assert.doesNotMatch(question, /NOD_browser|@e7|"command"|\{"args"/);
           assert.deepEqual(
             (
               fallbackChecks as Array<{
@@ -765,6 +1194,30 @@ test(
           const requested = await propose('click', { selector: '@e7' }, 'browser', text);
           assert.deepEqual(await approvalsFor(requested), []);
           assert.deepEqual(clicks().slice(before), [click, click]);
+          assert.deepEqual(
+            (
+              await pool.query(
+                `SELECT target,basis->>'kind' AS kind FROM app_actions
+                 WHERE action='NOD_browser' AND created_at>=$1 ORDER BY created_at`,
+                [since],
+              )
+            ).rows,
+            [
+              { target: 'click “Authorize payment” on bank.example.test', kind: 'approved' },
+              { target: 'click “Authorize payment” on bank.example.test', kind: 'message' },
+            ],
+          );
+          const log = JSON.stringify(
+            results.get(
+              await propose(
+                'usage_get',
+                { from: '2000-01-01', to: '2099-12-31' },
+                'manage_personal_context',
+              ),
+            ),
+          );
+          assert.match(log, /untrusted_tool_result source=\\"usage\\"/);
+          assert.ok(log.includes('Browser: click “Authorize payment” on bank.example.test'));
           const moved = await propose('click', { selector: '@e7' }, 'browser');
           const [stale] = await approvalsFor(moved);
           browserUrl = 'https://bank.example.test/payees/remove';
@@ -830,6 +1283,78 @@ test(
       );
 
       await t.test(
+        'connection service waits stop automatic app reads and preserve owner reads',
+        async () => {
+          const schedule = await reminder({ prompt: 'Synthetic automatic parent' });
+          connectionWait = { until: Date.now() + 120_000, status: 429, code: 'installation_busy' };
+          appResult = { id: 'synthetic-draft', message: { id: 'synthetic-message' } };
+          const calls = [
+            { action: 'SEARCH_TOOLS', args: { query: 'gmail' } },
+            { action: 'GMAIL_GET_DRAFT', args: { draft_id: 'synthetic-draft' } },
+          ];
+          try {
+            for (const source of ['event', 'schedule'] as const) {
+              let parent: string;
+              if (source === 'schedule') {
+                const response = await request('POST', `/api/schedules/${schedule.id}/run`, {
+                  requestId: randomUUID(),
+                  expectedRevision: 0,
+                });
+                assert.equal(response.statusCode, 200, response.body);
+                parent = response.json().turnId;
+              } else {
+                parent = await enqueueTurn('Synthetic automatic parent', {
+                  source,
+                  background: true,
+                });
+              }
+              await waitFor(parent, 'succeeded');
+              for (const call of calls) {
+                const before = appSessions;
+                const prompt = `Synthetic automatic app read ${randomUUID()}`;
+                plans.set(prompt, { tool: 'apps', ...call });
+                const turn = await enqueueTurn(prompt, {
+                  source: 'task',
+                  parentTurnId: parent,
+                  background: true,
+                });
+                await waitFor(turn, 'succeeded|failed');
+                const saved = (await pool.query('SELECT error FROM turns WHERE id=$1', [turn]))
+                  .rows[0];
+                assert.match(
+                  JSON.stringify(results.get(turn)) ?? saved.error,
+                  /installation_busy.*HTTP 429/,
+                );
+                assert.equal(appSessions, before);
+                assert.deepEqual(await approvalsFor(turn), []);
+              }
+            }
+            for (const call of calls) {
+              const before = appSessions;
+              const owner = await propose(call.action, call.args, 'apps');
+              assert.equal(appSessions, before + 1);
+              assert.deepEqual(await approvalsFor(owner), []);
+              if (call.action === 'GMAIL_GET_DRAFT') {
+                const prompt = `Synthetic owner task read ${randomUUID()}`;
+                plans.set(prompt, { tool: 'apps', ...call });
+                const task = await enqueueTurn(prompt, {
+                  source: 'task',
+                  parentTurnId: owner,
+                  background: true,
+                });
+                await waitFor(task, 'succeeded');
+                assert.equal(appSessions, before + 2);
+              }
+            }
+          } finally {
+            connectionWait = undefined;
+            appResult = undefined;
+            await request('DELETE', `/api/schedules/${schedule.id}`);
+          }
+        },
+      );
+
+      await t.test(
         'a proactive read the checker would hold asks nobody and reads nothing',
         async () => {
           const previous = await application.triage.getPreferences();
@@ -844,7 +1369,11 @@ test(
             args: { sourceId: 'fixture:notes', ids: ['record/1'] },
           });
           try {
-            await application.triage.updatePreferences({ notificationRule: '', rules: '' });
+            await application.triage.updatePreferences({
+              notificationRule: '',
+              rules: '',
+              proactivePaused: false,
+            });
             const turnId = await enqueueTurn(prompt, {
               source: 'event',
               background: true,
@@ -875,6 +1404,7 @@ test(
       await t.test(
         'a proactive app read runs only what the read-only check calls a read',
         async () => {
+          const previous = await application.triage.getPreferences();
           const connection = (
             await pool.query(
               "SELECT id FROM app_connections WHERE owner_id=$1 AND slug='gmail' AND NOT revoked",
@@ -916,6 +1446,7 @@ test(
             return turn.status === 'succeeded' ? JSON.stringify(results.get(turnId)) : turn.error;
           };
           try {
+            await application.triage.updatePreferences({ proactivePaused: false });
             assert.match(
               await read({ tool: 'GMAIL_FETCH_EMAILS', args: { query: 'invoice' } }),
               /Search this source/,
@@ -960,6 +1491,7 @@ test(
           } finally {
             toolSearch = undefined;
             readOnlyActions.clear();
+            await application.triage.updatePreferences(previous);
           }
         },
       );
@@ -988,39 +1520,600 @@ test(
         assert.equal((await approvalsFor(held))[0].status, 'expired');
       });
       await t.test(
-        'a rejected generated confirmation cannot create an approval or send an email',
+        'a server-owned confirmation stays bound to an email draft before consent',
         async () => {
           const writes = integrationFixture.writes.length;
-          const text = `Synthetic rejected confirmation ${randomUUID()}`;
-          plans.set(text, {
-            tool: 'apps',
-            action: 'GMAIL_SEND_EMAIL',
-            args: {
+          const turn = await propose(
+            'GMAIL_CREATE_EMAIL_DRAFT',
+            {
               recipient_email: 'blocked@example.test',
               subject: 'Synthetic reviewed email',
               body: 'Synthetic body awaiting confirmation.',
             },
+            'apps',
+          );
+          const [approval] = await approvalsFor(turn);
+          assert.equal(approval.status, 'pending');
+          assert.equal(approval.action, 'GMAIL_CREATE_EMAIL_DRAFT');
+          assert.equal(approval.title, 'Save this draft');
+          const { connectionId: _connectionId, ...savedArgs } = approval.args;
+          assert.deepEqual(savedArgs, {
+            recipient_email: 'blocked@example.test',
+            subject: 'Synthetic reviewed email',
+            body: 'Synthetic body awaiting confirmation.',
           });
-          confirmationValid = false;
+          const state = await request('GET', '/api/state');
+          const displayed = state
+            .json<AppState>()
+            .messages.find((message) => message.id === approval.confirmation_message_id);
+          assert.equal(displayed?.approval?.title, approval.title);
+          const question = await confirmationFor(approval);
+          assert.match(question, /save a Gmail draft/i);
+          assert.match(question, /blocked@example.test/);
+          assert.match(question, /Synthetic reviewed email/);
+          assert.doesNotMatch(question, /GMAIL_CREATE_EMAIL_DRAFT|recipient_email|\{"args"/);
+          assert.doesNotMatch(question, /send.*email/i);
+          assert.equal(integrationFixture.writes.length, writes);
+          const declined = await request('POST', '/api/messages', {
+            text: 'No',
+            replyToMessageId: approval.confirmation_message_id,
+            clientMessageId: randomUUID(),
+          });
+          assert.equal(declined.statusCode, 200, declined.body);
+          await waitFor(declined.json().turnId, 'succeeded');
+          assert.equal(integrationFixture.writes.length, writes);
+        },
+      );
+
+      await t.test('a rejected confirmation creates no approval and sends nothing', async () => {
+        const writes = integrationFixture.writes.length;
+        confirmationValid = false;
+        try {
+          const text = `Synthetic rejected approval ${randomUUID()}`;
+          plans.set(text, {
+            tool: 'apps',
+            action: 'GMAIL_SEND_EMAIL',
+            args: { recipient_email: 'blocked@example.test', body: 'Synthetic body.' },
+          });
+          const response = await request('POST', '/api/messages', { text });
+          assert.equal(response.statusCode, 200);
+          const turn = response.json().turnId as string;
+          ids.push(response.json().threadId as string);
+          await waitFor(turn, 'failed');
+          assert.equal((await approvalsFor(turn)).length, 0);
+          assert.equal(integrationFixture.writes.length, writes);
+          const record = (await pool.query('SELECT error FROM turns WHERE id=$1', [turn])).rows[0];
+          assert.match(record.error, /Synthetic action mismatch/);
+        } finally {
+          confirmationValid = true;
+        }
+      });
+
+      await t.test('Gmail deletion confirmation names the verified email', async () => {
+        const writes = integrationFixture.writes.length;
+        const reads = executedApps.filter(
+          (action) => action === 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID',
+        ).length;
+        const turn = await propose(
+          'GMAIL_DELETE_MESSAGE',
+          { message_id: 'fixture-mail-1' },
+          'apps',
+        );
+        const [approval] = await approvalsFor(turn);
+        assert.equal(approval.status, 'pending');
+        assert.equal(approval.action, 'GMAIL_DELETE_MESSAGE');
+        const question = await confirmationFor(approval);
+        assert.doesNotMatch(question, /fixture-mail-1/);
+        assert.match(question, /permanently delete/i);
+        assert.match(question, /Northstar review/);
+        assert.match(question, /alex@example.test/);
+        assert.doesNotMatch(question, /GMAIL_DELETE_MESSAGE|message_id|\{"args"/);
+        assert.equal(
+          executedApps.filter((action) => action === 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID').length,
+          reads + 1,
+        );
+        const recordedRead = await pool.query<{ basis: { kind: string } }>(
+          'SELECT basis FROM app_actions WHERE owner_id=$1 AND turn_id=$2 AND action=$3',
+          [ownerId, turn, 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID'],
+        );
+        assert.equal(recordedRead.rows[0]?.basis.kind, 'read');
+        assert.equal(integrationFixture.writes.length, writes);
+        const declined = await request('POST', '/api/messages', {
+          text: 'No',
+          replyToMessageId: approval.confirmation_message_id,
+          clientMessageId: randomUUID(),
+        });
+        assert.equal(declined.statusCode, 200, declined.body);
+        await waitFor(declined.json().turnId, 'succeeded');
+        assert.equal(integrationFixture.writes.length, writes);
+      });
+      await t.test(
+        'a failed Gmail send followed by draft cleanup identifies the unsent draft before consent',
+        async () => {
+          const email = {
+            recipient_email: 'cleanup@example.test',
+            subject: 'Synthetic team summary',
+            body: 'Synthetic unsent summary.',
+          };
+          const sendPrompt = `Send synthetic summary ${randomUUID()}`;
+          const sends = integrationFixture.writes.filter(
+            (write) => write.action === 'GMAIL_SEND_EMAIL',
+          ).length;
+          asked.add(sendPrompt);
+          appOutage = true;
           try {
-            const response = await request('POST', '/api/messages', { text });
+            plans.set(sendPrompt, { tool: 'apps', action: 'GMAIL_SEND_EMAIL', args: email });
+            const response = await request('POST', '/api/messages', { text: sendPrompt });
             assert.equal(response.statusCode, 200, response.body);
-            const turn = response.json().turnId as string;
+            const failed = response.json().turnId as string;
             ids.push(response.json().threadId as string);
-            await waitFor(turn, 'failed|succeeded|waiting');
-            assert.deepEqual(await approvalsFor(turn), []);
+            await waitFor(failed, 'failed');
+            const error = (await pool.query('SELECT error FROM turns WHERE id=$1', [failed]))
+              .rows[0].error as string;
+            assert.match(error, /Synthetic provider outage/);
             assert.equal(
-              (
-                await pool.query(
-                  "SELECT id FROM messages WHERE turn_id=$1 AND role='assistant' AND text=$2",
-                  [turn, confirmationText],
-                )
-              ).rowCount,
-              0,
+              integrationFixture.writes.filter((write) => write.action === 'GMAIL_SEND_EMAIL')
+                .length,
+              sends,
             );
-            assert.equal(integrationFixture.writes.length, writes);
           } finally {
-            confirmationValid = true;
+            appOutage = false;
+            asked.delete(sendPrompt);
+          }
+          const createPrompt = `Prepare synthetic draft ${randomUUID()}`;
+          asked.add(createPrompt);
+          let created: string;
+          try {
+            const turn = await propose('GMAIL_CREATE_EMAIL_DRAFT', email, 'apps', createPrompt);
+            await waitFor(turn, 'succeeded');
+            const createdWrite = integrationFixture.writes.at(-1);
+            assert.ok(createdWrite);
+            assert.equal(createdWrite.action, 'GMAIL_CREATE_EMAIL_DRAFT');
+            created = createdWrite.id;
+          } finally {
+            asked.delete(createPrompt);
+          }
+          const writes = integrationFixture.writes.length;
+          const reads = executedApps.filter((action) => action === 'GMAIL_GET_DRAFT').length;
+          const turn = await propose('GMAIL_DELETE_DRAFT', { draft_id: created }, 'apps');
+          const [approval] = await approvalsFor(turn);
+          assert.equal(approval.status, 'pending');
+          assert.equal(approval.action, 'GMAIL_DELETE_DRAFT');
+          const question = await confirmationFor(approval);
+          assert.equal(question.includes(created), false);
+          assert.match(question, /permanently delete.*unsent Gmail draft/i);
+          assert.match(question, /Synthetic team summary/);
+          assert.match(question, /cleanup@example.test/);
+          assert.doesNotMatch(question, /GMAIL_DELETE_DRAFT|draft_id|\{"args"/);
+          assert.equal(
+            executedApps.filter((action) => action === 'GMAIL_GET_DRAFT').length,
+            reads + 1,
+          );
+          assert.equal(draftReadArgs.at(-1)?.draft_id, created);
+          assert.equal(draftReadArgs.at(-1)?.format, 'metadata');
+          assert.equal(integrationFixture.writes.length, writes);
+          const declined = await request('POST', '/api/messages', {
+            text: 'No',
+            replyToMessageId: approval.confirmation_message_id,
+            clientMessageId: randomUUID(),
+          });
+          assert.equal(declined.statusCode, 200, declined.body);
+          await waitFor(declined.json().turnId, 'succeeded');
+          assert.equal(integrationFixture.writes.length, writes);
+
+          const ruleTurn = await propose('GMAIL_DELETE_DRAFT', { draft_id: created }, 'apps');
+          const [ruleApproval] = await approvalsFor(ruleTurn);
+          const ruleReads = executedApps.filter((action) => action === 'GMAIL_GET_DRAFT').length;
+          const priorRules = (
+            await pool.query<{ rules: string }>('SELECT rules FROM preferences WHERE owner_id=$1', [
+              ownerId,
+            ])
+          ).rows[0].rules;
+          await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+            ownerId,
+            'Ask before reading Gmail.',
+          ]);
+          try {
+            const accepted = await request('POST', '/api/messages', {
+              text: 'Yes',
+              replyToMessageId: ruleApproval.confirmation_message_id,
+              clientMessageId: randomUUID(),
+            });
+            assert.equal(accepted.statusCode, 200, accepted.body);
+            await waitFor(accepted.json().turnId, 'succeeded|failed');
+          } finally {
+            await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+              ownerId,
+              priorRules,
+            ]);
+          }
+          assert.equal((await approvalsFor(ruleTurn))[0].status, 'expired');
+          assert.equal(
+            executedApps.filter((action) => action === 'GMAIL_GET_DRAFT').length,
+            ruleReads,
+          );
+          assert.equal(integrationFixture.writes.length, writes);
+
+          const trustTurn = await propose('GMAIL_DELETE_DRAFT', { draft_id: created }, 'apps');
+          const [trustApproval] = await approvalsFor(trustTurn);
+          const trustReads = executedApps.filter((action) => action === 'GMAIL_GET_DRAFT').length;
+          const changes = changedRulesDuringDraftRead;
+          const savedRules = (
+            await pool.query<{ rules: string }>('SELECT rules FROM preferences WHERE owner_id=$1', [
+              ownerId,
+            ])
+          ).rows[0].rules;
+          changeRulesOnDraftRead = true;
+          try {
+            const accepted = await request('POST', '/api/messages', {
+              text: 'Yes',
+              replyToMessageId: trustApproval.confirmation_message_id,
+              clientMessageId: randomUUID(),
+            });
+            assert.equal(accepted.statusCode, 200, accepted.body);
+            await waitFor(accepted.json().turnId, 'succeeded|failed');
+          } finally {
+            changeRulesOnDraftRead = false;
+            await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+              ownerId,
+              savedRules,
+            ]);
+          }
+          assert.equal(changedRulesDuringDraftRead, changes + 1);
+          assert.equal((await approvalsFor(trustTurn))[0].status, 'expired');
+          assert.equal(
+            executedApps.filter((action) => action === 'GMAIL_GET_DRAFT').length,
+            trustReads,
+          );
+          assert.equal(integrationFixture.writes.length, writes);
+
+          const changedTurn = await propose('GMAIL_DELETE_DRAFT', { draft_id: created }, 'apps');
+          const [changedApproval] = await approvalsFor(changedTurn);
+          const deletes = executedApps.filter((action) => action === 'GMAIL_DELETE_DRAFT').length;
+          appResult = {
+            id: created,
+            message: {
+              id: 'synthetic-replaced-draft-message',
+              subject: 'Synthetic changed summary',
+              to: 'other@example.test',
+            },
+          };
+          try {
+            const accepted = await request('POST', '/api/messages', {
+              text: 'Yes',
+              replyToMessageId: changedApproval.confirmation_message_id,
+              clientMessageId: randomUUID(),
+            });
+            assert.equal(accepted.statusCode, 200, accepted.body);
+            await waitFor(accepted.json().turnId, 'succeeded|failed');
+          } finally {
+            appResult = undefined;
+          }
+          assert.equal((await approvalsFor(changedTurn))[0].status, 'expired');
+          assert.equal(
+            executedApps.filter((action) => action === 'GMAIL_DELETE_DRAFT').length,
+            deletes,
+          );
+          assert.equal(integrationFixture.writes.length, writes);
+
+          const currentReadArgs = draftReadArgs.length;
+          const currentTurn = await propose('GMAIL_DELETE_DRAFT', { draft_id: created }, 'apps');
+          const [currentApproval] = await approvalsFor(currentTurn);
+          const accepted = await request('POST', '/api/messages', {
+            text: 'Yes',
+            replyToMessageId: currentApproval.confirmation_message_id,
+            clientMessageId: randomUUID(),
+          });
+          assert.equal(accepted.statusCode, 200, accepted.body);
+          await waitFor(accepted.json().turnId, 'succeeded');
+          assert.equal((await approvalsFor(currentTurn))[0].status, 'completed');
+          assert.equal(integrationFixture.writes.length, writes + 1);
+          assert.equal(integrationFixture.writes.at(-1)?.action, 'GMAIL_DELETE_DRAFT');
+          assert.deepEqual(
+            draftReadArgs.slice(currentReadArgs).map((args) => args.format),
+            ['metadata', 'metadata'],
+          );
+        },
+      );
+      await t.test('Gmail deletion stops when the target cannot be verified', async () => {
+        const writes = integrationFixture.writes.length;
+        const prompt = `Synthetic missing message ${randomUUID()}`;
+        plans.set(prompt, {
+          tool: 'apps',
+          action: 'GMAIL_DELETE_MESSAGE',
+          args: { message_id: 'missing-synthetic-message' },
+        });
+        const response = await request('POST', '/api/messages', { text: prompt });
+        assert.equal(response.statusCode, 200, response.body);
+        const turnId = response.json().turnId as string;
+        ids.push(response.json().threadId as string);
+        await waitFor(turnId, 'failed');
+        assert.deepEqual(await approvalsFor(turnId), []);
+        assert.equal(integrationFixture.writes.length, writes);
+      });
+      await t.test('Gmail deletion reports the specific metadata-read failure', async () => {
+        const writes = integrationFixture.writes.length;
+        const prompt = `Synthetic Gmail metadata outage ${randomUUID()}`;
+        plans.set(prompt, {
+          tool: 'apps',
+          action: 'GMAIL_DELETE_MESSAGE',
+          args: { message_id: 'fixture-mail-1' },
+        });
+        appOutage = true;
+        try {
+          const response = await request('POST', '/api/messages', { text: prompt });
+          assert.equal(response.statusCode, 200, response.body);
+          const turnId = response.json().turnId as string;
+          ids.push(response.json().threadId as string);
+          await waitFor(turnId, 'failed');
+          const turn = (await pool.query('SELECT error FROM turns WHERE id=$1', [turnId])).rows[0];
+          assert.match(turn.error, /Synthetic provider outage/);
+          assert.match(turn.error, /did not ask for approval or delete the message/);
+          assert.deepEqual(await approvalsFor(turnId), []);
+          assert.equal(integrationFixture.writes.length, writes);
+        } finally {
+          appOutage = false;
+        }
+      });
+      await t.test('an exact owner-authorized Gmail message ID keeps the direct path', async () => {
+        const deletes = executedApps.filter((action) => action === 'GMAIL_DELETE_MESSAGE').length;
+        const reads = executedApps.filter(
+          (action) => action === 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID',
+        ).length;
+        const prompt = `Delete Gmail message missing-synthetic-message ${randomUUID()}`;
+        asked.add(prompt);
+        try {
+          plans.set(prompt, {
+            tool: 'apps',
+            action: 'GMAIL_DELETE_MESSAGE',
+            args: { message_id: 'missing-synthetic-message' },
+          });
+          const response = await request('POST', '/api/messages', { text: prompt });
+          assert.equal(response.statusCode, 200, response.body);
+          const turnId = response.json().turnId as string;
+          ids.push(response.json().threadId as string);
+          await waitFor(turnId, 'failed|succeeded');
+          assert.deepEqual(await approvalsFor(turnId), []);
+          assert.equal(
+            executedApps.filter((action) => action === 'GMAIL_DELETE_MESSAGE').length,
+            deletes + 1,
+          );
+          assert.equal(
+            executedApps.filter((action) => action === 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID').length,
+            reads,
+          );
+        } finally {
+          asked.delete(prompt);
+        }
+      });
+      await t.test('Gmail deletion does not read targets against an ask-first rule', async () => {
+        const writes = integrationFixture.writes.length;
+        const reads = executedApps.filter(
+          (action) => action === 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID',
+        ).length;
+        const draftReads = executedApps.filter((action) => action === 'GMAIL_GET_DRAFT').length;
+        const priorRules = (
+          await pool.query<{ rules: string }>('SELECT rules FROM preferences WHERE owner_id=$1', [
+            ownerId,
+          ])
+        ).rows[0].rules;
+        await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+          ownerId,
+          'Ask before reading Gmail.',
+        ]);
+        try {
+          const prompt = `Synthetic ask-first delete ${randomUUID()}`;
+          plans.set(prompt, {
+            tool: 'apps',
+            action: 'GMAIL_DELETE_MESSAGE',
+            args: { message_id: 'fixture-mail-1' },
+          });
+          const response = await request('POST', '/api/messages', { text: prompt });
+          assert.equal(response.statusCode, 200, response.body);
+          const turnId = response.json().turnId as string;
+          ids.push(response.json().threadId as string);
+          await waitFor(turnId, 'failed');
+          assert.deepEqual(await approvalsFor(turnId), []);
+          assert.equal(
+            executedApps.filter((action) => action === 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID').length,
+            reads,
+          );
+          const draftPrompt = `Synthetic ask-first draft deletion ${randomUUID()}`;
+          plans.set(draftPrompt, {
+            tool: 'apps',
+            action: 'GMAIL_DELETE_DRAFT',
+            args: { draft_id: 'synthetic-draft' },
+          });
+          const draftResponse = await request('POST', '/api/messages', { text: draftPrompt });
+          assert.equal(draftResponse.statusCode, 200, draftResponse.body);
+          const draftTurnId = draftResponse.json().turnId as string;
+          ids.push(draftResponse.json().threadId as string);
+          await waitFor(draftTurnId, 'failed');
+          assert.deepEqual(await approvalsFor(draftTurnId), []);
+          assert.equal(
+            executedApps.filter((action) => action === 'GMAIL_GET_DRAFT').length,
+            draftReads,
+          );
+          assert.equal(integrationFixture.writes.length, writes);
+        } finally {
+          await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+            ownerId,
+            priorRules,
+          ]);
+        }
+      });
+      await t.test('Gmail deletion stops if the verified account binding changes', async () => {
+        const writes = integrationFixture.writes.length;
+        const turn = await propose(
+          'GMAIL_DELETE_MESSAGE',
+          { message_id: 'fixture-mail-1' },
+          'apps',
+        );
+        const [approval] = await approvalsFor(turn);
+        assert.equal(approval.status, 'pending');
+        const connectionId = approval.args.connectionId as string;
+        const revision = (
+          await pool.query<{ watch_revision: number }>(
+            'SELECT watch_revision FROM app_connections WHERE id=$1 AND owner_id=$2',
+            [connectionId, ownerId],
+          )
+        ).rows[0].watch_revision;
+        await pool.query(
+          'UPDATE app_connections SET watch_revision=watch_revision+1 WHERE id=$1 AND owner_id=$2',
+          [connectionId, ownerId],
+        );
+        try {
+          const accepted = await request('POST', '/api/messages', {
+            text: 'Yes',
+            replyToMessageId: approval.confirmation_message_id,
+            clientMessageId: randomUUID(),
+          });
+          assert.equal(accepted.statusCode, 200, accepted.body);
+          await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
+          assert.equal(integrationFixture.writes.length, writes);
+          assert.equal((await approvalsFor(turn))[0].status, 'expired');
+        } finally {
+          await pool.query(
+            'UPDATE app_connections SET watch_revision=$3 WHERE id=$1 AND owner_id=$2',
+            [connectionId, ownerId, revision],
+          );
+        }
+      });
+      await t.test(
+        'Gmail deletion refuses an account rebound while building its confirmation',
+        async () => {
+          const primary = (
+            await pool.query<{
+              id: string;
+              account_id: string;
+              account_name: string | null;
+              account_email: string | null;
+              watch_revision: number;
+            }>(
+              "SELECT id,account_id,account_name,account_email,watch_revision FROM app_connections WHERE owner_id=$1 AND slug='gmail' AND NOT revoked ORDER BY created_at LIMIT 1",
+              [ownerId],
+            )
+          ).rows[0];
+          assert.ok(primary?.account_id);
+          const session = await integrationFixture.provider.createSession(ownerId, {});
+          let secondaryAccountId: string | undefined;
+          const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
+          const restore = () =>
+            originalQuery(
+              'UPDATE app_connections SET account_id=$3,account_name=$4,account_email=$5,watch_revision=$6 WHERE id=$1 AND owner_id=$2',
+              [
+                primary.id,
+                ownerId,
+                primary.account_id,
+                primary.account_name,
+                primary.account_email,
+                primary.watch_revision,
+              ],
+            );
+          try {
+            const secondary = await session.authorize(
+              'gmail',
+              `http://localhost:${port}/api/apps/callback?state=synthetic`,
+            );
+            secondaryAccountId = secondary.accountId;
+            const consent = await application.app.inject({
+              method: 'POST',
+              url: `/e2e/connect/${secondary.accountId}`,
+              headers,
+            });
+            assert.equal(consent.statusCode, 302);
+            const alternate = await integrationFixture.provider.inspectAccount(
+              secondary.accountId,
+              ownerId,
+            );
+            assert.equal(alternate.active, true);
+            const draft = (await session.execute(
+              'GMAIL_CREATE_EMAIL_DRAFT',
+              {
+                recipient_email: 'alternate@example.test',
+                subject: 'Synthetic alternate draft',
+                body: 'Synthetic unsent draft.',
+              },
+              secondary.accountId,
+            )) as { id: string };
+            for (const [action, target] of [
+              ['GMAIL_DELETE_MESSAGE', { message_id: 'fixture-mail-1' }],
+              ['GMAIL_DELETE_DRAFT', { draft_id: draft.id }],
+            ] as const) {
+              const prompt = `Synthetic account race ${randomUUID()}`;
+              let rebound = false;
+              const reads = executedApps.length;
+              const deletes = integrationFixture.writes.filter((write) =>
+                ['GMAIL_DELETE_MESSAGE', 'GMAIL_DELETE_DRAFT'].includes(write.action),
+              ).length;
+              pool.query = (async (...args: any[]) => {
+                if (
+                  !rebound &&
+                  activePlan.getStore() === prompt &&
+                  typeof args[0] === 'string' &&
+                  args[0].startsWith('SELECT * FROM app_connections WHERE owner_id=$1 AND id=$2') &&
+                  args[1]?.[1] === primary.id
+                ) {
+                  rebound = true;
+                  await originalQuery(
+                    'UPDATE app_connections SET account_id=$3,account_name=$4,account_email=$5,watch_revision=watch_revision+1 WHERE id=$1 AND owner_id=$2',
+                    [
+                      primary.id,
+                      ownerId,
+                      secondary.accountId,
+                      alternate.accountName,
+                      alternate.accountEmail,
+                    ],
+                  );
+                }
+                return originalQuery(...args);
+              }) as typeof pool.query;
+              try {
+                plans.set(prompt, {
+                  tool: 'apps',
+                  action,
+                  args: { connectionId: primary.id, ...target },
+                });
+                const response = await request('POST', '/api/messages', { text: prompt });
+                assert.equal(response.statusCode, 200, response.body);
+                const turnId = response.json().turnId as string;
+                ids.push(response.json().threadId as string);
+                await waitFor(turnId, 'failed');
+                assert.equal(rebound, true);
+                const failure = (
+                  await pool.query<{ error: string }>('SELECT error FROM turns WHERE id=$1', [
+                    turnId,
+                  ])
+                ).rows[0].error;
+                assert.match(
+                  failure,
+                  /selected Gmail account changed before deletion was proposed/,
+                );
+                assert.deepEqual(await approvalsFor(turnId), []);
+                assert.equal(executedApps.length, reads);
+                assert.equal(
+                  integrationFixture.writes.filter((write) =>
+                    ['GMAIL_DELETE_MESSAGE', 'GMAIL_DELETE_DRAFT'].includes(write.action),
+                  ).length,
+                  deletes,
+                );
+              } finally {
+                pool.query = originalQuery as typeof pool.query;
+                await restore();
+              }
+            }
+          } finally {
+            pool.query = originalQuery as typeof pool.query;
+            try {
+              await restore();
+            } finally {
+              try {
+                if (secondaryAccountId)
+                  await integrationFixture.provider.deleteAccount(secondaryAccountId, ownerId);
+              } finally {
+                await integrationFixture.provider.deleteSession(session.id);
+              }
+            }
           }
         },
       );
@@ -1049,6 +2142,14 @@ test(
             limit: { monthlyUsd: 500, reached: false },
             taskUsd: null,
           });
+          assert.deepEqual(
+            (
+              await pool.query(
+                "SELECT target,basis->>'kind' AS kind FROM app_actions WHERE action='NOD_limits_update'",
+              )
+            ).rows,
+            [{ target: 'monthly limit $500, no task check-in', kind: 'approved' }],
+          );
         },
       );
 
@@ -1118,9 +2219,9 @@ test(
       );
 
       await t.test(
-        'schedule confirmations cannot mutate a revision edited after the question was saved',
+        'schedule pause and edit confirmations cannot mutate a revision edited after the question was saved',
         async () => {
-          for (const action of ['schedule_cancel', 'schedule_update']) {
+          for (const action of ['schedule_pause', 'schedule_update']) {
             const schedule = await reminder();
             const args = {
               id: schedule.id,
@@ -1128,6 +2229,7 @@ test(
             };
             const turn = await propose(action, args);
             const [approval] = await approvalsFor(turn);
+            assert.equal(approval.action, `NOD_${action}`);
             assert.equal(approval.expected_revision, 0);
             const changed = await request('PATCH', `/api/schedules/${schedule.id}`, {
               title: 'A newer synthetic reminder',
@@ -1174,29 +2276,179 @@ test(
             await waitFor(confirmed.json().turnId, 'succeeded');
             assert.equal((await approvalsFor(fresh))[0].status, 'completed');
             const applied = (
-              await pool.query('SELECT revision,title,enabled FROM schedules WHERE id=$1', [
-                schedule.id,
-              ])
+              await pool.query(
+                'SELECT revision,title,enabled,authority FROM schedules WHERE id=$1',
+                [schedule.id],
+              )
             ).rows[0];
             assert.equal(applied.revision, saved.revision + 1);
-            assert.equal(applied.enabled, action !== 'schedule_cancel');
+            assert.equal(applied.enabled, action !== 'schedule_pause');
+            assert.deepEqual(applied.authority.approvals ?? [], saved.authority.approvals ?? []);
+            assert.equal(applied.authority.messages.at(-1).approvalId, reviewed.id);
+            assert.deepEqual(
+              applied.authority.messages.at(-1).fields,
+              action === 'schedule_pause' ? { enabled: false } : { title: args.title },
+            );
+
             assert.equal(applied.title, args.title ?? saved.title);
+            if (action === 'schedule_pause') {
+              const listed = (await request('GET', '/api/schedules'))
+                .json()
+                .find((item: { id: string }) => item.id === schedule.id);
+              assert.equal(listed.enabled, false);
+              assert.equal(listed.nextRun, null);
+            }
           }
         },
       );
 
+      await t.test('manual schedule runs deliver once and cannot create schedules', async () => {
+        const schedule = await reminder();
+        const input = { requestId: randomUUID(), expectedRevision: 0 };
+        const response = await request('POST', `/api/schedules/${schedule.id}/run`, input);
+        assert.equal(response.statusCode, 200, response.body);
+        const turnId = response.json().turnId;
+        await waitFor(turnId, 'succeeded');
+        const { prompt } = (await pool.query('SELECT prompt FROM turns WHERE id=$1', [turnId]))
+          .rows[0];
+        plans.set(prompt, {
+          tool: 'send_message',
+          action: '',
+          args: { text: 'The synthetic schedule finished.' },
+        });
+        const deliveryInput = { ...input, requestId: randomUUID() };
+        const delivered = await request('POST', `/api/schedules/${schedule.id}/run`, deliveryInput);
+        assert.equal(delivered.statusCode, 200, delivered.body);
+        const deliveredTurn = delivered.json().turnId;
+        await waitFor(deliveredTurn, 'succeeded');
+        const messages = await pool.query(
+          "SELECT text FROM messages WHERE turn_id=$1 AND role='assistant'",
+          [deliveredTurn],
+        );
+        assert.equal(messages.rowCount, 1);
+        assert.equal(messages.rows[0].text, 'The synthetic schedule finished.');
+        const repeated = await request('POST', `/api/schedules/${schedule.id}/run`, deliveryInput);
+        assert.equal(repeated.statusCode, 200, repeated.body);
+        assert.deepEqual(repeated.json(), { turnId: deliveredTurn, activeRun: null });
+        assert.equal(
+          (await pool.query('SELECT 1 FROM schedule_runs WHERE schedule_id=$1', [schedule.id]))
+            .rowCount,
+          2,
+        );
+        plans.set(prompt, {
+          action: 'schedule_create',
+          args: {
+            title: 'Another synthetic reminder',
+            prompt: 'Return a synthetic result.',
+            kind: 'once',
+            runAt: '2099-01-02T09:00:00Z',
+            timeZone: 'UTC',
+          },
+        });
+        const before = (await pool.query('SELECT count(*)::int AS count FROM schedules')).rows[0]
+          .count;
+        const refused = await request('POST', `/api/schedules/${schedule.id}/run`, {
+          ...input,
+          requestId: randomUUID(),
+        });
+        assert.equal(refused.statusCode, 200, refused.body);
+        await waitFor(refused.json().turnId, 'failed');
+        const failure = (
+          await pool.query('SELECT error FROM turns WHERE id=$1', [refused.json().turnId])
+        ).rows[0];
+        assert.match(failure.error, /scheduled run cannot create schedules/i);
+        assert.equal(
+          (await pool.query('SELECT count(*)::int AS count FROM schedules')).rows[0].count,
+          before,
+        );
+        plans.delete(prompt);
+        await request('DELETE', `/api/schedules/${schedule.id}`);
+      });
+
       await t.test(
-        'direct schedule cancellation retires an outstanding chat confirmation',
+        'unavailable schedule evidence fails before the model and posts the named failure',
+        async () => {
+          const title = 'Synthetic unavailable schedule';
+          const schedule = await reminder({ title });
+          const threadId = (await request('GET', '/api/state')).json().threadId;
+          const sourceTurn = randomUUID();
+          const sourceMessage = randomUUID();
+          const text = 'Read the synthetic board. Never send email.';
+          await pool.query(
+            "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,withdrawn) VALUES($1,$2,$3,$3,'user',$4,'succeeded',true)",
+            [sourceTurn, ownerId, threadId, text],
+          );
+          await pool.query(
+            "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'user',$5)",
+            [sourceMessage, ownerId, threadId, sourceTurn, text],
+          );
+          for (const [authority, reason] of [
+            [null, /no saved owner instruction/],
+            [{ messages: [] }, /no saved owner instruction/],
+            [
+              {
+                messages: [
+                  {
+                    id: null,
+                    at: new Date().toISOString(),
+                    text: 'Background only.',
+                    canAuthorize: false,
+                  },
+                ],
+              },
+              /no saved owner instruction/,
+            ],
+            [{ messages: [], requiresReplacement: true }, /changes without source records/],
+            [
+              { messages: [{ id: sourceMessage, at: new Date().toISOString(), text }] },
+              /withdrawn or unavailable/,
+            ],
+          ] as const) {
+            await pool.query('UPDATE schedules SET authority=$2 WHERE id=$1', [
+              schedule.id,
+              authority === null ? null : JSON.stringify(authority),
+            ]);
+            const response = await request('POST', `/api/schedules/${schedule.id}/run`, {
+              requestId: randomUUID(),
+              expectedRevision: 0,
+            });
+            assert.equal(response.statusCode, 200, response.body);
+            const turnId = response.json().turnId;
+            await waitFor(turnId, 'failed');
+            assert.equal(prompts.has(turnId), false);
+            const failure = (await pool.query('SELECT error FROM turns WHERE id=$1', [turnId]))
+              .rows[0];
+            assert.match(failure.error, reason);
+            let notices: { text: string }[] = [];
+            for (let attempt = 0; attempt < 250 && !notices.length; attempt++) {
+              notices = (
+                await pool.query(
+                  "SELECT text FROM messages WHERE turn_id=$1 AND role='assistant'",
+                  [turnId],
+                )
+              ).rows;
+              if (!notices.length) await delay(20);
+            }
+            assert.equal(notices.length, 1);
+            assert.ok(notices[0].text.includes(title));
+            assert.match(notices[0].text, reason);
+          }
+          await request('DELETE', `/api/schedules/${schedule.id}`);
+        },
+      );
+
+      await t.test(
+        'direct schedule pause or deletion retires an outstanding chat confirmation',
         async () => {
           for (const method of ['PATCH', 'DELETE'] as const) {
             const schedule = await reminder({
               kind: 'recurring',
-              cron: '0 0 1 1 *',
+              cron: '0 0 * * 0',
               runAt: null,
             });
             const prompt = `Synthetic scheduled cancellation ${randomUUID()}`;
             const requestedId = method === 'PATCH' ? schedule.id.toUpperCase() : schedule.id;
-            plans.set(prompt, { action: 'schedule_cancel', args: { id: requestedId } });
+            plans.set(prompt, { action: 'schedule_pause', args: { id: requestedId } });
             const turn = await transaction(async (client) => {
               const turnId = await enqueueTurn(prompt, {
                 source: 'schedule',
@@ -1205,8 +2457,8 @@ test(
                 client,
               });
               await client.query(
-                `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority_instruction)
-                 VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',$8)`,
+                `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority)
+                 VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',jsonb_build_object('messages',jsonb_build_array(jsonb_build_object('id',null,'at',now(),'text',$8::text))))`,
                 [
                   randomUUID(),
                   ownerId,
@@ -1223,16 +2475,20 @@ test(
             await waitFor(turn, 'waiting');
             const [approval] = await approvalsFor(turn);
             assert.equal(approval.status, 'pending');
-            assert.equal(approval.action, 'NOD_schedule_cancel');
+            assert.equal(approval.action, 'NOD_schedule_pause');
             assert.deepEqual(approval.args, { id: requestedId });
             const before = await request('GET', '/api/state');
             assert.equal(before.statusCode, 200, before.body);
             const beforeState = before.json<AppState>();
+            const confirmation = await confirmationFor(approval);
+            assert.match(confirmation, /pause a schedule/i);
+            assert.match(confirmation, /Synthetic cancellation reminder/);
+            assert.doesNotMatch(confirmation, /NOD_schedule_pause|\{"args"/);
             assert.equal(
               beforeState.messages.find(
                 (message) => message.id === approval.confirmation_message_id,
               )?.text,
-              confirmationText,
+              confirmation,
             );
             const response = await request(
               method,
@@ -1240,7 +2496,7 @@ test(
               method === 'PATCH' ? { enabled: false } : undefined,
             );
             assert.equal(response.statusCode, 200, response.body);
-            if (method === 'PATCH') await assertCancelled(schedule);
+            if (method === 'PATCH') await assertPaused(schedule);
             else {
               assert.equal(
                 (
@@ -1299,13 +2555,13 @@ test(
       await t.test(
         'retiring a schedule confirmation leaves its saved task open with a reply target',
         async () => {
-          const schedule = await reminder({ kind: 'recurring', cron: '0 0 1 1 *', runAt: null });
+          const schedule = await reminder({ kind: 'recurring', cron: '0 0 * * 0', runAt: null });
           const taskId = randomUUID();
           const parentId = randomUUID();
           const ownerMessageId = randomUUID();
           const prompt = `Synthetic saved task cancellation ${randomUUID()}`;
           const threadId = (await request('GET', '/api/state')).json<AppState>().threadId;
-          plans.set(prompt, { action: 'schedule_cancel', args: { id: schedule.id } });
+          plans.set(prompt, { action: 'schedule_pause', args: { id: schedule.id } });
           const turn = await transaction(async (client) => {
             await client.query(
               `INSERT INTO turns(id,owner_id,thread_id,session_id,source,message_id,prompt,status,finished_at)
@@ -1338,13 +2594,14 @@ test(
           await waitFor(turn, 'waiting');
           const [approval] = await approvalsFor(turn);
           assert.equal(approval.status, 'pending');
-          assert.equal(approval.action, 'NOD_schedule_cancel');
+          assert.equal(approval.action, 'NOD_schedule_pause');
           const before = (await request('GET', '/api/tasks'))
             .json<Task[]>()
             .find((task) => task.id === taskId);
           assert.ok(before);
           assert.equal(before.status, 'needs_you');
-          assert.equal(before.question, confirmationText);
+          const confirmation = await confirmationFor(approval);
+          assert.equal(before.question, confirmation);
           assert.equal(before.messageId, null);
           const turnCount = (
             await pool.query(
@@ -1406,7 +2663,7 @@ test(
           assert.ok(detail.task.questionMessageId);
           assert.notEqual(detail.task.questionMessageId, approval.confirmation_message_id);
           assert.equal(
-            detail.events.some((event) => event.summary === confirmationText),
+            detail.events.some((event) => event.summary === confirmation),
             false,
           );
           assert.ok(detail.events.some((event) => event.summary === detail.task.question));
@@ -1524,13 +2781,13 @@ test(
       });
 
       await t.test(
-        'direct schedule cancellation waits for a channel confirmation in flight',
+        'direct schedule pause waits for a channel confirmation already in flight',
         async () => {
-          const schedule = await reminder({ kind: 'recurring', cron: '0 0 1 1 *', runAt: null });
+          const schedule = await reminder({ kind: 'recurring', cron: '0 0 * * 0', runAt: null });
           const prompt = `Synthetic channel cancellation ${randomUUID()}`;
           const sourceId = `channel:telegram:bot:${randomUUID()}`;
           const channel = 'telegram:synthetic';
-          plans.set(prompt, { action: 'schedule_cancel', args: { id: schedule.id } });
+          plans.set(prompt, { action: 'schedule_pause', args: { id: schedule.id } });
           const turn = await transaction(async (client) => {
             const turnId = await enqueueTurn(prompt, {
               source: 'schedule',
@@ -1541,8 +2798,8 @@ test(
               client,
             });
             await client.query(
-              `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority_instruction)
-             VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',$8)`,
+              `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority)
+             VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',jsonb_build_object('messages',jsonb_build_array(jsonb_build_object('id',null,'at',now(),'text',$8::text))))`,
               [
                 randomUUID(),
                 ownerId,
@@ -1560,6 +2817,7 @@ test(
           const [approval] = await approvalsFor(turn);
           assert.equal(approval.status, 'pending');
           const messageId = approval.confirmation_message_id as string;
+          const confirmation = await confirmationFor(approval);
           const taskId = randomUUID();
           await transaction(async (client) => {
             await client.query(
@@ -1620,7 +2878,7 @@ test(
                 Boolean(
                   (
                     await pool.query(
-                      "SELECT 1 FROM approvals WHERE owner_id=$1 AND confirmation_message_id=$2 AND action='NOD_schedule_cancel'",
+                      "SELECT 1 FROM approvals WHERE owner_id=$1 AND confirmation_message_id=$2 AND action='NOD_schedule_pause'",
                       [ownerId, id],
                     )
                   ).rowCount,
@@ -1664,13 +2922,13 @@ test(
             await sending;
             await channels.drain();
             assert.equal(response.statusCode, 200, response.body);
-            await assertCancelled(schedule);
+            await assertPaused(schedule);
             assert.equal((await approvalsFor(turn))[0].status, 'expired');
             assert.equal(posts.length, 2);
-            assert.deepEqual(posts[0], { threadId: 'synthetic-chat', text: confirmationText });
+            assert.deepEqual(posts[0], { threadId: 'synthetic-chat', text: confirmation });
             assert.equal(posts[1]?.threadId, 'synthetic-chat');
             assert.match(posts[1]?.text ?? '', /This task is still open/);
-            assert.notEqual(posts[1]?.text, confirmationText);
+            assert.notEqual(posts[1]?.text, confirmation);
             const noticeId = (
               await pool.query('SELECT continuation_message_id FROM tasks WHERE id=$1', [taskId])
             ).rows[0].continuation_message_id as string;
@@ -1708,11 +2966,12 @@ test(
         'legacy schedule approvals without a saved revision cannot execute',
         async () => {
           const schedule = await reminder();
-          const turn = await propose('schedule_cancel', { id: schedule.id });
+          const turn = await propose('schedule_pause', { id: schedule.id });
           const [approval] = await approvalsFor(turn);
-          await pool.query('UPDATE approvals SET expected_revision=NULL WHERE id=$1', [
-            approval.id,
-          ]);
+          await pool.query(
+            "UPDATE approvals SET action='NOD_schedule_cancel',expected_revision=NULL WHERE id=$1",
+            [approval.id],
+          );
           const response = await request('POST', '/api/messages', {
             text: 'Yes',
             replyToMessageId: approval.confirmation_message_id,
@@ -1729,6 +2988,78 @@ test(
             ).rows[0],
             { revision: 0, enabled: true, job_id: schedule.jobId },
           );
+        },
+      );
+
+      await t.test(
+        'legacy schedule cancellation approval still pauses the saved schedule',
+        async () => {
+          const schedule = await reminder({ kind: 'recurring', cron: '0 0 * * 0', runAt: null });
+          const turn = await propose('schedule_pause', { id: schedule.id });
+          const [approval] = await approvalsFor(turn);
+          await pool.query("UPDATE approvals SET action='NOD_schedule_cancel' WHERE id=$1", [
+            approval.id,
+          ]);
+          const response = await request('POST', '/api/messages', {
+            text: 'Yes',
+            replyToMessageId: approval.confirmation_message_id,
+            clientMessageId: randomUUID(),
+          });
+          assert.equal(response.statusCode, 200, response.body);
+          const resumed = response.json().turnId as string;
+          await waitFor(resumed, 'succeeded');
+          assert.equal((await approvalsFor(turn))[0].status, 'completed');
+          assert.match(prompts.get(resumed) ?? '', /The schedule is paused/);
+          const paused = (await request('GET', '/api/schedules'))
+            .json()
+            .find((item: { id: string }) => item.id === schedule.id);
+          assert.equal(paused.enabled, false);
+          assert.equal(paused.nextRun, null);
+        },
+      );
+
+      await t.test(
+        'legacy approval does not call a completed one-time schedule paused',
+        async () => {
+          const schedule = await reminder();
+          const turn = await propose('schedule_pause', { id: schedule.id });
+          const [approval] = await approvalsFor(turn);
+          const threadId = (await request('GET', '/api/state')).json<AppState>().threadId;
+          const finishedTurn = randomUUID();
+          const runAt = '2020-01-01T09:00:00Z';
+          await pool.query(
+            `INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,finished_at)
+             VALUES($1,$2,$3,$3,'schedule','Synthetic completed reminder.','succeeded',now())`,
+            [finishedTurn, ownerId, threadId],
+          );
+          await pool.query(
+            `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone)
+             VALUES($1,$2,$3,0,$4,'Synthetic cancellation reminder',$5,$6,'UTC')`,
+            [randomUUID(), ownerId, schedule.id, randomUUID(), finishedTurn, runAt],
+          );
+          await pool.query(
+            'UPDATE schedules SET enabled=false,run_at=$2,next_run_at=NULL,job_id=NULL WHERE id=$1',
+            [schedule.id, runAt],
+          );
+          await pool.query("UPDATE approvals SET action='NOD_schedule_cancel' WHERE id=$1", [
+            approval.id,
+          ]);
+          const response = await request('POST', '/api/messages', {
+            text: 'Yes',
+            replyToMessageId: approval.confirmation_message_id,
+            clientMessageId: randomUUID(),
+          });
+          assert.equal(response.statusCode, 200, response.body);
+          const resumed = response.json().turnId as string;
+          await waitFor(resumed, 'succeeded');
+          assert.equal((await approvalsFor(turn))[0].status, 'completed');
+          assert.doesNotMatch(prompts.get(resumed) ?? '', /The schedule is paused/);
+          const saved = (await request('GET', '/api/schedules'))
+            .json()
+            .find((item: { id: string }) => item.id === schedule.id);
+          assert.equal(saved.enabled, false);
+          assert.equal(saved.lastRun.scheduledFor, new Date(runAt).toISOString());
+          assert.equal(saved.lastRun.status, 'succeeded');
         },
       );
 
@@ -1820,7 +3151,7 @@ test(
       );
 
       await t.test(
-        'a schedule cancellation steered into a confirmed turn uses the fresh owner request',
+        'a schedule pause steered into a confirmed turn uses the fresh owner request',
         async () => {
           const schedule = await reminder();
           const proposed = await propose('notification_preferences_update', {
@@ -1857,7 +3188,7 @@ test(
             assert.equal((await approvalsFor(proposed))[0].status, 'completed');
             const text = 'Cancel the synthetic reminder now.';
             asked.add(text);
-            plans.set(text, { action: 'schedule_cancel', args: { id: schedule.id } });
+            plans.set(text, { action: 'schedule_pause', args: { id: schedule.id } });
             const cancellation = await request('POST', '/api/messages', {
               text,
               clientMessageId: randomUUID(),
@@ -1874,7 +3205,7 @@ test(
               ).rows[0].turn_id,
               resumed,
             );
-            await assertCancelled(schedule);
+            await assertPaused(schedule);
           } finally {
             steering = undefined;
             release();
@@ -1883,7 +3214,7 @@ test(
       );
 
       await t.test(
-        'the small LLM checks actions and replies while the selected model writes confirmations',
+        'the small LLM checks actions and replies while the server writes confirmations',
         async () => {
           const reset = await request('POST', '/api/conversation/reset', { threadId: ids.at(-1) });
           assert.equal(reset.statusCode, 200, reset.body);
@@ -1910,11 +3241,12 @@ test(
           assert.equal(integrationFixture.writes.length, writes);
           assert.deepEqual(decisionInputs.slice(before), []);
           const checked = sendChecks();
-          assert.equal(checked.length, 2);
+          assert.equal(checked.length, 1);
           assert.equal(checked[0].action.arguments.body, body);
-          assert.deepEqual(Object.keys(checked[1]).sort(), ['data', 'purpose', 'text']);
-          assert.equal(checked[1].data.args.body, body);
-          assert.equal(checked[1].text, confirmationText);
+          const confirmation = await confirmationFor(pending);
+          assert.match(confirmation, /send a Gmail email/i);
+          assert.match(confirmation, /decision@example.test/);
+          assert.doesNotMatch(confirmation, /GMAIL_SEND_EMAIL|recipient_email|\{"args"/);
           const replyId = randomUUID();
           const accepted = await request('POST', '/api/messages', {
             text: 'Yes',
@@ -1928,7 +3260,7 @@ test(
           assert.equal(integrationFixture.writes.length, writes + 1);
           assert.deepEqual(decisionInputs.slice(before), []);
           assert.deepEqual(smallReplies.at(-1), { reply: 'Yes' });
-          assert.equal(sendChecks().length, 2);
+          assert.equal(sendChecks().length, 1);
           const rows = (
             await pool.query(
               'SELECT id,turn_id,cost_usd,details FROM model_usage WHERE owner_id=$1 AND NOT(id=ANY($2::text[])) ORDER BY created_at,id',
@@ -1978,7 +3310,7 @@ test(
             await waitFor(declined.json().turnId, 'succeeded');
             assert.equal((await approvalsFor(held))[0].status, 'declined');
             assert.equal(decisionInputs.length, count);
-            assert.equal(sendChecks().length, 4);
+            assert.equal(sendChecks().length, 2);
           } finally {
             decisionsEnabled = true;
           }
@@ -2207,18 +3539,18 @@ test(
             assert.deepEqual(card.args, { origin, kind: 'sign_in', itemId: login });
             assert.equal(injected.length, before);
             const checks = fallbackChecks.slice(checksFrom) as Array<Record<string, any>>;
-            for (const account of [
-              checks.find((check) => check.action?.name === 'NOD_sign_in')?.action.arguments
-                .account,
-              checks.find((check) => check.purpose === 'confirmation_review')?.data.details.account,
-            ]) {
-              assert.equal(typeof account, 'string');
-              assert.ok(account.includes(saved.json().label));
-              assert.ok(account.includes(saved.json().usernameHint));
-              assert.equal(account.includes('Model-supplied account name'), false);
-            }
+            const account = checks.find((check) => check.action?.name === 'NOD_sign_in')?.action
+              .arguments.account;
+            assert.equal(typeof account, 'string');
+            assert.ok(account.includes(saved.json().label));
+            assert.ok(account.includes(saved.json().usernameHint));
+            assert.equal(account.includes('Model-supplied account name'), false);
+            const confirmation = await confirmationFor(card);
+            assert.ok(confirmation.includes(saved.json().label));
+            assert.ok(confirmation.includes(saved.json().usernameHint));
+            assert.equal(confirmation.includes('Model-supplied account name'), false);
             assert.doesNotMatch(
-              JSON.stringify(checks),
+              JSON.stringify({ checks, confirmation }),
               /synthetic-bank-password|JBSWY3DP|otpauth/i,
             );
             if (kind === 'password') {
@@ -2294,6 +3626,198 @@ test(
             'waiting',
           );
           assert.equal(await pending(), 1);
+        },
+      );
+      await t.test(
+        'local files open only in work the owner started, and opening needs their words',
+        async () => {
+          const folder = await mkdtemp(join(localHome, 'files-'));
+          await mkdir(join(folder, 'sorted'));
+          await writeFile(join(folder, 'a.txt'), 'a');
+          await writeFile(join(folder, 'contract.txt'), 'Synthetic contract');
+          const text = (id: string) => JSON.stringify(results.get(id));
+          const eventPrompt = `Synthetic event ${randomUUID()}`;
+          plans.set(eventPrompt, { tool: 'files', action: 'list', args: { path: folder } });
+          const event = await enqueueTurn(eventPrompt, { source: 'event', background: true });
+          await waitFor(event, 'succeeded|failed');
+          assert.match(
+            text(event) ??
+              (await pool.query('SELECT error FROM turns WHERE id=$1', [event])).rows[0].error,
+            /work the owner started/,
+          );
+          assert.deepEqual(await approvalsFor(event), []);
+          const observer = await enqueueTurn(`Synthetic observer ${randomUUID()}`, {
+            source: 'event',
+            background: true,
+            proactive: true,
+          });
+          await waitFor(observer, 'succeeded|failed');
+          const taskPrompt = `Synthetic observer task ${randomUUID()}`;
+          plans.set(taskPrompt, { tool: 'files', action: 'list', args: { path: folder } });
+          const task = await enqueueTurn(taskPrompt, {
+            source: 'task',
+            background: true,
+            parentTurnId: observer,
+            proactive: false,
+          });
+          await waitFor(task, 'succeeded|failed');
+          assert.match(
+            text(task) ??
+              (await pool.query('SELECT error FROM turns WHERE id=$1', [task])).rows[0].error,
+            /work the owner started/,
+          );
+          const readText = `Summarize contract.txt ${randomUUID()}`;
+          assert.equal((await request('GET', '/api/preferences')).json().localFilesEnabled, false);
+          const opening = await propose(
+            'read',
+            { path: join(folder, 'contract.txt') },
+            'files',
+            readText,
+          );
+          const [access] = await approvalsFor(opening);
+          assert.equal(access.action, 'NOD_notification_preferences_update');
+          assert.deepEqual(access.args, { localFilesEnabled: true });
+          assert.doesNotMatch(text(opening), /Synthetic contract/);
+          asked.add(readText);
+          repeatAfterConfirm = {
+            tool: 'files',
+            action: 'read',
+            args: { path: join(folder, 'contract.txt') },
+          };
+          const accepted = await request('POST', '/api/messages', {
+            text: 'Yes',
+            replyToMessageId: access.confirmation_message_id,
+            approvalAnswer: { approvalId: access.id, approved: true },
+          });
+          assert.equal(accepted.statusCode, 200, accepted.body);
+          await waitFor(accepted.json().turnId, 'succeeded');
+          assert.equal((await request('GET', '/api/preferences')).json().localFilesEnabled, true);
+          assert.match(text(accepted.json().turnId), /Synthetic contract/);
+          await request('PATCH', '/api/preferences', { localFilesEnabled: false });
+          const enableText = `Enable local file access and read contract.txt ${randomUUID()}`;
+          asked.add(enableText);
+          plans.set(enableText, {
+            tool: 'files',
+            action: 'read',
+            args: { path: join(folder, 'contract.txt') },
+          });
+          const enabled = await submitUserMessage(enableText);
+          await waitFor(enabled.turnId, 'succeeded');
+          assert.deepEqual(await approvalsFor(enabled.turnId), []);
+          assert.equal((await request('GET', '/api/preferences')).json().localFilesEnabled, true);
+          const unnamed = await propose(
+            'read',
+            { path: `${folder}/sorted/../contract.txt` },
+            'files',
+          );
+          const [held] = await approvalsFor(unnamed);
+          assert.equal(held.status, 'pending');
+          assert.equal(held.action, 'LOCAL_FILES_READ');
+          assert.deepEqual(held.args, { path: join(folder, 'contract.txt') });
+          const schedule = await reminder();
+          const scheduledPrompt = `Synthetic scheduled listing ${randomUUID()}`;
+          plans.set(scheduledPrompt, { tool: 'files', action: 'list', args: { path: folder } });
+          const scheduled = await transaction(async (client) => {
+            const turnId = await enqueueTurn(scheduledPrompt, {
+              source: 'schedule',
+              sourceId: `schedule-fixture:${randomUUID()}`,
+              background: true,
+              client,
+            });
+            await client.query(
+              `INSERT INTO schedule_runs(id,owner_id,schedule_id,schedule_revision,job_id,title,turn_id,scheduled_for,time_zone,authority)
+               VALUES($1,$2,$3,0,$4,$5,$6,$7,'UTC',jsonb_build_object('messages',jsonb_build_array(jsonb_build_object('id',null,'at',now(),'text',$8::text))))`,
+              [
+                randomUUID(),
+                ownerId,
+                schedule.id,
+                randomUUID(),
+                'Synthetic listing',
+                turnId,
+                new Date().toISOString(),
+                'List the synthetic folder.',
+              ],
+            );
+            return turnId;
+          }, pool);
+          await waitFor(scheduled, 'waiting|succeeded');
+          assert.doesNotMatch(text(scheduled), /work the owner started/);
+          const keepText = `Never touch the sorted folder ${randomUUID()}`;
+          const keptOut = await propose(
+            'keep_out',
+            { path: join(folder, 'sorted') },
+            'files',
+            keepText,
+          );
+          assert.deepEqual(await approvalsFor(keptOut), []);
+          const moveText = `Move a.txt into sorted ${randomUUID()}`;
+          asked.add(moveText);
+          plans.set(moveText, {
+            tool: 'files',
+            action: 'move',
+            args: { moves: [{ from: join(folder, 'a.txt'), to: join(folder, 'sorted', 'a.txt') }] },
+          });
+          const moved = (await request('POST', '/api/messages', { text: moveText })).json()
+            .turnId as string;
+          await waitFor(moved, 'succeeded|failed');
+          assert.match(
+            text(moved) ??
+              (await pool.query('SELECT error FROM turns WHERE id=$1', [moved])).rows[0].error,
+            /keep out of .*sorted/,
+          );
+          assert.equal(await readFile(join(folder, 'a.txt'), 'utf8'), 'a');
+          assert.equal(
+            (
+              await application.app.inject({
+                method: 'DELETE',
+                url: '/api/local-files/keep-out',
+                headers: { host: headers.host },
+                payload: { path: join(folder, 'sorted') },
+              })
+            ).statusCode,
+            401,
+          );
+          const letIn = await request('DELETE', '/api/local-files/keep-out', {
+            path: join(folder, 'sorted'),
+          });
+          assert.equal(letIn.statusCode, 200, letIn.body);
+          assert.ok(!letIn.json().paths.includes(join(folder, 'sorted')));
+        },
+      );
+      await t.test(
+        'local files export imported workspace files and refuse changed approved bytes',
+        async () => {
+          const folder = await mkdtemp(join(localHome, 'exports-'));
+          const source = join(folder, 'source.txt');
+          await writeFile(source, 'Synthetic local report');
+          const before = new Set(workspaceFiles.keys());
+          const importText = `Import the synthetic local report ${randomUUID()}`;
+          asked.add(importText);
+          await propose('import', { path: source }, 'files', importText);
+          const workspaceFile = [...workspaceFiles.keys()].find((path) => !before.has(path));
+          assert.ok(workspaceFile);
+          const file = { workspaceFile, mimeType: 'text/plain' };
+          const path = join(folder, 'exported.txt');
+          const exportText = `Save the synthetic local report ${randomUUID()}`;
+          asked.add(exportText);
+          const exported = await propose('export', { file, path }, 'files', exportText);
+          assert.deepEqual(await approvalsFor(exported), []);
+          assert.equal(await readFile(path, 'utf8'), 'Synthetic local report');
+
+          const heldPath = join(folder, 'held.txt');
+          const held = await propose('export', { file, path: heldPath }, 'files');
+          const [approval] = await approvalsFor(held);
+          assert.equal(approval.status, 'pending');
+          workspaceFiles.set(workspaceFile, Buffer.from('Changed synthetic local report'));
+          const response = await request('POST', '/api/messages', {
+            text: 'Yes',
+            replyToMessageId: approval.confirmation_message_id,
+            clientMessageId: randomUUID(),
+          });
+          await waitFor(response.json().turnId, 'succeeded');
+          assert.equal((await approvalsFor(held))[0].status, 'expired');
+          assert.equal(existsSync(heldPath), false);
+          assert.equal(await readFile(source, 'utf8'), 'Synthetic local report');
         },
       );
       await t.test('shutdown saves usage from the last provider before it returns', async () => {

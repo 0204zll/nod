@@ -45,16 +45,20 @@ flowchart LR
 
 Pi's native tools (`read`, `bash`, `edit`, `write`, `find` and `ls`) run inside the workspace through `WorkspaceSession.exec`. Each thread works in `/workspace/<thread ID>`. A source install mounts `NOD_DATA_ROOT/workspaces`; self-hosted and desktop runtimes use a persistent workspace volume. `/home/node` is a separate volume, so tools Pi installs persist.
 
+The tools use the thread's Linux workspace path on every host, including Windows. The runtime converts Windows file paths before it sends file operations to the container.
+
 - Commands run as the unprivileged `node` user, without sudo.
 - Bash gets no host environment. It sets the owner's `TZ` when known.
 - No workspace file is loaded as instructions.
 
 Both the workspace and browser containers drop all capabilities, set `no-new-privileges` and have these limits:
 
-| Container | Source install (`compose.yaml`)                      | Local desktop runtime                              | Self-hosted server defaults                                |
-| --------- | ---------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------- |
-| Workspace | 8 GB memory, 4 CPUs, 4,096 processes                 | 2 GB memory, 2 CPUs, 1,024 processes               | 2 GB memory, no CPU limit, 512 processes                   |
-| Browser   | 8 GB memory, 6 CPUs, 4,096 processes, read-only root | 2 GB memory, 2 CPUs, 768 processes, read-only root | 3 GB memory, no CPU limit, 1,024 processes, read-only root |
+| Container | Source install (`compose.yaml`)                            | Local desktop runtime                              | Self-hosted server defaults                                |
+| --------- | ---------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------- |
+| Workspace | 8 GB memory, up to 4 CPUs, 4,096 processes                 | 2 GB memory, 2 CPUs, 1,024 processes               | 2 GB memory, no CPU limit, 512 processes                   |
+| Browser   | 8 GB memory, up to 6 CPUs, 4,096 processes, read-only root | 2 GB memory, 2 CPUs, 768 processes, read-only root | 3 GB memory, no CPU limit, 1,024 processes, read-only root |
+
+For source installs, `pnpm start` uses the Docker daemon's CPU count when it is lower than these caps. It also respects lower `NOD_WORKSPACE_CPUS` and `NOD_BROWSER_CPUS` values from the shell or `.env`. Direct Compose commands keep the listed defaults; set those variables when using a smaller Docker VM.
 
 The self-hosted server reaches Docker through a restricted proxy for its workspace and browser containers. Its Compose configuration allows separate memory limits through `NOD_WORKSPACE_MEMORY` and `NOD_BROWSER_MEMORY`.
 
@@ -70,6 +74,8 @@ Every command goes through a small supervisor inside the container, in [`src/pro
 ## Command output
 
 Up to 1 MiB of output reaches Pi. Pi shows the model the tail, and codemode scripts get the whole output and the exit code. Larger output keeps its first and last 512 KiB and names the complete log in the workspace.
+
+For the task's command view, the runtime also saves each `bash` command. It saves the exit code when available and up to the last 16,000 characters of the redacted command output. It removes known secrets and secret-shaped text from the full output before taking the tail, and records nothing when no command redactor is set. The record sits on the call's `tool_start` and `tool_complete` or `tool_failed` rows in `turn_events`, and the owner's task and Usage routes read it. Usage lists each recorded command once and loads its output on request. The CSV export includes the command, exit code, status and saved output. These records remain in the local database until all data is removed. See [Watch Nod's commands](/use/workspace/#watch-nods-commands).
 
 Pi writes truncated output, codemode files and images, and extracted web PDFs to the server's temp folder. The runtime moves each file into the workspace's `.nod/outputs` folder and rewrites its path before the result is recorded. See [`src/providers/pi/sandbox.ts`](https://github.com/n8n-io/nod/blob/main/src/providers/pi/sandbox.ts).
 
@@ -123,7 +129,7 @@ sequenceDiagram
 - An init script makes every passkey request fail at once and reports no passkey support, so a sign-in doesn't open a passkey prompt that the live view can't show.
 
 :::caution[Limits]
-In a source install or self-hosted server, the workspace has internet access through normal Docker routing. There is no egress firewall, so a command can reach any address the host network can. The desktop app's local runtime blocks workspace traffic to private and reserved address ranges. Connecting a desktop client to a server does not add that firewall to the server. The browser reaches only public addresses. Inside the browser container, Chromium runs with its own sandbox turned off; the container is the boundary.
+The workspace can reach public internet addresses. Source installs and self-hosted servers use a separate firewall container. It blocks private and reserved IPv4 addresses, including cloud metadata services, and all external IPv6 traffic. The workspace starts only after the firewall is ready and has no permission to change its rules. Local workspace services remain available through loopback. The desktop app's local runtime also blocks private and reserved addresses. The browser reaches only public addresses. Inside the browser container, Chromium runs with its own sandbox turned off; the container is the boundary.
 :::
 
 ## Related resources

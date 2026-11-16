@@ -19,9 +19,15 @@ If your problem isn't here, [send feedback with a diagnostic report](#send-feedb
 
 Docker isn't running, or Compose is too old. Start Docker (on a Mac, open Docker Desktop) and check that `docker compose version` reports v2.
 
-### Run npm run dev to prepare the local database
+### the --chmod option requires BuildKit
 
-You ran `docker compose` yourself before Nod created the database password. Run `pnpm start` once. It generates `NOD_POSTGRES_PASSWORD` and starts the containers for you.
+Docker cannot build the workspace and browser images when BuildKit is unavailable or disabled. A missing Buildx plugin can cause this error. Docker Desktop includes it. Other setups, such as Colima with a Homebrew Docker CLI or a Linux package without `docker-buildx-plugin`, need it installed separately. [Install Buildx](https://github.com/docker/buildx#installing) and check that `docker buildx version` prints a version.
+
+If `DOCKER_BUILDKIT=0` is set in your environment, remove it or set it to `1` to enable BuildKit. Then run `pnpm start` again.
+
+### NOD_POSTGRES_PASSWORD is missing a value
+
+You ran `docker compose` yourself before Nod created the database password. Run `pnpm start` from the repository root. It generates `NOD_POSTGRES_PASSWORD`, starts the containers, and starts Nod.
 
 ### Configure NOD_VAULT_KEY in server settings before saving a connection.
 
@@ -37,11 +43,33 @@ Keep a copy of the key somewhere safe. Saved credentials can't be read without i
 
 Another program uses port `4310`. Set another `PORT` in `.env` and [apply the configuration](/deploy/configuration/#apply-configuration-changes). Update your browser address and any SSH tunnel to match. A direct source install also needs database port `54329` on `127.0.0.1`; the self-hosting stack keeps its database port private.
 
+### This host is not permitted.
+
+When `NOD_PUBLIC_URL` is set, Nod answers only at that address. The Docker setup always sets it (by default to `http://localhost:4310`). A request for any other host gets this error. That includes `127.0.0.1`, `localhost` after you set an HTTPS address, and a reverse proxy that changes the `Host` header. Without `NOD_PUBLIC_URL`, Nod answers only at `localhost`, `127.0.0.1` and `[::1]` on its own port.
+
+Open Nod at that exact address, and make sure a reverse proxy passes the public `Host` header through unchanged. To use another address, change `NOD_PUBLIC_URL` and [apply the configuration](/deploy/configuration/#apply-configuration-changes). Nod accepts one address at a time.
+
 ### You lost the access link
 
 For a local source install without `NOD_AUTH_TOKEN`, Nod prints a link with `#access=` when it starts, and your browser keeps the cookie. To get a new link, delete `access-key` in your data folder (`.local/` by default) and restart. A server configured with `NOD_AUTH_TOKEN` prints its address without that link; use its configured token, or follow [Rotate access](/deploy/server-operations/#rotate-access).
 
 ## Desktop app
+
+### Linux cannot start its private computer
+
+A local Linux desktop assistant requires hardware virtualization and access to `/dev/kvm`. Check that virtualization is enabled in your firmware and that your Linux account can use KVM. On distributions with a `kvm` group, your account must belong to it. Sign out and back in after a group change, then reopen Nod. Nod does not use software emulation as a fallback.
+
+### Linux cannot save or unlock keys
+
+Start and unlock your desktop's secret store, such as GNOME Keyring or KWallet, then reopen Nod. The Flatpak uses Secret Service for saved keys and server tokens. Nod refuses plain-text storage. Keep your existing profile and secret store entries.
+
+### Linux cannot move a file to the Trash
+
+The Flatpak uses `xdg-desktop-portal` for Trash. Check that your desktop's portal service is installed and running. Headless sessions can lack it. Nod keeps the original file when Trash fails.
+
+### Linux does not find an app update
+
+Nod's update checks are off on Linux. Download and install the next bundle with the [Linux install procedure](/get-started/install-desktop/#linux). The published bundles have no Nod update repository, so `flatpak update` alone does not update Nod.
 
 ### macOS blocks the first launch
 
@@ -51,7 +79,7 @@ Every release is notarized by Apple. If macOS still blocks it, open **System Set
 
 macOS can ask again after Nod is re-signed. Approve it in the macOS dialog. Never type your Mac password into the Nod chat.
 
-While the keychain unlocks, Nod keeps the startup screen and **Server connection** available. If it keeps waiting, check for a macOS prompt, unlock your keychain, then quit and reopen Nod.
+While the keychain unlocks, Nod keeps the startup screen and **Connect to a server** available. If it keeps waiting, check for a macOS prompt, unlock your keychain, then quit and reopen Nod.
 
 ### Nod could not unlock your saved server token
 
@@ -70,6 +98,8 @@ On Windows, the message reads "Nod needs more free disk space to prepare its pri
 ### Setup fails or stops partway
 
 Retry first. Do not delete the profile, VM, database, or runtime cache by hand to fix it. If it still fails, [send feedback](#send-feedback-with-a-diagnostic-report). If the chat cannot open, select **Show startup log** on the error screen. Send that log with a screenshot of the error. When a setup command fails, the message includes the last lines of its output.
+
+If the background service does not respond within two minutes, the startup log records the elapsed wait and the last health check failure. It also records whether the service reported its port. An unexpected service exit has a separate log entry.
 
 On a Mac, setup keeps runtime files that passed their checks, even if a later download fails. **Try again** checks and reuses those files. It does not remove a verified image while the private computer loads it.
 
@@ -103,7 +133,11 @@ ChatGPT sign-in receives its callback on port 1455. Another Nod app or another s
 
 Return to **Apps** and select **Connect** again. Keep the sign-in page and any window it opens until authorization finishes. A copied, expired or already used link cannot finish a connection. If the system's encrypted storage is locked, unlock it and restart Nod.
 
-If the connection service is unavailable or reports a limit, try again later. If the problem persists, [send feedback with a diagnostic report](/deploy/troubleshooting/#send-feedback-with-a-diagnostic-report).
+If the connection service refuses the request, the sign-in page names its reason and HTTP status, such as `public_budget_exceeded` and `HTTP 429`. If the connection service is unavailable or reports a limit, try again later. If the problem persists, [send feedback with a diagnostic report](/deploy/troubleshooting/#send-feedback-with-a-diagnostic-report).
+
+### An app tool fails with HTTP 403
+
+If an app tool error shows `HTTP 403` and a UTC time, [send feedback with a diagnostic report](/deploy/troubleshooting/#send-feedback-with-a-diagnostic-report). Include that time and any Cloudflare Ray ID in your feedback text. The displayed `0x` is a formatting prefix; support removes it before searching Cloudflare.
 
 ### App sign-in opens an unreachable address on a remote server
 
@@ -131,7 +165,7 @@ The bot was set up with a webhook elsewhere. Remove that webhook to use local po
 
 ### A scheduled task didn't run
 
-For a local desktop assistant, scheduled tasks run only while Nod is open and your computer is awake. Closing the window keeps Nod running in the menu bar or tray, but **Quit Nod** stops it. **Open at login** is on after setup; keep it on in **Settings → General** if you rely on schedules. For a remote assistant, check that the server is running; closing a desktop client does not stop its schedules.
+For a local desktop assistant, scheduled tasks run only while Nod is open and your computer is awake. Closing the window keeps Nod running in the menu bar or tray, but **Quit Nod** stops it. **Open at login** is on after setup; keep it on in **Settings → General** if you rely on schedules. After a restart or power cut, Nod starts only once you sign in to your computer, and a Mac with FileVault turned on never signs in automatically. For a remote assistant, check that the server is running; closing a desktop client does not stop its schedules.
 
 ### An action shows as uncertain
 

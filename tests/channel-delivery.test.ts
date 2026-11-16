@@ -10,13 +10,17 @@ import Fastify from 'fastify';
 import pg from 'pg';
 import type { ChannelSetupConfiguration } from '../src/ports/channel-settings.ts';
 import type { InboundMessage, MessagingTransport } from '../src/ports/messaging.ts';
+import { MessagingConnectionError } from '../src/ports/messaging.ts';
 import { createChatSdkTransport } from '../src/providers/chat-sdk/index.ts';
 import { createChatSdkSetupVerifier } from '../src/providers/chat-sdk/settings.ts';
 import {
+  channelConnectionObservations,
   createChannelSettings,
   managedChannelEnvironment,
+  type ChannelConnectionObservation,
 } from '../src/server/channel-settings.ts';
 import { createChannels } from '../src/server/channels.ts';
+import { withFailureLog } from '../src/server/failure-log.ts';
 import { transaction } from '../src/server/transaction.ts';
 import type { LiveWork } from '../src/server/activity.ts';
 
@@ -29,6 +33,141 @@ async function until(check: () => boolean | Promise<boolean>) {
     await sleep(10);
   }
 }
+
+test('channel observations require pairing or a live link and omit private account details', () => {
+  const channels = [
+    {
+      provider: 'telegram',
+      enabled: true,
+      mode: 'webhook',
+      webhookStatus: 'registered',
+      accountHandle: '@private_bot',
+      pairingExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    },
+    {
+      provider: 'whatsapp',
+      enabled: true,
+      mode: 'webhook',
+      webhookStatus: 'manual_setup',
+      accountHandle: 'private-number',
+    },
+  ] as const;
+  assert.deepEqual(channelConnectionObservations([...channels]), [
+    { channel: 'telegram', state: 'setup_pending' },
+    { channel: 'whatsapp', state: 'configured_unverified' },
+  ]);
+  const paired = channelConnectionObservations([
+    { ...channels[0], pairingExpiresAt: undefined, allowedUserId: '123' },
+    { ...channels[1], mode: 'linked', connectionState: 'connected' },
+  ]);
+  assert.deepEqual(paired, [
+    { channel: 'telegram', state: 'connected' },
+    { channel: 'whatsapp', state: 'connected' },
+  ]);
+  assert.equal(JSON.stringify(paired).includes('private'), false);
+  assert.equal(JSON.stringify(paired).includes('123'), false);
+});
+
+test('managed connection observations require usable channel configuration', () => {
+  const telegram = {
+    provider: 'telegram',
+    enabled: true,
+    managed: true,
+    mode: 'polling',
+    allowedUserId: '42',
+  } as const;
+  for (const environment of [
+    { TELEGRAM_ALLOWED_USER_ID: '42' },
+    { TELEGRAM_ALLOWED_USER_ID: '42', TELEGRAM_BOT_TOKEN: 'invalid' },
+  ])
+    assert.deepEqual(
+      channelConnectionObservations([telegram], managedChannelEnvironment(environment))[0],
+      { channel: 'telegram', state: 'setup_pending' },
+    );
+  assert.deepEqual(
+    channelConnectionObservations(
+      [telegram],
+      managedChannelEnvironment({
+        TELEGRAM_ALLOWED_USER_ID: '42',
+        TELEGRAM_BOT_TOKEN: '987:fixture-never-live',
+      }),
+    )[0],
+    { channel: 'telegram', state: 'connected' },
+  );
+  assert.deepEqual(
+    channelConnectionObservations(
+      [{ provider: 'whatsapp', enabled: true, managed: true, mode: 'webhook' }],
+      managedChannelEnvironment({ WHATSAPP_ENABLED: 'true' }),
+    )[1],
+    { channel: 'whatsapp', state: 'setup_pending' },
+  );
+});
+
+test('a newer unchanged channel status suppresses an older observation that finishes later', async () => {
+  const pool = {
+    async query(statement: string) {
+      assert.match(
+        statement,
+        /^(CREATE TABLE IF NOT EXISTS channel_settings|SELECT \* FROM channel_settings)/,
+      );
+      return { rows: [] };
+    },
+  } as unknown as pg.Pool;
+  let linkState: 'connected' | 'disconnected' = 'connected';
+  let holdNext = false;
+  let release: () => void = () => {};
+  let reached: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const waiting = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const observations: ChannelConnectionObservation[][] = [];
+  let lastSignature: string | undefined;
+  const settings = await createChannelSettings(pool, {
+    ownerId: 'synthetic-owner',
+    keyStore: { id: 'fixture', configured: true, getKey: async () => Buffer.alloc(32) },
+    verifier: createChatSdkSetupVerifier({
+      fetch: async () => {
+        throw new Error('Channel verification was not expected.');
+      },
+    }),
+    managed: managedChannelEnvironment({
+      WHATSAPP_ENABLED: 'true',
+      WHATSAPP_MODE: 'self-chat',
+      WHATSAPP_POLICY_CONFIRMED: 'true',
+    }),
+    apply: async () => {},
+    linkStatus: async () => {
+      const state = linkState;
+      if (holdNext) {
+        holdNext = false;
+        reached();
+        await held;
+      }
+      return { state };
+    },
+    observed: () => (states) => {
+      const signature = JSON.stringify(states);
+      if (signature === lastSignature) return;
+      lastSignature = signature;
+      observations.push(states);
+    },
+  });
+  await settings.status();
+  assert.deepEqual(observations[0]?.[1], { channel: 'whatsapp', state: 'connected' });
+  linkState = 'disconnected';
+  holdNext = true;
+  const stale = settings.status();
+  await waiting;
+  linkState = 'connected';
+  await settings.status();
+  assert.equal(observations.length, 1);
+  release();
+  assert.equal((await stale).channels[0]?.connectionState, 'disconnected');
+  assert.equal(observations.length, 1);
+});
 
 test(
   'managed channels shadow saved credentials, refuse changes and restore saved configuration when removed',
@@ -103,9 +242,17 @@ test(
       WHATSAPP_ENABLED: 'false',
       WHATSAPP_ACCESS_TOKEN: 'synthetic-server-meta-token',
     });
+    const managedObservations: ChannelConnectionObservation[][] = [];
+    const reconnects: Record<string, string>[] = [];
     const settings = await createChannelSettings(pool, {
       ...options,
       managed,
+      apply: async (environment) => {
+        reconnects.push(environment);
+      },
+      observed: () => (states) => {
+        managedObservations.push(states);
+      },
       keyStore: {
         id: 'fixture',
         configured: true,
@@ -154,14 +301,98 @@ test(
       status.channels.find((channel) => channel.provider === 'whatsapp')?.enabled,
       false,
     );
+    assert.deepEqual(managedObservations.at(-1), [
+      { channel: 'telegram', state: 'connected' },
+      { channel: 'whatsapp', state: 'disabled' },
+    ]);
     for (const secret of [serverToken, 'synthetic-server-meta-token'])
       assert.equal(JSON.stringify(status).includes(secret), false);
+    const reconnected = await app.inject({
+      method: 'POST',
+      url: '/api/channel-settings/telegram/reconnect',
+    });
+    assert.equal(reconnected.statusCode, 200);
+    assert.equal(reconnected.json().channel.allowedUserId, '42');
+    assert.equal(reconnected.body.includes(serverToken), false);
+    assert.deepEqual(reconnects, [environment]);
+    for (const provider of ['whatsapp', 'unknown'])
+      assert.equal(
+        (await app.inject({ method: 'POST', url: `/api/channel-settings/${provider}/reconnect` }))
+          .statusCode,
+        400,
+      );
     assert.deepEqual((await pool.query('SELECT * FROM channel_settings')).rows, rows);
+    const observeManaged = async (
+      environment: Record<string, string | undefined>,
+      provider: 'telegram' | 'whatsapp',
+    ) => {
+      let last: ChannelConnectionObservation[] = [];
+      const candidate = await createChannelSettings(pool, {
+        ...options,
+        managed: managedChannelEnvironment(environment),
+        observed: () => (states) => {
+          last = states;
+        },
+      });
+      await candidate.status();
+      return last.find((state) => state.channel === provider);
+    };
+    for (const environment of [
+      { TELEGRAM_ALLOWED_USER_ID: '42' },
+      { TELEGRAM_ALLOWED_USER_ID: '42', TELEGRAM_BOT_TOKEN: 'invalid' },
+      {
+        TELEGRAM_ALLOWED_USER_ID: '42',
+        TELEGRAM_BOT_TOKEN: serverToken,
+        TELEGRAM_MODE: 'webhook',
+      },
+      {
+        TELEGRAM_ALLOWED_USER_ID: '42',
+        TELEGRAM_BOT_TOKEN: serverToken,
+        TELEGRAM_WEBHOOK_SECRET_TOKEN: 'invalid',
+      },
+    ])
+      assert.deepEqual(await observeManaged(environment, 'telegram'), {
+        channel: 'telegram',
+        state: 'setup_pending',
+      });
+    assert.deepEqual(
+      await observeManaged(
+        {
+          TELEGRAM_ALLOWED_USER_ID: '42',
+          TELEGRAM_BOT_TOKEN: serverToken,
+          TELEGRAM_MODE: 'webhook',
+          TELEGRAM_WEBHOOK_SECRET_TOKEN: 'abcdefghijklmnop',
+        },
+        'telegram',
+      ),
+      { channel: 'telegram', state: 'configured_unverified' },
+    );
+    assert.deepEqual(await observeManaged({ WHATSAPP_ENABLED: 'true' }, 'whatsapp'), {
+      channel: 'whatsapp',
+      state: 'setup_pending',
+    });
+    assert.deepEqual(
+      await observeManaged(
+        {
+          WHATSAPP_ENABLED: 'true',
+          WHATSAPP_POLICY_CONFIRMED: 'true',
+          WHATSAPP_ACCESS_TOKEN: 'synthetic-access-token',
+          WHATSAPP_APP_SECRET: 'synthetic-app-secret',
+          WHATSAPP_PHONE_NUMBER_ID: '123',
+          WHATSAPP_ALLOWED_NUMBER: '123456789',
+          WHATSAPP_VERIFY_TOKEN: 'synthetic-verify-token',
+        },
+        'whatsapp',
+      ),
+      { channel: 'whatsapp', state: 'configured_unverified' },
+    );
     const restored = await createChannelSettings(pool, options);
     assert.deepEqual(await restored.environment(), saved);
     assert.equal((await restored.status()).channels[0]?.managed, undefined);
     let pairingId = randomUUID();
     let restarts = 0;
+    let linkedState: 'awaiting_scan' | 'connected' | 'disconnected' = 'awaiting_scan';
+    const linkedObservations: ChannelConnectionObservation[][] = [];
     const linked = await createChannelSettings(pool, {
       ...options,
       managed: managedChannelEnvironment({
@@ -169,11 +400,14 @@ test(
         WHATSAPP_POLICY_CONFIRMED: 'true',
       }),
       linkStatus: async () => ({
-        state: 'awaiting_scan',
+        state: linkedState,
         pairingId,
         qr: 'synthetic-pairing-qr',
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       }),
+      observed: () => (states) => {
+        linkedObservations.push(states);
+      },
       cancelPairing: async (candidate, restart) => candidate === pairingId && restart === true,
       apply: async (environment) => {
         assert.equal(environment.WHATSAPP_MODE, 'self-chat');
@@ -189,6 +423,23 @@ test(
     assert.equal(qr.statusCode, 200);
     assert.equal(qr.json().qr, 'synthetic-pairing-qr');
     assert.equal(JSON.stringify(await linked.status()).includes('synthetic-pairing-qr'), false);
+    assert.deepEqual(linkedObservations.at(-1)?.[1], {
+      channel: 'whatsapp',
+      state: 'setup_pending',
+    });
+    linkedState = 'connected';
+    await linked.status();
+    assert.deepEqual(linkedObservations.at(-1)?.[1], {
+      channel: 'whatsapp',
+      state: 'connected',
+    });
+    linkedState = 'disconnected';
+    await linked.status();
+    assert.deepEqual(linkedObservations.at(-1)?.[1], {
+      channel: 'whatsapp',
+      state: 'setup_pending',
+    });
+    assert.equal(JSON.stringify(linkedObservations).includes('synthetic-pairing-qr'), false);
     assert.equal(
       (
         await linkedApp.inject({
@@ -218,6 +469,15 @@ test(
     assert.equal(refreshed.statusCode, 200);
     assert.notEqual(refreshed.json().pairingId, qr.json().pairingId);
     assert.equal(restarts, 1);
+    linkedState = 'connected';
+    const reconnectedLink = await linkedApp.inject({
+      method: 'POST',
+      url: '/api/channel-settings/whatsapp/reconnect',
+    });
+    assert.equal(reconnectedLink.statusCode, 200);
+    assert.equal(reconnectedLink.json().channel.connectionState, 'connected');
+    assert.equal(reconnectedLink.body.includes('synthetic-pairing-qr'), false);
+    assert.equal(restarts, 2);
     assert.deepEqual((await pool.query('SELECT * FROM channel_settings')).rows, rows);
   },
 );
@@ -271,9 +531,9 @@ test(
           const persisted = await settings.environment();
           assert.equal(persisted.TELEGRAM_WEBHOOK_SECRET_TOKEN, body.secret_token);
           assert.equal(applied.TELEGRAM_WEBHOOK_SECRET_TOKEN, body.secret_token);
-          assert.equal(
-            (await settings.status()).channels[0]?.webhookStatus,
-            'registration_pending',
+          assert.match(
+            (await settings.status()).channels[0]?.webhookStatus ?? '',
+            /^(registration_pending|registered)$/,
           );
           registrations.push(body.secret_token);
           if (loseRegistrationResponse) throw new Error('fixture response lost after registration');
@@ -381,7 +641,28 @@ test(
         interrupted.TELEGRAM_WEBHOOK_SECRET_TOKEN,
       );
       assert.equal((await settings.status()).channels[0]?.webhookStatus, 'registered');
+      assert.equal(
+        (
+          await app.inject({
+            method: 'POST',
+            url: '/api/channel-settings/telegram/user',
+            payload: { allowedUserId: '123' },
+          })
+        ).statusCode,
+        200,
+      );
+      const savedConnection = await settings.environment();
+      const registrationCount = registrations.length;
+      const reconnect = () =>
+        app.inject({ method: 'POST', url: '/api/channel-settings/telegram/reconnect' });
+      const reconnected = await reconnect();
+      assert.equal(reconnected.statusCode, 200);
+      assert.equal(reconnected.json().channel.allowedUserId, '123');
+      assert.equal(registrations.length, registrationCount + 1);
+      assert.deepEqual(await settings.environment(), savedConnection);
       loseRegistrationResponse = true;
+      assert.equal((await reconnect()).statusCode, 400);
+      assert.deepEqual(await settings.environment(), savedConnection);
       assert.equal((await save()).statusCode, 503);
       assert.equal(
         (await app.inject({ method: 'DELETE', url: '/api/channel-settings/telegram' })).statusCode,
@@ -455,6 +736,17 @@ test(
         link.state = 'connected';
         assert.equal((await cancel(link.pairingId)).json().channel.enabled, true);
         assert.equal(unlinks, 0);
+        const savedLink = await linked.environment();
+        const savedPairingId = link.pairingId;
+        const reconnected = await linkedApp.inject({
+          method: 'POST',
+          url: '/api/channel-settings/whatsapp/reconnect',
+        });
+        assert.equal(reconnected.statusCode, 200);
+        assert.equal(reconnected.json().channel.connectionState, 'connected');
+        assert.equal(unlinks, 0);
+        assert.equal(link.pairingId, savedPairingId);
+        assert.deepEqual(await linked.environment(), savedLink);
         const oldId = link.pairingId;
         assert.equal(
           (
@@ -667,6 +959,14 @@ test(
       options: `-c search_path=${schema}`,
     });
     const offsets: number[] = [];
+    let pollFailure = false;
+    await pool.query(
+      'CREATE TABLE channel_poll_offsets(provider text NOT NULL,account_id text NOT NULL,next_offset bigint NOT NULL,PRIMARY KEY(provider,account_id))',
+    );
+    await pool.query(
+      "INSERT INTO channel_poll_offsets(provider,account_id,next_offset) VALUES('telegram',$1,999999)",
+      [token.split(':')[0]],
+    );
     const transport = createChatSdkTransport(
       pool,
       {
@@ -680,6 +980,15 @@ test(
         fetch: async (url, init) => {
           assert.equal(String(url), `https://api.telegram.org/bot${token}/getUpdates`);
           offsets.push(JSON.parse(String(init?.body)).offset);
+          if (pollFailure)
+            return Response.json(
+              {
+                ok: false,
+                error_code: 409,
+                description: `Conflict: terminated by another getUpdates request ${token} ${encodeURIComponent(token)}`,
+              },
+              { status: 409 },
+            );
           return Response.json({
             ok: true,
             result:
@@ -704,21 +1013,75 @@ test(
     try {
       await assert.rejects(
         transport.poll!(async () => {
-          throw new Error('database fixture failure');
+          throw Object.assign(new Error('database fixture failure'), { code: '40001' });
         }),
       );
-      assert.equal((await pool.query('SELECT * FROM channel_poll_offsets')).rowCount, 0);
+      assert.equal(
+        transport.channels.find((channel) => channel.id === 'telegram')?.available,
+        true,
+      );
+      assert.equal(
+        transport.channels.find((channel) => channel.id === 'telegram')?.error,
+        undefined,
+      );
+      assert.equal(
+        Number((await pool.query('SELECT * FROM channel_poll_offsets')).rows[0].next_offset),
+        999999,
+      );
       let accepted = 0;
       await transport.poll!(async (message) => {
         assert.equal(message.senderId, '123');
         assert.equal(message.text, 'Fixture polling request');
         accepted++;
       });
+      await pool.query("UPDATE channel_poll_offsets SET updated_at=now() - interval '23 hours'");
       await transport.poll!(async () => {
         assert.fail('Already persisted update');
       });
       assert.deepEqual(offsets, [0, 0, 42]);
       assert.equal(accepted, 1);
+      await pool.query(
+        "UPDATE channel_poll_offsets SET next_offset=999999,updated_at=now() - interval '25 hours'",
+      );
+      await transport.poll!(async () => {
+        accepted++;
+      });
+      assert.equal(accepted, 2);
+      await transport.poll!(async () => {
+        assert.fail('The new update number was not saved.');
+      });
+      assert.deepEqual(offsets.slice(-2), [0, 42]);
+      pollFailure = true;
+      await assert.rejects(
+        transport.poll!(async () => {}),
+        (error: Error) => {
+          assert.match(
+            error.message,
+            /HTTP 409, code 409.*Conflict: terminated by another getUpdates request/,
+          );
+          assert.equal(error.message.includes(token), false);
+          assert.equal(error.message.includes(encodeURIComponent(token)), false);
+          return true;
+        },
+      );
+      assert.equal(
+        transport.channels.find((channel) => channel.id === 'telegram')?.available,
+        false,
+      );
+      assert.match(
+        transport.channels.find((channel) => channel.id === 'telegram')?.error ?? '',
+        /HTTP 409/,
+      );
+      pollFailure = false;
+      await transport.poll!(async () => assert.fail('An accepted update was repeated.'));
+      assert.equal(
+        transport.channels.find((channel) => channel.id === 'telegram')?.available,
+        true,
+      );
+      assert.equal(
+        transport.channels.find((channel) => channel.id === 'telegram')?.error,
+        undefined,
+      );
     } finally {
       await transport.close();
       await pool.end();
@@ -1043,6 +1406,51 @@ async function outboxFixture(t: TestContext, max?: number, provider = 'telegram'
     });
   return { pool, threadId, posts, receive, turnOf, reply, create, transport };
 }
+
+test(
+  'channel polling keeps the service reason and clears it after recovery',
+  { skip: !process.env.TEST_DATABASE_URL },
+  async (t) => {
+    const { create, transport } = await outboxFixture(t);
+    const reason = 'Telegram polling failed (HTTP 409): Conflict: another poll is active.';
+    transport.poll = async () => {
+      transport.channels[0].available = false;
+      transport.channels[0].error = reason;
+      throw new MessagingConnectionError(reason);
+    };
+    const channels = await create();
+    const app = Fastify();
+    channels.registerRoutes(app);
+    try {
+      const failures: string[] = [];
+      await withFailureLog(
+        (event) => {
+          failures.push(event);
+        },
+        async () => {
+          await channels.drain();
+          await channels.drain();
+        },
+      );
+      const failed = (await app.inject('/api/channels')).json();
+      assert.equal(failed.error, reason);
+      assert.equal(failed.channels[0].available, false);
+      assert.equal(failed.channels[0].error, reason);
+      assert.equal(failures.filter((event) => event === 'channel_connection_failed').length, 1);
+      transport.poll = async () => {
+        transport.channels[0].available = true;
+        transport.channels[0].error = undefined;
+      };
+      await channels.drain();
+      const recovered = (await app.inject('/api/channels')).json();
+      assert.equal(recovered.error, null);
+      assert.equal(recovered.channels[0].available, true);
+      assert.equal(recovered.channels[0].error, undefined);
+    } finally {
+      await app.close();
+    }
+  },
+);
 
 test(
   'channel answer choices preserve the question and option meaning without changing stored text',
@@ -1460,9 +1868,10 @@ test(
       await until(() => edits.length === 5);
       assert.equal(edits[4]!.messageId, 'provider-2');
       assert.equal(edits[4]!.status, null);
-      assert.equal(
-        (await pool.query('SELECT 1 FROM channel_outbox WHERE live_status IS NOT NULL')).rowCount,
-        0,
+      await until(
+        async () =>
+          (await pool.query('SELECT 1 FROM channel_outbox WHERE live_status IS NOT NULL'))
+            .rowCount === 0,
       );
     } finally {
       await channels.close();
@@ -2681,6 +3090,7 @@ test(
     const app = Fastify();
     const key = randomBytes(32);
     let channels: Awaited<ReturnType<typeof createChannels>> | undefined;
+    const observedChannels: ChannelConnectionObservation[][] = [];
     const settings = await createChannelSettings(pool, {
       ownerId: 'local-development',
       keyStore: { id: 'fixture', configured: true, getKey: async () => key },
@@ -2688,6 +3098,9 @@ test(
       apply: async (environment) =>
         channels!.replaceTransport(createChatSdkTransport(pool, environment)),
       paired: async (candidate, client) => channels!.announcePairing(candidate, client),
+      observed: () => (states) => {
+        observedChannels.push(states);
+      },
     });
     channels = await createChannels(pool, {
       ownerId: 'local-development',
@@ -2756,6 +3169,11 @@ test(
         },
       });
       assert.equal(saved.statusCode, 200);
+      await settings.status();
+      assert.deepEqual(observedChannels.at(-1), [
+        { channel: 'telegram', state: 'setup_pending' },
+        { channel: 'whatsapp', state: 'disabled' },
+      ]);
       const firstCode = new URL(saved.json().pairingUrl).searchParams.get('start')!;
       assert.equal(
         (
@@ -2840,6 +3258,10 @@ test(
       assert.equal((await confirm()).statusCode, 503);
       assert.equal((await telegram())?.pairingCandidate?.id, '123');
       assert.equal((await telegram())?.allowedUserId, undefined);
+      assert.deepEqual(observedChannels.at(-1)?.[0], {
+        channel: 'telegram',
+        state: 'setup_pending',
+      });
       assert.equal((await settings.environment()).TELEGRAM_ALLOWED_USER_ID, '');
       assert.equal((await pool.query('SELECT * FROM channel_inbox')).rowCount, 0);
       assert.equal((await pool.query('SELECT * FROM messages')).rowCount, 0);
@@ -2848,6 +3270,13 @@ test(
 
       const confirmed = await confirm();
       assert.equal(confirmed.statusCode, 200);
+      await settings.status();
+      assert.deepEqual(observedChannels.at(-1)?.[0], {
+        channel: 'telegram',
+        state: 'connected',
+      });
+      assert.equal(JSON.stringify(observedChannels).includes(token), false);
+      assert.equal(JSON.stringify(observedChannels).includes('123'), false);
       assert.equal(confirmed.json().channel.allowedUserId, '123');
       const bound = await settings.environment();
       assert.equal(bound.TELEGRAM_ALLOWED_USER_ID, '123');

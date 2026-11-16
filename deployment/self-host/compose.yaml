@@ -133,8 +133,35 @@ services:
     volumes:
       - workspace-data:/workspace
       - workspace-tools:/home/node
-    networks: [workspace]
+    network_mode: service:workspace-network
+    depends_on:
+      workspace-network:
+        condition: service_healthy
+        restart: true
     command: ['sleep', 'infinity']
+
+  workspace-network:
+    image: nod-workspace:${NOD_IMAGE_TAG:-local}
+    pull_policy: never
+    dns: [1.1.1.1, 8.8.8.8]
+    user: root
+    restart: unless-stopped
+    init: true
+    entrypoint: /usr/local/bin/nod-workspace-network
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs:
+      - /tmp:size=1m
+    pids_limit: 32
+    mem_limit: 64m
+    networks: [workspace]
+    healthcheck:
+      test: ['CMD', 'test', '-f', '/tmp/network-ready']
+      interval: 2s
+      timeout: 3s
+      retries: 10
 
   https:
     image: caddy:2.11.7-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
@@ -146,12 +173,13 @@ services:
       - |
         origin=$${NOD_PUBLIC_URL%/}
         case "$$origin" in
-          https://*) authority=$${origin#https://} ;;
+          https://*) authority=$${origin#https://}; authority=$${authority%:443} ;;
           *) echo 'The HTTPS profile requires an https:// origin on port 443.' >&2; exit 1 ;;
         esac
         case "$$authority" in
           ''|*[!a-zA-Z0-9.-]*) echo 'The HTTPS profile requires a DNS or IPv4 host on port 443. Use an existing proxy for other ports or IPv6.' >&2; exit 1 ;;
         esac
+        export NOD_PUBLIC_URL="$$origin"
         exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
     environment:
       NOD_PUBLIC_URL: ${NOD_PUBLIC_URL:-http://localhost:${PORT:-4310}}

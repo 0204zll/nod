@@ -18,7 +18,7 @@ const serviceFailureReason = z.enum([
 ]);
 const connectionProperties = z.object({
   app: z.string().regex(/^[a-z][a-z0-9_-]{0,79}$/),
-  connection_method: z.enum(['managed_app', 'browser', 'http', 'mcp', 'cli']),
+  connection_method: z.enum(['managed_app', 'browser', 'http', 'mcp', 'cli', 'local']),
 });
 const duration = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 export const taskType = z.enum([
@@ -44,6 +44,7 @@ export const analyticsTool = z.enum([
   'browser_session',
   'create_audio',
   'delegate',
+  'files',
   'manage_apps',
   'manage_personal_context',
   'pay',
@@ -90,6 +91,29 @@ export const analyticsEvent = z.discriminatedUnion('event', [
     .object({
       event: z.literal('onboarding_completed'),
       properties: z.object({ provider: analyticsModelProvider }).strict().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      event: z.literal('model_setup_completed'),
+      properties: z.object({ provider: analyticsModelProvider, model: analyticsModel }).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      event: z.literal('owner_message_accepted'),
+      properties: z.object({ channel: z.enum(['web', 'telegram', 'whatsapp', 'other']) }).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      event: z.literal('channel_connection_observed'),
+      properties: z
+        .object({
+          channel: z.enum(['telegram', 'whatsapp']),
+          state: z.enum(['disabled', 'setup_pending', 'connected', 'configured_unverified']),
+        })
+        .strict(),
     })
     .strict(),
   z
@@ -190,6 +214,17 @@ export const analyticsEvent = z.discriminatedUnion('event', [
           ]),
           duration_ms: duration,
           queue_duration_ms: duration.optional(),
+          result: z
+            .enum([
+              'reply',
+              'needs_owner',
+              'no_reply',
+              'failed',
+              'cancelled',
+              'interrupted',
+              'skipped',
+            ])
+            .optional(),
           waiting_reason: z.enum(['question', 'approval', 'credentials']).optional(),
           failure_reason: z.enum(['spending_limit', 'model', 'unknown']).optional(),
         })
@@ -228,12 +263,18 @@ export const analyticsEvent = z.discriminatedUnion('event', [
             'quiet_start',
             'quiet_end',
             'proactivity_paused',
+            'local_files_access',
             'memory_enabled',
             'memory_sensitive',
             'monthly_spending_limit',
             'task_spending_limit',
+            'preparation_spending_limit',
             'model_selection',
             'model_effort',
+            'model_route_schedule',
+            'model_route_background',
+            'schedule_model',
+            'task_model',
           ]),
           actor: z.enum(['owner', 'agent', 'system']),
           state: z
@@ -329,6 +370,22 @@ export const analyticsEvent = z.discriminatedUnion('event', [
     .strict(),
   z
     .object({
+      event: z.literal('connection_inventory_observed'),
+      properties: z
+        .object({
+          connected_app_types: z.array(connectionProperties.shape.app).max(1000),
+          connected_app_type_count: z.number().int().nonnegative().max(1000),
+        })
+        .strict()
+        .refine(
+          ({ connected_app_types, connected_app_type_count }) =>
+            connected_app_type_count === connected_app_types.length &&
+            new Set(connected_app_types).size === connected_app_types.length,
+        ),
+    })
+    .strict(),
+  z
+    .object({
       event: z.literal('vault_imported'),
       properties: z
         .object({
@@ -394,6 +451,23 @@ export const analyticsEvent = z.discriminatedUnion('event', [
           provider: analyticsModelProvider,
           model: analyticsModel.optional(),
           purpose: z.enum(['agent', 'memory', 'review', 'tasks', 'task_classification']),
+          request_kind: z
+            .enum([
+              'chat',
+              'task',
+              'observer',
+              'helper',
+              'compaction',
+              'cache_warm',
+              'auxiliary',
+              'memory',
+              'review',
+              'tasks',
+              'task_classification',
+              'unclassified',
+            ])
+            .optional(),
+          attempt: z.number().int().min(1).max(4).optional(),
           outcome: z.enum(['succeeded', 'failed', 'cancelled']),
           input_tokens: duration,
           output_tokens: duration,

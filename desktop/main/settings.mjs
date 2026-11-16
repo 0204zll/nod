@@ -6,8 +6,9 @@ import { dirname } from 'node:path';
 const preferenceFields = ['launchAtLogin', 'notifications', 'onboardingCompleted'];
 const onboardingPreferenceSteps = ['notifications', 'launchAtLogin', 'complete'];
 
-export const desktopContentPolicy =
-  "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' https: data: blob:; frame-src 'self' blob: data: https://www.openstreetmap.org; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+export function desktopContentPolicy(posthogHost) {
+  return `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; font-src 'self' data:; connect-src 'self' ${new URL(posthogHost).origin}; media-src 'self' https: data: blob:; frame-src 'self' blob: data: https://www.openstreetmap.org; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`;
+}
 
 export function setupResource(value) {
   try {
@@ -114,6 +115,10 @@ export function createSettingsStore(path, encryption, platform = process.platfor
         value.version !== 1 ||
         !['system', 'light', 'dark'].includes(value.theme) ||
         preferenceFields.some((field) => typeof value[field] !== 'boolean') ||
+        (value.zoomFactor !== undefined &&
+          (!Number.isFinite(value.zoomFactor) ||
+            value.zoomFactor < 0.25 ||
+            value.zoomFactor > 5)) ||
         (value.onboardingPreferenceStep !== undefined &&
           !onboardingPreferenceSteps.includes(value.onboardingPreferenceStep)) ||
         (value.serverUrl !== undefined &&
@@ -233,6 +238,7 @@ export function createSettingsStore(path, encryption, platform = process.platfor
       launchAtLogin: value.launchAtLogin,
       notifications: value.notifications,
       theme: value.theme,
+      zoomFactor: value.zoomFactor ?? 1,
       onboardingCompleted: value.onboardingCompleted,
       ...(value.serverUrl ? { serverUrl: value.serverUrl } : {}),
       ...(value.welcome ? { welcome: { ...value.welcome } } : {}),
@@ -298,7 +304,13 @@ export function createSettingsStore(path, encryption, platform = process.platfor
         if (
           Object.keys(input).some(
             (key) =>
-              !['theme', ...preferenceFields, 'onboardingPreferenceStep', 'welcome'].includes(key),
+              ![
+                'theme',
+                'zoomFactor',
+                ...preferenceFields,
+                'onboardingPreferenceStep',
+                'welcome',
+              ].includes(key),
           )
         )
           throw new Error('These settings are not supported.');
@@ -311,6 +323,11 @@ export function createSettingsStore(path, encryption, platform = process.platfor
           if (!['system', 'light', 'dark'].includes(input.theme))
             throw new Error('Choose a supported appearance.');
           value.theme = input.theme;
+        }
+        if (input.zoomFactor !== undefined) {
+          if (!Number.isFinite(input.zoomFactor) || input.zoomFactor < 0.25 || input.zoomFactor > 5)
+            throw new Error('Choose a supported zoom level.');
+          value.zoomFactor = input.zoomFactor;
         }
         if (input.welcome !== undefined) {
           if (

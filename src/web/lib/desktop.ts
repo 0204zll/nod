@@ -52,6 +52,13 @@ type DesktopFeedbackContext = {
   platform: string | null;
 };
 
+type DesktopAppOpening = {
+  openedAt: number;
+  uuid: string;
+  entry: 'native_setup' | 'app_ui';
+  serverConnectionTelemetryAvailable?: true;
+};
+
 type DesktopWindow = Window & {
   nodDesktop?: {
     remote?: boolean;
@@ -65,11 +72,17 @@ type DesktopWindow = Window & {
     restartUpdate?(): Promise<void>;
     prepare?(options?: { retry: boolean }): Promise<DesktopStatus>;
     saveSettings(input: DesktopSettingsChange): Promise<DesktopSettings>;
+    getZoomFactor?(): Promise<number>;
+    setZoomFactor?(factor: number): Promise<number>;
     removeAllData(): Promise<void>;
     onOpenSettings(listener: (section: DesktopSettingsSection) => void): () => void;
     onNavigate?(listener: (path: string) => void): () => void;
     openExternal(url: string): Promise<void>;
     getPreferences(): Promise<DesktopPreferences>;
+    takeAppOpening?(
+      consented: boolean,
+      distinctId: string | null,
+    ): Promise<DesktopAppOpening | null>;
     getFeedbackContext?(): Promise<DesktopFeedbackContext>;
     captureFeedbackScreenshot?(): Promise<Uint8Array | null>;
     onFeedbackRequested?(listener: () => void): () => void;
@@ -93,6 +106,11 @@ export function desktopRuntimeAvailable() {
 
 export function desktopSettingsAvailable() {
   return typeof (window as DesktopWindow).nodDesktop?.getSettings === 'function';
+}
+
+export function desktopZoomAvailable() {
+  const bridge = (window as DesktopWindow).nodDesktop;
+  return typeof bridge?.getZoomFactor === 'function' && typeof bridge.setZoomFactor === 'function';
 }
 
 export function subscribeDesktopNavigation(listener: (path: string) => void) {
@@ -125,6 +143,18 @@ export function getDesktopSettings() {
 
 export function saveDesktopSettings(change: DesktopSettingsChange) {
   return settingsBridge().saveSettings(change);
+}
+
+export function getDesktopZoomFactor() {
+  const bridge = settingsBridge();
+  return bridge.getZoomFactor?.() ?? Promise.reject(new Error('Desktop zoom is unavailable.'));
+}
+
+export function setDesktopZoomFactor(factor: number) {
+  const bridge = settingsBridge();
+  return (
+    bridge.setZoomFactor?.(factor) ?? Promise.reject(new Error('Desktop zoom is unavailable.'))
+  );
 }
 
 export function removeDesktopData() {
@@ -163,6 +193,14 @@ export function saveDesktopChatReadCursor(
 
 export function desktopLinksAvailable() {
   return typeof (window as DesktopWindow).nodDesktop?.openExternal === 'function';
+}
+
+export function desktopAppOpeningAvailable() {
+  return typeof (window as DesktopWindow).nodDesktop?.takeAppOpening === 'function';
+}
+
+export function takeDesktopAppOpening(consented: boolean, distinctId: string | null) {
+  return (window as DesktopWindow).nodDesktop?.takeAppOpening?.(consented, distinctId);
 }
 
 export async function openConnection(url: string) {

@@ -27,6 +27,7 @@ const inputs = [
   'src/providers/docker/install-rtk.sh',
   'src/providers/docker/save-video.py',
   'src/providers/docker/workspace-artifacts.txt',
+  'src/providers/docker/workspace-network.sh',
   'src/providers/docker/workspace-video.txt',
 ];
 const windowsInputs = [
@@ -96,8 +97,11 @@ async function lockedPackages(names) {
 
 export function runtimePlatform(env = process.env) {
   const target =
-    env.NOD_DESKTOP_TARGET || `darwin-${process.platform === 'darwin' ? process.arch : 'arm64'}`;
-  if (!['darwin-arm64', 'darwin-x64', 'win32-x64'].includes(target))
+    env.NOD_DESKTOP_TARGET ||
+    (process.platform === 'linux'
+      ? `linux-${process.arch}`
+      : `darwin-${process.platform === 'darwin' ? process.arch : 'arm64'}`);
+  if (!['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64'].includes(target))
     throw new Error('Unsupported desktop target.');
   return target;
 }

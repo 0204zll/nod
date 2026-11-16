@@ -11,6 +11,7 @@ import {
   net,
   Notification,
   powerMonitor,
+  powerSaveBlocker,
   protocol,
   safeStorage,
   screen,
@@ -21,7 +22,6 @@ import {
 } from 'electron';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { spawn } from 'node:child_process';
 import { appendFile, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -47,8 +47,12 @@ import { saveArtifactDownload } from './downloads.mjs';
 import { createDesktopLifecycle, startupErrorDetails } from './lifecycle.mjs';
 import { createMacEncryption } from './mac-encryption.mjs';
 import { createDesktopUpdater, createUpdateSource, startDesktopUpdateChecks } from './updates.mjs';
-import { windowsInstallCommand } from './windows-update.mjs';
+import { startWindowsInstall } from './windows-update.mjs';
 import { appOpenPath } from './app-links.mjs';
+import { trustSystemCertificates } from './system-certificates.mjs';
+import { opensAtLogin, setOpenAtLogin } from './login-item.mjs';
+
+trustSystemCertificates();
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const engineRoot = app.isPackaged
@@ -56,6 +60,11 @@ const engineRoot = app.isPackaged
   : resolve(desktopRoot, '..');
 const notificationIcon = join(engineRoot, app.isPackaged ? 'dist/web' : 'public', 'nod-logo.png');
 const appPages = JSON.parse(readFileSync(join(engineRoot, 'src/shared/app-pages.json'), 'utf8'));
+const posthogConfig = JSON.parse(
+  readFileSync(join(engineRoot, 'src/shared/posthog-host.json'), 'utf8'),
+);
+const posthogHost = posthogConfig.host;
+const appContentPolicy = desktopContentPolicy(posthogHost);
 let pendingAppPath = process.argv.map((value) => appOpenPath(value, appPages)).find(Boolean);
 let appLinksReady = false;
 app.on('open-url', (event, value) => {
@@ -103,6 +112,10 @@ app.setPath(
   developmentDataRoot || join(app.getPath('appData'), testInstall ? 'nod Setup Test' : 'nod'),
 );
 const profileRoot = join(app.getPath('userData'), 'profiles', 'local');
+const freshLocalProfile = await stat(profileRoot).then(
+  () => false,
+  (error) => error.code === 'ENOENT',
+);
 const resumePath = join(profileRoot, 'update-resume.json');
 const resumeRead = readFile(resumePath, 'utf8').catch(() => undefined);
 const windowsUpdates = join(process.env.LOCALAPPDATA || app.getPath('temp'), 'nod', 'updates');
@@ -114,7 +127,21 @@ const settings = createSettingsStore(
 );
 const analyticsConfiguration = createDesktopAnalytics(join(profileRoot, 'analytics-id'), {
   packaged: app.isPackaged,
+  env: process.env,
 });
+let appOpeningAt;
+let freshAppOpening;
+let freshAppOpenCapture;
+let appOpeningDeferred = false;
+let appOpeningConsentVersion = 0;
+const claimedAppOpens = new Set();
+const appUIOpenings = new Map();
+function deferAppOpening() {
+  appOpeningDeferred = true;
+  appOpeningConsentVersion++;
+  freshAppOpening = undefined;
+  appUIOpenings.clear();
+}
 let setupWindow;
 let setupWindowLoaded;
 let engineWindow;
@@ -153,6 +180,7 @@ let engineOrigin = '';
 let engineBound = false;
 let authToken = '';
 let remoteConnection;
+let awakeBlocker;
 let connectionSettingsOpen = false;
 let onboardingSetupOpen = false;
 let connectionReturnsToOnboarding = false;
@@ -177,6 +205,9 @@ let status = {
 };
 const knownSecrets = new Set();
 const engineWindows = new Set();
+const zoomStates = new WeakMap();
+let lastZoomWindow;
+let zoomPersistence = Promise.resolve();
 let downloadShown = false;
 let bounceWhenReady = false;
 const pendingRenderers = new Map();
@@ -355,11 +386,26 @@ async function readDesktopSettings() {
   };
 }
 
+function windowsTitleBar(dark) {
+  return process.platform === 'win32'
+    ? {
+        titleBarStyle: 'hidden',
+        titleBarOverlay: {
+          color: dark ? '#191919' : '#fafafa',
+          symbolColor: dark ? '#fafafa' : '#191919',
+          height: 48,
+        },
+      }
+    : {};
+}
+
 function publishPreferences() {
   const value = publicPreferences();
   for (const window of [setupWindow, ...engineWindows]) {
     if (!window || window.isDestroyed()) continue;
     window.setBackgroundColor(value.resolvedTheme === 'dark' ? '#191919' : '#fafafa');
+    if (process.platform === 'win32')
+      window.setTitleBarOverlay(windowsTitleBar(value.resolvedTheme === 'dark').titleBarOverlay);
     window.webContents.send('nod:preferences', value);
   }
 }
@@ -374,6 +420,91 @@ function applyPreferences(saved) {
   publishPreferences();
   synchronizeNotifications();
   updateReadinessNotice();
+}
+
+function persistZoomFactor(contents) {
+  const factor = contents.getZoomFactor();
+  for (const window of engineWindows)
+    if (
+      !window.isDestroyed() &&
+      window.webContents !== contents &&
+      zoomStates.get(window.webContents)?.ready
+    )
+      window.webContents.setZoomFactor(factor);
+  const operation = zoomPersistence.then(async () => {
+    if ((await settings.get()).zoomFactor !== factor) await settings.save({ zoomFactor: factor });
+  });
+  zoomPersistence = operation.catch(() => {});
+  return operation;
+}
+
+function persistCurrentZoomFactor() {
+  const windows = [...engineWindows].filter(
+    (window) => !window.isDestroyed() && zoomStates.get(window.webContents)?.ready,
+  );
+  const window =
+    windows.find((candidate) => candidate.isFocused()) ??
+    windows.find((candidate) => candidate === lastZoomWindow) ??
+    windows.find((candidate) => candidate === engineWindow) ??
+    windows[0];
+  return window ? persistZoomFactor(window.webContents) : zoomPersistence;
+}
+
+function trackZoomFactor(window) {
+  const contents = window.webContents;
+  let resolve;
+  const state = {
+    ready: false,
+    loaded: new Promise((done) => {
+      resolve = done;
+    }),
+  };
+  zoomStates.set(contents, state);
+  if (window.isFocused()) lastZoomWindow = window;
+  window.on('focus', () => {
+    lastZoomWindow = window;
+  });
+  contents.once('did-finish-load', () => {
+    void (async () => {
+      await zoomPersistence;
+      const windows = [...engineWindows].filter(
+        (candidate) =>
+          candidate !== window &&
+          !candidate.isDestroyed() &&
+          zoomStates.get(candidate.webContents)?.ready,
+      );
+      const current =
+        windows.find((candidate) => candidate.isFocused()) ??
+        windows.find((candidate) => candidate === lastZoomWindow) ??
+        windows[0];
+      const zoomFactor = current
+        ? current.webContents.getZoomFactor()
+        : (await settings.get()).zoomFactor;
+      if (!window.isDestroyed()) contents.setZoomFactor(zoomFactor);
+    })()
+      .catch((error) => void writeDiagnostic(error.message).catch(() => {}))
+      .finally(() => {
+        state.ready = true;
+        resolve();
+      });
+  });
+  window.once('closed', () => resolve());
+  for (const event of ['blur', 'hide', 'close'])
+    window.on(event, () => {
+      if (!state.ready || window.isDestroyed()) return;
+      const focused = [...engineWindows].find(
+        (candidate) =>
+          !candidate.isDestroyed() &&
+          candidate.isFocused() &&
+          zoomStates.get(candidate.webContents)?.ready,
+      );
+      const source = event === 'blur' ? window : (focused ?? lastZoomWindow);
+      if (!source || source.isDestroyed() || !zoomStates.get(source.webContents)?.ready) return;
+      lastZoomWindow = source;
+      void persistZoomFactor(source.webContents).catch(
+        (error) => void writeDiagnostic(error.message).catch(() => {}),
+      );
+    });
 }
 
 function synchronizeNotifications() {
@@ -609,6 +740,7 @@ async function openExternal(value) {
 }
 
 function protectWindow(window, origin) {
+  if (origin) trackZoomFactor(window);
   window.on('focus', updateReadinessNotice);
   for (const event of ['blur', 'hide', 'closed'])
     window.on(event, () => setTimeout(updateReadinessNotice, 100));
@@ -665,6 +797,22 @@ function waitForRenderer(window, present, failed) {
   });
 }
 
+function openingBounds(bounds) {
+  const area = (
+    bounds.x === undefined ? screen.getPrimaryDisplay() : screen.getDisplayMatching(bounds)
+  ).workArea;
+  const width = Math.min(bounds.width, area.width);
+  const height = Math.min(bounds.height, area.height);
+  const x = bounds.x ?? area.x + Math.floor((area.width - width) / 2);
+  const y = bounds.y ?? area.y + Math.floor((area.height - height) / 2);
+  return {
+    x: Math.max(area.x, Math.min(x, area.x + area.width - width)),
+    y: Math.max(area.y, Math.min(y, area.y + area.height - height)),
+    width,
+    height,
+  };
+}
+
 function showSettings(section = 'general', loading = false) {
   if (quitting) return;
   if (!loading && onboardingCompleted && (engine || remoteConnection) && status.phase === 'ready') {
@@ -691,15 +839,17 @@ function showSettings(section = 'general', loading = false) {
   }
   const resumed = resumeWindow;
   resumeWindow = undefined;
+  const bounds = openingBounds(resumed?.bounds ?? { width: 1200, height: 860 });
   setupWindow = new BrowserWindow({
     show: false,
-    ...(resumed?.bounds ?? { width: 1200, height: 860 }),
-    minWidth: 700,
-    minHeight: 600,
+    ...bounds,
+    minWidth: Math.min(700, bounds.width),
+    minHeight: Math.min(600, bounds.height),
     title: 'Nod',
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#191919' : '#fafafa',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 20, y: 17 } } : {}),
+    ...windowsTitleBar(nativeTheme.shouldUseDarkColors),
     webPreferences: {
       preload: join(desktopRoot, 'preload', 'index.cjs'),
       ...rendererSecurity,
@@ -727,6 +877,17 @@ function showSettings(section = 'general', loading = false) {
     () => {
       if ((!quitting || status.phase === 'updating') && !window.isDestroyed()) {
         window.show();
+        if (
+          section === 'general' &&
+          !onboardingCompleted &&
+          !welcomePassed &&
+          !remoteConnection &&
+          !connectionSettingsOpen &&
+          !onboardingSetupOpen
+        ) {
+          appOpeningAt ??= Date.now();
+          captureFreshAppOpen();
+        }
         if (resumed?.maximized) window.maximize();
       }
       presented();
@@ -806,17 +967,20 @@ function showEngine({ focus = true } = {}) {
   const initialReplay = replayingProductOnboarding;
   engineFocusRequested = false;
   update({ windowError: undefined });
+  const bounds =
+    setupWindow && !setupWindow.isDestroyed()
+      ? setupWindow.getNormalBounds()
+      : openingBounds({ width: 1200, height: 860 });
   engineWindow = new BrowserWindow({
     show: false,
-    ...(setupWindow && !setupWindow.isDestroyed()
-      ? setupWindow.getNormalBounds()
-      : { width: 1200, height: 860 }),
-    minWidth: 700,
-    minHeight: 600,
+    ...bounds,
+    minWidth: Math.min(700, bounds.width),
+    minHeight: Math.min(600, bounds.height),
     title: 'Nod',
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#191919' : '#fafafa',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 20, y: 17 } } : {}),
+    ...windowsTitleBar(nativeTheme.shouldUseDarkColors),
     webPreferences: {
       preload: join(desktopRoot, 'preload', 'engine.cjs'),
       ...rendererSecurity,
@@ -999,6 +1163,7 @@ function baseEnvironment() {
       'NOD_FEEDBACK_RECEIPT_URL_PREFIX',
       'NOD_TRACES_URL',
       'NOD_TRACES_TOKEN',
+      'NOD_ONBOARDING_EMAIL_URL',
       'OTEL_EXPORTER_OTLP_ENDPOINT',
     ]
       .filter((key) => typeof process.env[key] === 'string')
@@ -1027,6 +1192,16 @@ function openOnePassword(owner) {
   helper.postMessage({ type: 'nod-1password-port' }, [port2]);
   owner.postMessage({ type: 'nod-1password-port' }, [port1]);
   owner.once('exit', () => helper.kill());
+}
+
+async function moveToTrash(child, { id, path }) {
+  if (typeof id !== 'string' || typeof path !== 'string' || !isAbsolute(path)) return;
+  const error = await shell.trashItem(path).then(
+    () => undefined,
+    () => 'The item could not be moved to the Trash.',
+  );
+  if (engine === child)
+    child.postMessage({ type: 'nod-trash-result', id, ...(error ? { error } : {}) });
 }
 
 async function profileOwner() {
@@ -1084,6 +1259,139 @@ function analyticsEnvironment(metadata) {
     : 'development';
 }
 
+async function captureNativeAnalytics({
+  event,
+  distinctId,
+  openedAt,
+  uuid,
+  properties,
+  verifyConsent,
+}) {
+  try {
+    const route = event === 'server_connection_verified' ? '/server' : '/onboarding';
+    const { nodBuild } = JSON.parse(await readFile(join(desktopRoot, 'package.json'), 'utf8'));
+    const saved = await settings.get();
+    if (saved.welcome?.usageData === false) deferAppOpening();
+    if (appOpeningDeferred) return false;
+    if (verifyConsent && !(await verifyConsent())) return false;
+    if (appOpeningDeferred) return false;
+    const response = await fetch(`${posthogConfig.host}/i/v0/e/`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(3_000),
+      body: JSON.stringify({
+        api_key: posthogConfig.key,
+        event,
+        distinct_id: distinctId,
+        uuid,
+        timestamp: new Date(openedAt).toISOString(),
+        properties: {
+          analytics_schema: posthogConfig.schemaVersion,
+          environment: analyticsEnvironment(nodBuild),
+          surface: 'desktop',
+          app_version: app.getVersion(),
+          ...properties,
+          route,
+          $current_url: `https://app.example${route}`,
+          $pathname: route,
+          $host: 'app.example',
+          $process_person_profile: false,
+          $geoip_disable: true,
+        },
+      }),
+    });
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => {});
+      return false;
+    }
+    const result = await response.json();
+    const limited = result?.quota_limited;
+    const accepted =
+      result?.status === 'Ok' &&
+      (limited == null ||
+        limited === '' ||
+        (Array.isArray(limited) && limited.length === 0) ||
+        (typeof limited === 'object' && Object.keys(limited).length === 0));
+    return accepted;
+  } catch {
+    return false;
+  }
+}
+
+function captureFreshAppOpen() {
+  if (
+    !freshLocalProfile ||
+    !app.isPackaged ||
+    testInstall ||
+    process.env.NOD_ANALYTICS_ENABLED === 'false' ||
+    process.env.NOD_ANALYTICS_ID ||
+    freshAppOpenCapture
+  )
+    return;
+  freshAppOpenCapture = (async () => {
+    const saved = await settings.get().catch(() => null);
+    if (
+      !saved ||
+      saved.serverUrl ||
+      saved.onboardingCompleted ||
+      saved.welcome ||
+      remoteConnection ||
+      onboardingCompleted ||
+      welcomePassed ||
+      connectionSettingsOpen ||
+      onboardingSetupOpen
+    )
+      return false;
+    const analytics = await analyticsConfiguration().catch(() => null);
+    if (!analytics?.enabled || !analytics.distinctId) return false;
+    const openedAt = appOpeningAt ?? Date.now();
+    const uuid = randomUUID();
+    freshAppOpening = { distinctId: analytics.distinctId, openedAt, uuid };
+    const accepted = await captureNativeAnalytics({
+      event: 'app_opened',
+      distinctId: analytics.distinctId,
+      openedAt,
+      uuid,
+      properties: { entry: 'native_setup', server_connection_telemetry_available: true },
+    });
+    if (accepted) claimedAppOpens.add(analytics.distinctId);
+    return accepted;
+  })().catch(() => false);
+}
+
+function captureStartupPath(path) {
+  if (appOpeningDeferred || onboardingCompleted || welcomePassed || remoteConnection) return;
+  const openedAt = Date.now();
+  return Promise.resolve(freshAppOpenCapture)
+    .then(async () => {
+      if (appOpeningDeferred) return;
+      const saved = await settings.get();
+      if (
+        appOpeningDeferred ||
+        saved.welcome?.usageData === false ||
+        saved.welcome?.continued === true
+      )
+        return;
+      if (
+        saved.welcome?.usageData !== true &&
+        !(freshLocalProfile && freshAppOpening && !saved.welcome)
+      )
+        return;
+      const analytics = await analyticsConfiguration();
+      if (!analytics.enabled || !analytics.distinctId) return;
+      if (freshAppOpening && freshAppOpening.distinctId !== analytics.distinctId) return;
+      return captureNativeAnalytics({
+        event: 'startup_path_selected',
+        distinctId: analytics.distinctId,
+        openedAt,
+        uuid: randomUUID(),
+        properties: { path },
+      });
+    })
+    .catch(() => {});
+}
+
 async function engineRequest(path, options = {}) {
   if (!engineBound) throw new Error('Nod is not ready.');
   return fetch(`${engineOrigin}${path}`, {
@@ -1109,7 +1417,7 @@ function configureAppSession() {
       const name =
         Object.keys(headers).find((key) => key.toLowerCase() === 'content-security-policy') ??
         'Content-Security-Policy';
-      headers[name] = [...(headers[name] ?? []), desktopContentPolicy];
+      headers[name] = [...(headers[name] ?? []), appContentPolicy];
       callback({ responseHeaders: headers });
     });
   appSession.setPermissionCheckHandler((sender, permission, origin, details) => {
@@ -1159,6 +1467,7 @@ function configureAppSession() {
 function showConnectionSettings() {
   if (quitting) return;
   const returnToOnboarding = onboardingSetupOpen;
+  captureStartupPath('remote');
   if (setupWindow && !setupWindow.isDestroyed()) setupWindow.destroy();
   connectionReturnsToOnboarding = returnToOnboarding;
   connectionSettingsOpen = true;
@@ -1195,14 +1504,27 @@ async function checkRemoteConnection(connection) {
     typeof account.settings?.onboardingCompleted !== 'boolean'
   )
     throw new Error('This address did not respond as a Nod server.');
-  return { url, token: connection.token, owner: account.user.id };
+  const revision = account.settings.usageDataRevision;
+  const usageDataRevision =
+    typeof revision === 'string' && /^(?:0|[1-9]\d{0,18})$/.test(revision) ? revision : null;
+  return {
+    url,
+    token: connection.token,
+    owner: account.user.id,
+    usageDataRevision,
+    analyticsAllowed:
+      usageDataRevision !== null &&
+      account.settings.usageData === true &&
+      account.analytics?.enabled === true,
+  };
 }
 
 async function startRemote(connection) {
   update({ remote: true, phase: 'starting', message: 'Connecting to your server.' });
   const connected = await checkRemoteConnection(connection);
   if (quitting) return;
-  remoteConnection = connected;
+  remoteConnection = { url: connected.url, token: connected.token, owner: connected.owner };
+  const activeConnection = remoteConnection;
   engineOrigin = connected.url;
   authToken = connected.token;
   engineBound = true;
@@ -1232,6 +1554,30 @@ async function startRemote(connection) {
   });
   synchronizeNotifications();
   showEngine();
+  if (connected.analyticsAllowed && !testInstall)
+    void analyticsConfiguration()
+      .then((analytics) => {
+        if (!analytics.enabled || !analytics.distinctId || quitting) return;
+        return captureNativeAnalytics({
+          event: 'server_connection_verified',
+          distinctId: analytics.distinctId,
+          openedAt: Date.now(),
+          uuid: randomUUID(),
+          properties: {},
+          verifyConsent: async () => {
+            if (quitting || remoteConnection !== activeConnection) return false;
+            const current = await checkRemoteConnection(activeConnection);
+            return (
+              !quitting &&
+              remoteConnection === activeConnection &&
+              current.owner === connected.owner &&
+              current.analyticsAllowed &&
+              current.usageDataRevision === connected.usageDataRevision
+            );
+          },
+        });
+      })
+      .catch(() => {});
   return status;
 }
 
@@ -1250,7 +1596,17 @@ async function saveConnection(input) {
   });
 }
 
+function stayAwake(working) {
+  if (working && awakeBlocker === undefined)
+    awakeBlocker = powerSaveBlocker.start('prevent-app-suspension');
+  if (!working && awakeBlocker !== undefined) {
+    powerSaveBlocker.stop(awakeBlocker);
+    awakeBlocker = undefined;
+  }
+}
+
 async function stopEngine() {
+  stayAwake(false);
   enginePreferencesReady = false;
   engineRuntimeReady = false;
   stopNotifications?.();
@@ -1432,6 +1788,9 @@ function refreshUpdateMenu() {
           enabled: Boolean(updates?.ready) && !checkingUpdates,
           click: () => void checkForUpdates(true, true),
         },
+        ...(process.platform === 'win32'
+          ? [{ label: 'Replay onboarding…', click: replayOnboarding }]
+          : []),
         { type: 'separator' },
         { label: 'Quit Nod', click: () => app.quit() },
       ]),
@@ -1640,23 +1999,17 @@ async function confirmRestart() {
   return response === 0 && !quitting;
 }
 
-function installUpdate() {
+async function installUpdate() {
   if (process.platform === 'win32') {
-    const { command, args, env } = windowsInstallCommand({
+    await startWindowsInstall({
       directory: join(windowsUpdates, updates.ready.version),
       appPath: process.execPath,
       pid: process.pid,
       systemRoot: process.env.SystemRoot,
     });
-    spawn(command, args, {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-      env: { ...process.env, ...env },
-    }).unref();
     installingUpdate = true;
     app.exit();
-    return Promise.resolve();
+    return;
   }
   return new Promise((resolve, reject) => {
     const cleanup = () => {
@@ -1685,6 +2038,11 @@ function installUpdate() {
 
 async function quit(complete, failure = 'Nod could not finish shutting down.') {
   quitting = true;
+  stayAwake(false);
+  await persistCurrentZoomFactor().catch(
+    (error) => void writeDiagnostic(error.message).catch(() => {}),
+  );
+  await zoomPersistence;
   stopUpdateChecks?.();
   const stoppingUpdates = updates?.dispose();
   updateReadinessNotice();
@@ -1715,7 +2073,7 @@ async function removeAllData() {
     const { removeProfile } = await import(
       pathToFileURL(join(engineRoot, 'desktop', 'runtime', 'index.mjs')).href
     );
-    app.setLoginItemSettings({ openAtLogin: false });
+    setOpenAtLogin(false);
     const browser = session.fromPartition('persist:nod-app');
     await browser.clearStorageData();
     await browser.clearCache();
@@ -1836,6 +2194,15 @@ async function startEngine({ runtime, signal, pending = false }) {
       engineBound = true;
     }
     if (engine === child && message?.type === 'nod-1password-open') openOnePassword(child);
+    if (engine === child && message?.type === 'nod-trash') void moveToTrash(child, message);
+    if (
+      engine === child &&
+      !closingEngine &&
+      !quitting &&
+      message?.type === 'nod-working' &&
+      typeof message.working === 'boolean'
+    )
+      stayAwake(message.working);
   });
   child.stdout?.resume();
   let diagnostics = '';
@@ -1856,6 +2223,7 @@ async function startEngine({ runtime, signal, pending = false }) {
   });
   child.on('exit', (code) => {
     if (engine !== child) return;
+    stayAwake(false);
     if (!closingEngine)
       failure =
         (status.phase === 'error' && status.error) ||
@@ -1873,6 +2241,9 @@ async function startEngine({ runtime, signal, pending = false }) {
     engineRuntimeReady = false;
     update({ engineReady: false });
     if (status.phase !== 'updating') {
+      void persistCurrentZoomFactor().catch(
+        (error) => void writeDiagnostic(error.message).catch(() => {}),
+      );
       for (const window of engineWindows) if (!window.isDestroyed()) window.destroy();
       engineWindows.clear();
     }
@@ -1886,8 +2257,10 @@ async function startEngine({ runtime, signal, pending = false }) {
       showSettings('general', true);
     }
   });
-  const deadline = Date.now() + 120_000;
+  const started = Date.now();
+  const deadline = started + 120_000;
   let ready = false;
+  let lastFailure = 'none';
   while (Date.now() < deadline && engine === child && !signal.aborted) {
     try {
       const response = await engineRequest('/api/health');
@@ -1895,8 +2268,20 @@ async function startEngine({ runtime, signal, pending = false }) {
         ready = true;
         break;
       }
-    } catch {}
+      lastFailure = response.ok ? 'unexpected response' : `HTTP ${response.status}`;
+    } catch (error) {
+      lastFailure =
+        [error?.cause?.code, error?.code].find((code) => typeof code === 'string') ||
+        error?.name ||
+        'error';
+    }
     await new Promise((accept) => setTimeout(accept, 300));
+  }
+  if (!ready && engine === child && !signal.aborted && Date.now() >= deadline) {
+    const waited = ((Date.now() - started) / 1000).toFixed(1);
+    await writeDiagnostic(
+      `Background service health check timed out after ${waited}s. Engine process still running: yes. Last health check: ${lastFailure}. Engine reported its port: ${engineBound ? 'yes' : 'no'}.`,
+    ).catch(() => {});
   }
   if (!ready || engine !== child || signal.aborted) {
     await stopEngine();
@@ -2231,6 +2616,22 @@ else {
         if (!isSetup(event) && !isEngine(event)) throw new Error('This action is unavailable.');
         return readDesktopSettings();
       });
+      ipcMain.handle('nod:zoom:get', async (event) => {
+        if (!isEngine(event)) throw new Error('This action is unavailable.');
+        await zoomStates.get(event.sender)?.loaded;
+        if (!isEngine(event)) throw new Error('This action is unavailable.');
+        return event.sender.getZoomFactor();
+      });
+      ipcMain.handle('nod:zoom:set', async (event, factor) => {
+        if (!isEngine(event)) throw new Error('This action is unavailable.');
+        if (!Number.isFinite(factor) || factor < 0.5 || factor > 3)
+          throw new Error('Choose a zoom level between 50% and 300%.');
+        await zoomStates.get(event.sender)?.loaded;
+        if (!isEngine(event)) throw new Error('This action is unavailable.');
+        event.sender.setZoomFactor(factor);
+        await persistZoomFactor(event.sender);
+        return event.sender.getZoomFactor();
+      });
       ipcMain.handle('nod:connection:get', (event) => {
         allowSetup(event);
         return settings.get().then((value) => ({ url: value.serverUrl || '' }));
@@ -2246,6 +2647,7 @@ else {
       ipcMain.handle('nod:connection:close', (event) => {
         allowSetup(event);
         const returnToOnboarding = connectionSettingsOpen && connectionReturnsToOnboarding;
+        captureStartupPath('welcome');
         setupWindow.destroy();
         if (returnToOnboarding) replayOnboarding();
         else showEngine();
@@ -2264,6 +2666,44 @@ else {
       ipcMain.handle('nod:feedback:capture', (event) => {
         if (!isEngine(event)) throw new Error('This action is unavailable.');
         return captureFeedbackScreenshot(event).catch(() => null);
+      });
+      ipcMain.handle('nod:analytics:opening', async (event, consented, distinctId) => {
+        if (
+          !isEngine(event) ||
+          event.sender !== engineWindow?.webContents ||
+          typeof consented !== 'boolean'
+        )
+          throw new Error('This action is unavailable.');
+        if (!consented) {
+          deferAppOpening();
+          return null;
+        }
+        if (
+          typeof distinctId !== 'string' ||
+          !/^local:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+            distinctId,
+          )
+        )
+          throw new Error('The analytics installation ID is invalid.');
+        const consentVersion = appOpeningConsentVersion;
+        await freshAppOpenCapture;
+        if (consentVersion !== appOpeningConsentVersion) return null;
+        if (claimedAppOpens.has(distinctId)) return null;
+        const native =
+          !remoteConnection && !appOpeningDeferred && freshAppOpening?.distinctId === distinctId
+            ? freshAppOpening
+            : null;
+        let opening = appUIOpenings.get(distinctId);
+        if (!opening) {
+          opening = {
+            openedAt: native?.openedAt ?? Date.now(),
+            uuid: native?.uuid ?? randomUUID(),
+            entry: native ? 'native_setup' : 'app_ui',
+            ...(native ? { serverConnectionTelemetryAvailable: true } : {}),
+          };
+          appUIOpenings.set(distinctId, opening);
+        }
+        return opening;
       });
       ipcMain.handle('nod:preferences:get', (event) => {
         if (!isSetup(event) && !isEngine(event)) throw new Error('This action is unavailable.');
@@ -2312,14 +2752,9 @@ else {
         let previousLogin;
         if (loginChanged) {
           try {
-            previousLogin = app.getLoginItemSettings().openAtLogin;
-            app.setLoginItemSettings({ openAtLogin: value.launchAtLogin });
-            const login = app.getLoginItemSettings();
-            if (
-              (process.platform === 'win32'
-                ? login.executableWillLaunchAtLogin
-                : login.openAtLogin) !== value.launchAtLogin
-            )
+            previousLogin = opensAtLogin();
+            setOpenAtLogin(value.launchAtLogin);
+            if (opensAtLogin() !== value.launchAtLogin)
               throw new Error(
                 'Open at login could not be updated. Check Nod in your computer’s login items, then try again.',
               );
@@ -2328,7 +2763,7 @@ else {
               throw error;
             if (typeof previousLogin === 'boolean') {
               try {
-                app.setLoginItemSettings({ openAtLogin: previousLogin });
+                setOpenAtLogin(previousLogin);
               } catch {}
             }
             value = { ...value };
@@ -2342,11 +2777,13 @@ else {
         } catch (error) {
           if (loginChanged) {
             try {
-              app.setLoginItemSettings({ openAtLogin: previousLogin });
+              setOpenAtLogin(previousLogin);
             } catch {}
           }
           throw error;
         }
+        if (value.welcome?.usageData === false) deferAppOpening();
+        if (value.welcome?.continued === false) captureStartupPath('local');
         onboardingCompleted = remoteConnection ? true : saved.onboardingCompleted;
         if (onboardingCompleted) nativePreferencesPending = false;
         const confirmNotifications = value.notifications === true && !preferences.notifications;

@@ -8,10 +8,11 @@ import { configureAnalytics } from './lib/analytics-client';
 import { claimAccess, sessionStore } from './lib/session';
 import { recordFeedbackError } from './lib/feedback-errors';
 import './components/dialog.css';
+import './components/workspace-command.css';
 import './styles.css';
 import './components/tabs.css';
 import './components/message-actions.css';
-import './components/answer-choices.css';
+import './components/action-card.css';
 import './components/telegram-chat-link.css';
 import './components/private-entry.css';
 import './components/app-discovery-dialog.css';
@@ -72,9 +73,7 @@ window.addEventListener('unhandledrejection', (event) =>
 );
 sessionStore.subscribe(() => {
   const { session } = sessionStore.getSnapshot();
-  configureAnalytics(
-    session?.user || session?.analytics?.distinctId === null ? session?.analytics : undefined,
-  );
+  configureAnalytics(session?.user ? session.analytics : undefined);
 });
 
 if (window.location.pathname === '/trust')

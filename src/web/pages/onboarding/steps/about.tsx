@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from 'react';
 import {
-  profileBusinessRoles,
+  profileAsksWhoFor,
   profileCompanySizes,
   profileJobs,
   profileRoles,
@@ -18,7 +18,10 @@ import {
   type ProfileJob,
   type ProfileRole,
 } from '../../../../shared/onboarding';
-import { onboardingProfileAnswers } from '../../../../shared/onboarding-analytics';
+import {
+  onboardingPersonProperties,
+  onboardingProfileAnswers,
+} from '../../../../shared/onboarding-analytics';
 import { Check, Pencil, X } from '../../../components/icons';
 import { prefersReducedMotion, Rise } from '../../../components/motion';
 import { Notice } from '../../../components/ui';
@@ -34,6 +37,7 @@ type State = {
   seen: Question[];
   profile: OnboardingProfile;
   editing: 'roles' | 'jobs' | null;
+  canContinue: boolean;
 };
 
 const prompts: Record<Question, string> = {
@@ -49,11 +53,12 @@ const fresh: State = {
   seen: [],
   profile: { roles: [], jobs: [] },
   editing: null,
+  canContinue: false,
 };
 
 function questions(profile: OnboardingProfile): Question[] {
   const items: Question[] = ['scope', 'roles'];
-  if (profile.roles.some((role) => profileBusinessRoles.includes(role))) items.push('whoFor');
+  if (profileAsksWhoFor(profile.scope, profile.roles)) items.push('whoFor');
   if (profile.scope !== 'personal') items.push('size');
   items.push('jobs');
   return items;
@@ -67,7 +72,7 @@ function applicable(profile: OnboardingProfile): OnboardingProfile {
   return {
     ...profile,
     roles,
-    whoFor: roles.some((role) => profileBusinessRoles.includes(role)) ? profile.whoFor : undefined,
+    whoFor: profileAsksWhoFor(profile.scope, roles) ? profile.whoFor : undefined,
     companySize: profile.scope === 'personal' ? undefined : profile.companySize,
   };
 }
@@ -113,16 +118,18 @@ function restore(): State | undefined {
   const profile = trimmed(stored.profile);
   const list = questions(profile);
   const seen = stored.seen.filter((question) => list.includes(question));
+  const current =
+    stored.current === 'done' && list.every((question) => seen.includes(question))
+      ? 'done'
+      : list.includes(stored.current as Question)
+        ? (stored.current as Question)
+        : (list.find((question) => !seen.includes(question)) ?? 'scope');
   return {
-    current:
-      stored.current === 'done' && list.every((question) => seen.includes(question))
-        ? 'done'
-        : list.includes(stored.current as Question)
-          ? stored.current
-          : (list.find((question) => !seen.includes(question)) ?? 'scope'),
+    current,
     seen,
     profile,
     editing: null,
+    canContinue: current === 'done' && stored.canContinue === true,
   };
 }
 
@@ -227,14 +234,13 @@ export function About({ arrived, quiet, onNext, onBack, usageShared }: StepProps
   const [typing, setTyping] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const [canContinue, setCanContinue] = useState(false);
   const timer = useRef<number | undefined>(undefined);
   const end = useRef<HTMLDivElement>(null);
   const moved = useRef(false);
   const intro = useReveal([{ typing: 450 }, { wait: 200 }, { wait: 200 }], {
     enabled: arrived === 'forward' && !quiet && !restored,
   });
-  const { profile, current, editing } = state;
+  const { profile, current, editing, canContinue } = state;
   const list = questions(profile);
   const has = (job: ProfileJob) => profile.jobs.includes(job);
 
@@ -263,9 +269,18 @@ export function About({ arrived, quiet, onNext, onBack, usageShared }: StepProps
       seen = seen.filter((item) => item !== 'roles');
     const upcoming = list.find((item) => !seen.includes(item)) ?? 'done';
     setError('');
-    setCanContinue(false);
-    setState({ current: upcoming, seen, profile, editing: null });
-    if (upcoming === 'done') return void finish(profile);
+    const nextState: State = {
+      current: upcoming,
+      seen,
+      profile,
+      editing: null,
+      canContinue: false,
+    };
+    setState(nextState);
+    if (upcoming === 'done') {
+      writeStored('about', nextState);
+      return void finish(profile);
+    }
     if (prefersReducedMotion()) return;
     window.clearTimeout(timer.current);
     setTyping(true);
@@ -276,8 +291,7 @@ export function About({ arrived, quiet, onNext, onBack, usageShared }: StepProps
     window.clearTimeout(timer.current);
     setTyping(false);
     setError('');
-    setCanContinue(false);
-    setState((value) => ({ ...value, current: question, editing: null }));
+    setState((value) => ({ ...value, current: question, editing: null, canContinue: false }));
   }
 
   function skip(question: Question) {
@@ -308,7 +322,7 @@ export function About({ arrived, quiet, onNext, onBack, usageShared }: StepProps
       });
       return {
         ...value,
-        seen: profile.roles.some((item) => profileBusinessRoles.includes(item))
+        seen: profileAsksWhoFor(profile.scope, profile.roles)
           ? value.seen
           : value.seen.filter((item) => item !== 'whoFor'),
         profile,
@@ -333,17 +347,26 @@ export function About({ arrived, quiet, onNext, onBack, usageShared }: StepProps
     if (saving) return;
     setSaving(true);
     setError('');
-    setCanContinue(false);
+    if (canContinue) writeStored('about', { ...state, canContinue: false });
+    setState((value) => ({ ...value, canContinue: false }));
     const capture = analyticsForCurrentSession();
     const saved = trimmed(final);
+    writeStored('about-shared', null);
     try {
-      await api('/api/onboarding/profile', { method: 'POST', body: JSON.stringify(saved) });
+      const result = await api<{ shared?: boolean }>('/api/onboarding/profile', {
+        method: 'POST',
+        body: JSON.stringify(saved),
+      });
+      if (result?.shared === true) writeStored('about-shared', onboardingPersonProperties(saved));
       capture('onboarding_profile_answered', onboardingProfileAnswers(saved));
       onNext();
     } catch (cause) {
       capture('ui_error', { area: 'onboarding', action: 'save' });
       setError(errorMessage(cause));
-      setCanContinue(cause instanceof ApiError && cause.status === 502);
+      setState((value) => ({
+        ...value,
+        canContinue: cause instanceof ApiError && cause.status === 502,
+      }));
     } finally {
       setSaving(false);
     }
@@ -487,7 +510,9 @@ export function About({ arrived, quiet, onNext, onBack, usageShared }: StepProps
 
   const ready =
     current === 'done'
-      ? () => void finish(profile)
+      ? canContinue
+        ? onNext
+        : () => void finish(profile)
       : current === 'jobs' && (profile.jobs.length || profile.jobsText?.trim())
         ? sendJobs
         : current === 'roles' && (profile.roles.length || profile.roleText?.trim())
@@ -509,9 +534,16 @@ export function About({ arrived, quiet, onNext, onBack, usageShared }: StepProps
       <div ref={end} />
       <Footer
         onBack={onBack}
-        onSkip={current === 'done' ? (canContinue ? onNext : undefined) : () => skip(current)}
-        skipLabel={current === 'done' ? 'Continue anyway' : 'Not now'}
+        onSkip={
+          current === 'done'
+            ? canContinue
+              ? () => void finish(profile)
+              : undefined
+            : () => skip(current)
+        }
+        skipLabel={current === 'done' ? 'Retry sharing' : 'Not now'}
         onNext={ready}
+        nextLabel={canContinue ? 'Continue without retrying' : 'Continue'}
         busy={saving}
       />
     </section>

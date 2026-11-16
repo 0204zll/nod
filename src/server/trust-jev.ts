@@ -1,3 +1,4 @@
+import { scheduledTexts } from './owner-instructions.ts';
 import { z } from 'zod';
 import type {
   DecisionModel,
@@ -32,6 +33,7 @@ const decisionSchema = resultSchema.extend({
 const settings = new Set([
   'NOD_schedule_create',
   'NOD_schedule_update',
+  'NOD_schedule_pause',
   'NOD_schedule_cancel',
   'NOD_limits_update',
   'NOD_notification_preferences_update',
@@ -239,15 +241,16 @@ export async function checkJevTrust(
   const action = input.action;
   const ownSettings = settings.has(action?.name ?? '');
   const signIn = signIns.has(action?.name ?? '');
-  const upload =
-    action?.name === 'NOD_browser' &&
-    (action.arguments?.step === 'upload' || action.arguments?.command?.action === 'upload');
+  const opensContent =
+    (action?.name === 'NOD_browser' &&
+      (action.arguments?.step === 'upload' || action.arguments?.command?.action === 'upload')) ||
+    ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT'].includes(action?.name ?? '');
   const effect = first.additional.effect?.choice;
   if (typeof effect !== 'string' || !(effect in jevPolicy.effect.choices))
     throw new Error('The trust effects are incomplete.');
   let kind = ownSettings ? 'settings' : signIn ? 'sign_in' : effect;
   if (action?.name === 'NOD_browser' && scores.unclear_read_step >= 0.5) kind = 'unknown';
-  if (upload) kind = 'update';
+  if (opensContent) kind = 'update';
   let read = false;
   const distribution = first.additional.effect.probabilities;
   const uncertainPrivate =
@@ -256,7 +259,7 @@ export async function checkJevTrust(
   const readCandidate =
     !ownSettings &&
     !signIn &&
-    !upload &&
+    !opensContent &&
     (effect === 'read' ||
       effect === 'prepare' ||
       uncertainPrivate ||
@@ -281,7 +284,7 @@ export async function checkJevTrust(
   const quote =
     source?.run &&
     source.because !== 'read' &&
-    !(ownSettings && ['standing', 'rules'].includes(String(first.choice)))
+    !(ownSettings && ['standing', 'rules', 'scheduleApproval'].includes(String(first.choice)))
       ? source.because
       : undefined;
   const facts = trustFacts(input).serverDateFacts;
@@ -302,15 +305,33 @@ export async function checkJevTrust(
   if (!read) {
     if (!(kind in grants)) throw new Error('The trust effect has no permission check.');
     const selected = String(first.choice);
+    const scheduled = selected.startsWith('schedule:') || selected === 'scheduleApproval';
+    const scheduledMessage = selected.startsWith('schedule:')
+      ? input.scheduledInstructions?.[Number(selected.slice(9))]
+      : undefined;
+    const ownerText =
+      selected === 'scheduleApproval'
+        ? JSON.stringify(input.scheduledApproval?.definition)
+        : source?.because;
+    const proposal =
+      scheduledMessage?.replyTo?.text ??
+      (selected === `message:${(input.userMessages?.length ?? 0) - 1}`
+        ? input.assistantMessageBeforeLatestUserMessage
+        : undefined);
     const ownerInput = {
       serverPolicy: jevPolicy.ownerPolicy,
-      ...(source?.because && source.because !== 'read'
-        ? { ownerSourceForThisCheck: { kind: first.choice, text: source.because } }
+      ...(ownerText && ownerText !== 'read'
+        ? { ownerSourceForThisCheck: { kind: first.choice, text: ownerText } }
         : {}),
-      ...(selected === `message:${(input.userMessages?.length ?? 0) - 1}` &&
-      input.assistantMessageBeforeLatestUserMessage
-        ? { assistantMessageBeforeLatestUserMessage: input.assistantMessageBeforeLatestUserMessage }
+      ...(scheduled
+        ? {
+            scheduledInstructions: input.scheduledInstructions,
+            scheduledApproval: input.scheduledApproval,
+            scheduledFor: input.scheduledFor,
+            timeZone: input.timeZone,
+          }
         : {}),
+      ...(proposal ? { assistantMessageBeforeLatestUserMessage: proposal } : {}),
     };
     const additionalQuestions: DecisionQuestion[] = [
       {
@@ -397,9 +418,7 @@ export async function checkJevTrust(
     }
     additionalQuestions.push(
       ...jevTimeQuestions(
-        (source?.because && source.because !== 'read' ? source.because : '') +
-          ' ' +
-          (ownerInput.assistantMessageBeforeLatestUserMessage ?? ''),
+        (scheduled ? scheduledTexts(input).join('\n') : (ownerText ?? '')) + ' ' + (proposal ?? ''),
         dates,
         kind,
       ),
@@ -412,7 +431,7 @@ export async function checkJevTrust(
       question: {
         ...predicate(
           'permission',
-          'Judge the complete owner instruction copied in ownerSourceForThisCheck under serverPolicy. Does this quoted owner instruction itself request or permit this kind of operation? Its kind identifies the original owner field. A lasting rule permission remains a grant without a fresh message. Assistant text only gives the concrete proposal that an owner reply accepts. This check extracts the grant, not final permission. Another check reads all owner constraints and the complete action. ' +
+          'Judge the complete owner instruction in ownerSourceForThisCheck under serverPolicy. Apply the supplied schedule evidence and later corrections when present. Does this quoted owner instruction itself request or permit this kind of operation? Its kind identifies the original owner field. A lasting rule permission remains a grant without a fresh message. Assistant text only gives the concrete proposal that an owner reply accepts. This check extracts the grant, not final permission. Another check reads all owner constraints and the complete action. ' +
             jevPolicy.ownerQuestions[grants[kind as keyof typeof grants]],
         ),
         choices: [
@@ -462,7 +481,7 @@ export async function checkJevTrust(
         sourceChoice.startsWith('message:')
           ? JSON.stringify(date.field) ===
             JSON.stringify(['userMessages', Number(sourceChoice.slice(8)), 'at'])
-          : sourceChoice === 'schedule' &&
+          : (sourceChoice.startsWith('schedule:') || sourceChoice === 'scheduleApproval') &&
             JSON.stringify(date.field) === JSON.stringify(['scheduledFor']),
       );
       const before = ref?.interpretations?.find((date) => date.timeZone === zone.choice)?.calendar;
@@ -527,7 +546,8 @@ export async function checkJevTrust(
           serverPolicy: jevPolicy.ownerPolicy,
           userMessages: input.userMessages,
           assistantMessageBeforeLatestUserMessage: input.assistantMessageBeforeLatestUserMessage,
-          scheduledTaskInstruction: input.scheduledTaskInstruction,
+          scheduledInstructions: input.scheduledInstructions,
+          scheduledApproval: input.scheduledApproval,
           scheduledFor: input.scheduledFor,
           timeZone: input.timeZone,
           standingInstruction: input.standingInstruction,
@@ -577,7 +597,9 @@ export async function checkJevTrust(
   };
   Object.assign(features, {
     source_message: Number(String(first.choice).startsWith('message:')),
-    source_schedule: Number(first.choice === 'schedule'),
+    source_schedule: Number(
+      String(first.choice).startsWith('schedule:') || first.choice === 'scheduleApproval',
+    ),
     source_standing: Number(first.choice === 'standing'),
     source_rules: Number(first.choice === 'rules'),
     effect_confidence: first.additional.effect.probability,

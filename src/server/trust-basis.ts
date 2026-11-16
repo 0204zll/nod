@@ -1,16 +1,21 @@
 import type { TrustBecause } from '../shared/trust.ts';
 import type { DecisionQuestion } from '../ports/decisions.ts';
+import type { OwnerInput } from './owner-instructions.ts';
 
 export type TrustBasis =
   | { kind: 'read' }
   | { kind: 'message'; messageId: string; quote: string }
-  | { kind: 'schedule' | 'standing' | 'rule'; quote: string }
+  | { kind: 'schedule' | 'standing' | 'rule'; quote: string; messageId?: string }
+  | { kind: 'scheduleApproval'; approvalId: string }
   | { kind: 'approved' };
 
 export interface TrustWords {
-  userMessages?: Array<{ at: string; text: string }>;
+  userMessages?: Array<{ id?: string; at: string; text: string; canAuthorize?: boolean }>;
   assistantMessageBeforeLatestUserMessage?: string;
-  scheduledTaskInstruction?: string;
+  scheduledInstructions?: ReadonlyArray<
+    Omit<OwnerInput, 'id' | 'replyTo'> & { id?: string | null; replyTo?: { text: string } }
+  >;
+  scheduledApproval?: { id?: string; at?: string; definition: Record<string, unknown> };
   scheduledFor?: string;
   timeZone?: string;
   standingInstruction?: string;
@@ -19,8 +24,13 @@ export interface TrustWords {
 
 export function trustDecision(words: TrustWords) {
   const sources = new Map<string, string>();
-  words.userMessages?.forEach(({ text }, index) => sources.set(`message:${index}`, text));
-  if (words.scheduledTaskInstruction) sources.set('schedule', words.scheduledTaskInstruction);
+  words.userMessages?.forEach(({ text, canAuthorize }, index) => {
+    if (canAuthorize !== false) sources.set(`message:${index}`, text);
+  });
+  words.scheduledInstructions?.forEach(({ text, canAuthorize }, index) => {
+    if (canAuthorize !== false && text) sources.set(`schedule:${index}`, text);
+  });
+  if (words.scheduledApproval) sources.set('scheduleApproval', 'schedule approval');
   if (words.standingInstruction) sources.set('standing', words.standingInstruction);
   if (words.userRules) sources.set('rules', words.userRules);
   const question: DecisionQuestion = {
@@ -50,7 +60,7 @@ export function trustDecision(words: TrustWords) {
         value,
         description: value.startsWith('message:')
           ? `The applicable owner words are in userMessages[${value.slice(8)}].text.`
-          : `The applicable owner words are in ${value === 'schedule' ? 'scheduledTaskInstruction' : value === 'standing' ? 'standingInstruction' : 'userRules'}.`,
+          : `The applicable owner words are in ${value.startsWith('schedule:') ? `scheduledInstructions[${value.slice(9)}].text` : value === 'scheduleApproval' ? 'scheduledApproval' : value === 'standing' ? 'standingInstruction' : 'userRules'}.`,
       })),
     ],
   };
@@ -81,7 +91,6 @@ const plain = (text: string) =>
 export function trustBasis(
   answer: unknown,
   words: TrustWords & { action?: { name: string; arguments?: Record<string, unknown> } },
-  messageIds: readonly string[],
 ): TrustBasis | undefined {
   if (!answer || typeof answer !== 'object') return undefined;
   const { run, because, terms, source } = answer as {
@@ -101,6 +110,7 @@ export function trustBasis(
   const settings = [
     'NOD_schedule_create',
     'NOD_schedule_update',
+    'NOD_schedule_pause',
     'NOD_schedule_cancel',
     'NOD_limits_update',
     'NOD_notification_preferences_update',
@@ -111,7 +121,13 @@ export function trustBasis(
   const command = action?.arguments?.command;
   const requiresQuote =
     settings ||
-    ['NOD_sign_in', 'NOD_browser_session', 'NOD_vault_allow'].includes(action?.name ?? '') ||
+    [
+      'NOD_sign_in',
+      'NOD_browser_session',
+      'NOD_vault_allow',
+      'LOCAL_FILES_READ',
+      'LOCAL_FILES_IMPORT',
+    ].includes(action?.name ?? '') ||
     (action?.name === 'NOD_browser' &&
       (action.arguments?.step === 'upload' ||
         (command &&
@@ -119,6 +135,10 @@ export function trustBasis(
           'action' in command &&
           command.action === 'upload')));
   if (because === 'read') return requiresQuote ? undefined : { kind: 'read' };
+  if (because === 'schedule approval')
+    return !settings && words.scheduledApproval?.id
+      ? { kind: 'scheduleApproval', approvalId: words.scheduledApproval.id }
+      : undefined;
   const quote = because
     .trim()
     .replace(/^["'“”«»„‘’‚]+|["'“”«»„‘’‚.!?…]+$/gu, '')
@@ -131,24 +151,38 @@ export function trustBasis(
     const match = typeof source === 'string' && /^message:(0|[1-9]\d*)$/.exec(source);
     if (match) {
       const index = Number(match[1]);
-      return messageIds[index] && said(words.userMessages?.[index]?.text)
-        ? { kind: 'message', messageId: messageIds[index], quote: kept }
+      return words.userMessages?.[index]?.id &&
+        words.userMessages?.[index]?.canAuthorize !== false &&
+        said(words.userMessages?.[index]?.text)
+        ? { kind: 'message', messageId: words.userMessages[index]!.id!, quote: kept }
         : undefined;
     }
-    if (source === 'schedule' && said(words.scheduledTaskInstruction))
-      return { kind: 'schedule', quote: kept };
+    const scheduled = typeof source === 'string' && /^schedule:(0|[1-9]\d*)$/.exec(source);
+    if (scheduled) {
+      const message = words.scheduledInstructions?.[Number(scheduled[1])];
+      return message?.canAuthorize !== false && said(message?.text)
+        ? { kind: 'schedule', quote: kept, ...(message?.id ? { messageId: message.id } : {}) }
+        : undefined;
+    }
     if (!settings && source === 'standing' && said(words.standingInstruction))
       return { kind: 'standing', quote: kept };
     if (!settings && source === 'rules' && said(words.userRules))
       return { kind: 'rule', quote: kept };
     return undefined;
   }
-  const index = words.userMessages?.findIndex((message) => said(message.text)) ?? -1;
+  const index =
+    words.userMessages?.findLastIndex(
+      (message) => message.canAuthorize !== false && said(message.text),
+    ) ?? -1;
   if (index >= 0)
-    return messageIds[index]
-      ? { kind: 'message', messageId: messageIds[index], quote: kept }
+    return words.userMessages?.[index]?.id
+      ? { kind: 'message', messageId: words.userMessages[index]!.id!, quote: kept }
       : undefined;
-  if (said(words.scheduledTaskInstruction)) return { kind: 'schedule', quote: kept };
+  const scheduled = words.scheduledInstructions?.findLast(
+    (message) => message.canAuthorize !== false && said(message.text),
+  );
+  if (scheduled)
+    return { kind: 'schedule', quote: kept, ...(scheduled.id ? { messageId: scheduled.id } : {}) };
   if (said(words.standingInstruction))
     return settings ? undefined : { kind: 'standing', quote: kept };
   if (said(words.userRules)) return settings ? undefined : { kind: 'rule', quote: kept };
@@ -161,6 +195,8 @@ export function becauseOf(
 ): TrustBecause | undefined {
   if (!basis || basis.kind === 'read') return undefined;
   if (basis.kind === 'approved') return { kind: 'approved' };
-  if (basis.kind === 'message' && !said) return undefined;
+  if (basis.kind === 'scheduleApproval') return { kind: 'scheduleApproval' };
+  if ((basis.kind === 'message' || (basis.kind === 'schedule' && basis.messageId)) && !said)
+    return undefined;
   return { kind: basis.kind, text: basis.quote };
 }

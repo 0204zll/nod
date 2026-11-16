@@ -13,7 +13,14 @@ import { memoryObjectStore } from './fixtures/object-store.ts';
 import { createIntegrationFixture } from '../scripts/e2e-fixtures.ts';
 import { repair } from '../src/server/memory-lint.ts';
 import { applyOps } from '../src/server/memory-ops.ts';
-import { emptyTree, parse, render, type Entry, type Tree } from '../src/server/memory-tree.ts';
+import {
+  emptyTree,
+  parse,
+  render,
+  unsafe,
+  type Entry,
+  type Tree,
+} from '../src/server/memory-tree.ts';
 import type { MemoryCurator } from '../src/ports/memory-curator.ts';
 import { createMemoryService, importMemoryFile } from '../src/server/memory.ts';
 import { createHistorySearch } from '../src/server/history.ts';
@@ -24,6 +31,7 @@ import { fakeComputer, fakeWorkspace } from './runtime-fixtures.ts';
 import { accessCookie, accessKey } from '../src/server/access.ts';
 import Fastify from 'fastify';
 import { createOnboardingProfile } from '../src/server/onboarding-profile.ts';
+import type { OnboardingEmailProfile } from '../src/ports/onboarding-email.ts';
 import type { OnboardingProfile } from '../src/shared/onboarding.ts';
 
 type Step = {
@@ -411,14 +419,21 @@ test(
       });
       assert.equal(edited.statusCode, 200, edited.body);
       await ask('Export my synthetic statement once more.', [
-        skill({
-          action: 'save',
-          name: 'synthetic-portal-statement',
-          description: 'Use when exporting a statement from the synthetic portal.',
-          body: `1. ${marker}.`,
-        }),
+        skill(
+          {
+            action: 'save',
+            name: 'synthetic-portal-statement',
+            description: 'Use when exporting a statement from the synthetic portal.',
+            body: `1. ${marker}.`,
+          },
+          true,
+        ),
       ]);
       assert.ok((await view()).skills[0].edited);
+      assert.equal(
+        (await view()).skills[0].description,
+        'Use when exporting the synthetic portal statement.',
+      );
 
       const routineStart = 'Every weekday I review my synthetic project notes before lunch.';
       const startTurn = await ask(routineStart, [], '');
@@ -459,6 +474,22 @@ test(
       assert.ok(reviews.some((input) => input.includes('memory_forget')));
       assert.ok(reviews.every((input) => !input.includes(marker)));
       assert.ok(reviews.every((input) => !input.includes('synthetic-portal-statement')));
+
+      const dropped = await application.app.inject({
+        method: 'DELETE',
+        url: '/api/memory/skills/synthetic-portal-statement',
+        headers,
+      });
+      assert.equal(dropped.statusCode, 200);
+      await ask('Export my synthetic statement a third time.', [
+        skill({
+          action: 'save',
+          name: 'synthetic-portal-statement',
+          description: 'Use when exporting a statement from the synthetic portal.',
+          body: `1. ${marker}.`,
+        }),
+      ]);
+      assert.ok(!(await view()).skills[0].edited);
 
       whilePreparing = async () => {
         whilePreparing = undefined;
@@ -571,6 +602,15 @@ test(
         model.configured = true;
         assert.equal((await complete()).statusCode, 200);
         assert.equal((await session()).settings.onboardingCompleted, true);
+        assert.equal(
+          (
+            await pool.query(
+              'SELECT 1 FROM spending_limits WHERE owner_id=$1 AND monthly_usd IS NOT NULL',
+              [ownerId],
+            )
+          ).rowCount,
+          1,
+        );
         await waitFor(
           async () =>
             Boolean(
@@ -674,6 +714,26 @@ test('a full memory file sheds the oldest archive entries before refusing a save
   );
   assert.deepEqual(applied, []);
   assert.deepEqual(render(full), unchanged);
+});
+
+test('memory refuses card numbers and login links but keeps links with long numeric IDs', () => {
+  for (const text of [
+    'Pays with card 4111 1111 1111 1111.',
+    'Backup card 5555-5555-5555-4444',
+    'Amex 378282246310005',
+    'Old Visa 4222222222222',
+    'Old Visa 4222 2222 22222',
+    'Card 4111 1111 1111 1111 12/27',
+    'Ref 7 4111 1111 1111 1111',
+    'Dashboard at https://owner:example-pass@example.com/admin',
+  ])
+    assert.equal(unsafe(text), true, text);
+  for (const text of [
+    'Favourite thread: https://x.com/example/status/1987654321098765432',
+    'Talk recap: https://www.linkedin.com/feed/update/urn:li:activity:7254321098765432109/',
+    'Order 12345678901234 arrives Friday.',
+  ])
+    assert.equal(unsafe(text), false, text);
 });
 
 test('repair archives expired, stale and duplicate entries, keeps distinct numbers and never deletes', () => {
@@ -1029,6 +1089,64 @@ test('skill learning cannot commit across a memory clear', async () => {
   });
 });
 
+test('an agent cannot overwrite a skill the owner edited', async () => {
+  const memory = createMemoryService({
+    pool: {
+      query: async () => ({ rows: [{ now: new Date().toISOString() }] }),
+    } as unknown as pg.Pool,
+    ownerId: 'skill-owner',
+    store: memoryObjectStore(),
+  });
+  let preparations = 0;
+  const curator: MemoryCurator = {
+    id: 'fixture',
+    configured: true,
+    curate: async (request) => {
+      preparations++;
+      const draft = (request.input as { draft: { description: string; body: string } }).draft;
+      return { skill: { description: draft.description, body: draft.body } };
+    },
+  };
+  const skills = createLearnedSkills({ memory, curator, builtIn: [], redact: (text) => text });
+  const save = (name: string, body: string) =>
+    skills.learn(
+      { action: 'save', name, description: 'Use when testing synthetic flows.', body },
+      randomUUID(),
+    );
+  const body = async (name: string) =>
+    (await memory.load()).skills.find((skill) => skill.name === name)?.body;
+
+  await save('owner-flow', 'Agent steps.');
+  await save('agent-flow', 'Agent steps.');
+  await skills.change('owner-flow', { body: 'Owner steps.' });
+  const prepared = preparations;
+
+  await assert.rejects(save('owner-flow', 'Agent rewrite.'), /owner edited/);
+  await assert.rejects(
+    skills.learn({ action: 'patch', name: 'owner-flow', old: 'Owner', new: 'Agent' }, randomUUID()),
+    /owner edited/,
+  );
+  assert.equal(preparations, prepared);
+  assert.equal(await body('owner-flow'), 'Owner steps.');
+  assert.ok((await memory.load()).skills.find((skill) => skill.name === 'owner-flow')?.edited);
+
+  assert.deepEqual(await save('agent-flow', 'Agent rewrite.'), {
+    status: 'updated',
+    name: 'agent-flow',
+  });
+  assert.deepEqual(
+    await skills.learn(
+      { action: 'patch', name: 'agent-flow', old: 'rewrite', new: 'patch' },
+      randomUUID(),
+    ),
+    { status: 'updated', name: 'agent-flow' },
+  );
+  assert.equal(await body('agent-flow'), 'Agent patch.');
+
+  await skills.change('owner-flow', { body: 'Owner steps again.' });
+  assert.equal(await body('owner-flow'), 'Owner steps again.');
+});
+
 test(
   'local memory moves from its old file into the database once and keeps parallel saves',
   { skip: !process.env.TEST_DATABASE_URL },
@@ -1241,7 +1359,7 @@ test(
     });
     await pool.query(`CREATE TABLE threads(id uuid PRIMARY KEY,owner_id text,archived_at timestamptz);
       CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text,thread_id uuid,turn_id uuid,role text,text text,hidden_at timestamptz,created_at timestamptz);
-      CREATE TABLE turns(id uuid PRIMARY KEY,owner_id text,thread_id uuid,prompt text,status text,source text,channel text,created_at timestamptz);
+      CREATE TABLE turns(id uuid PRIMARY KEY,owner_id text,thread_id uuid,message_id uuid,prompt text,status text,source text,channel text,withdrawn boolean NOT NULL DEFAULT false,created_at timestamptz);
       CREATE TABLE preferences(owner_id text,time_zone text);`);
     const active = randomUUID(),
       archived = randomUUID(),
@@ -1466,6 +1584,7 @@ test('onboarding answers update memory and profile analytics while the updates e
     store: memoryObjectStore(),
   });
   const sent: string[] = [];
+  const sentProfiles: (OnboardingEmailProfile | undefined)[] = [];
   const profiles: OnboardingProfile[] = [];
   let profileAnalyticsFail = false;
   let profileAnalyticsReturnFalse = false;
@@ -1475,14 +1594,16 @@ test('onboarding answers update memory and profile analytics while the updates e
   let disableProfileDuringSubmit = false;
   const updatesEmail = {
     enabled: () => enabled,
-    submit: async (email: string) => {
+    submit: async (email: string, profile?: OnboardingEmailProfile) => {
       sent.push(email);
+      sentProfiles.push(profile);
       if (disableDuringSubmit) enabled = false;
       return accepted;
     },
   };
   const profileAnalytics = {
     enabled: () => enabled,
+    version: () => 0,
     submit: async (profile: OnboardingProfile) => {
       profiles.push(profile);
       if (disableProfileDuringSubmit) enabled = false;
@@ -1511,6 +1632,7 @@ test('onboarding answers update memory and profile analytics while the updates e
     },
   });
   assert.equal(first.statusCode, 200);
+  assert.equal(first.json().shared, true);
   assert.equal(profiles.length, 1);
   assert.deepEqual(profiles[0], {
     scope: 'work',
@@ -1568,6 +1690,7 @@ test('onboarding answers update memory and profile analytics while the updates e
     { roles: ['astronaut'], jobs: [] },
     { scope: 'work', roles: ['student'], jobs: [] },
     { scope: 'personal', roles: [], companySize: '2_10', jobs: [] },
+    { scope: 'personal', roles: ['agency'], whoFor: 'clients', jobs: [] },
     { scope: 'work', roles: [], whoFor: 'clients', jobs: [] },
     { scope: 'work', roles: ['agency', 'agency'], jobs: [] },
     { scope: 'work', roles: [], jobs: ['email', 'email'] },
@@ -1589,6 +1712,7 @@ test('onboarding answers update memory and profile analytics while the updates e
     payload: { scope: 'personal', roles: ['student'], jobs: ['research'] },
   });
   assert.equal(savedWithoutMemory.statusCode, 200);
+  assert.equal(savedWithoutMemory.json().shared, true);
   assert.equal(profiles.length, 5);
   assert.deepEqual(await notes(), []);
 
@@ -1617,7 +1741,7 @@ test('onboarding answers update memory and profile analytics while the updates e
     payload: { scope: 'work', roles: [], jobs: [] },
   });
   assert.equal(failedAnalytics.statusCode, 502);
-  assert.match(failedAnalytics.json().error, /continue without sharing them/);
+  assert.match(failedAnalytics.json().error, /continue without retrying/);
   assert.equal(profiles.length, 6);
   profileAnalyticsFail = false;
   const retriedAnalytics = await app.inject({
@@ -1626,6 +1750,7 @@ test('onboarding answers update memory and profile analytics while the updates e
     payload: { scope: 'work', roles: [], jobs: [] },
   });
   assert.equal(retriedAnalytics.statusCode, 200);
+  assert.equal(retriedAnalytics.json().shared, true);
   assert.equal(profiles.length, 7);
   profileAnalyticsReturnFalse = true;
   const rejectedAnalytics = await app.inject({
@@ -1644,6 +1769,7 @@ test('onboarding answers update memory and profile analytics while the updates e
     payload: { scope: 'work', roles: [], jobs: [] },
   });
   assert.equal(optedOutProfile.statusCode, 200);
+  assert.equal(optedOutProfile.json().shared, false);
   assert.equal(profiles.length, 8);
   enabled = true;
   profileAnalyticsFail = true;
@@ -1654,9 +1780,19 @@ test('onboarding answers update memory and profile analytics while the updates e
     payload: { scope: 'work', roles: [], jobs: [] },
   });
   assert.equal(revokedDuringProfileSubmit.statusCode, 200);
+  assert.equal(revokedDuringProfileSubmit.json().shared, false);
   assert.equal(profiles.length, 9);
   enabled = true;
   profileAnalyticsFail = false;
+  const acceptedDuringProfileOptOut = await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: { scope: 'work', roles: [], jobs: [] },
+  });
+  assert.equal(acceptedDuringProfileOptOut.statusCode, 200);
+  assert.equal(acceptedDuringProfileOptOut.json().shared, false);
+  assert.equal(profiles.length, 10);
+  enabled = true;
   disableProfileDuringSubmit = false;
   const unavailableAnalytics = await unconfigured.inject({
     method: 'POST',
@@ -1664,7 +1800,8 @@ test('onboarding answers update memory and profile analytics while the updates e
     payload: { scope: 'work', roles: [], jobs: [] },
   });
   assert.equal(unavailableAnalytics.statusCode, 200);
-  assert.equal(profiles.length, 9);
+  assert.equal(unavailableAnalytics.json().shared, false);
+  assert.equal(profiles.length, 10);
 
   assert.equal(
     (
@@ -1681,6 +1818,7 @@ test('onboarding answers update memory and profile analytics while the updates e
     { email: 'owner@example.test' },
     { email: 'owner@example.test', consent: false },
     { email: 'owner@example.test', consent: true, extra: 'ignored' },
+    { email: 'owner@example.test', consent: true, profile: { roles: [], jobs: [] } },
   ]) {
     const rejected = await app.inject({
       method: 'POST',
@@ -1706,6 +1844,7 @@ test('onboarding answers update memory and profile analytics while the updates e
   });
   assert.equal(subscribed.statusCode, 200);
   assert.deepEqual(sent, ['owner@example.test']);
+  assert.equal(sentProfiles[0], undefined);
   assert.equal(JSON.stringify(await memory.load()), remembered);
   disableDuringSubmit = true;
   const revokedDuringSubmit = await app.inject({
@@ -1736,4 +1875,108 @@ test('onboarding answers update memory and profile analytics while the updates e
     ).statusCode,
     200,
   );
+  const personalBusiness = await app.inject({
+    method: 'POST',
+    url: '/api/onboarding/profile',
+    payload: { scope: 'personal', roles: ['agency'], jobs: [] },
+  });
+  assert.equal(personalBusiness.statusCode, 200);
+  assert.deepEqual(
+    (await notes()).map((entry) => entry.text),
+    ['Where they want Nod’s help: Mostly personal life. What they do: Agency.'],
+  );
+});
+
+test('updates email keeps fixed answers scoped to each submission across route instances', async (t) => {
+  const sent: (OnboardingEmailProfile | undefined)[] = [];
+  const memory = {
+    enabled: async () => false,
+    edit: async () => {
+      throw new Error('Unexpected memory edit');
+    },
+    restate: async () => {
+      throw new Error('Unexpected memory restate');
+    },
+  } as unknown as Parameters<typeof createOnboardingProfile>[0]['memory'];
+  const createApp = () => {
+    const app = Fastify();
+    t.after(() => app.close());
+    createOnboardingProfile({
+      memory,
+      profileAnalytics: { enabled: () => true, version: () => 0, submit: async () => true },
+      updatesEmail: {
+        enabled: () => true,
+        submit: async (_email, profile) => {
+          sent.push(profile);
+          return true;
+        },
+      },
+    }).registerRoutes(app);
+    return app;
+  };
+  const first = createApp();
+  assert.equal(
+    (
+      await first.inject({
+        method: 'POST',
+        url: '/api/onboarding/profile',
+        payload: { scope: 'personal', roles: ['student'], jobs: ['research'] },
+      })
+    ).statusCode,
+    200,
+  );
+  assert.equal(
+    (
+      await first.inject({
+        method: 'POST',
+        url: '/api/onboarding/updates-email',
+        payload: { email: 'second@example.test', consent: true },
+      })
+    ).statusCode,
+    200,
+  );
+  assert.equal(sent[0], undefined);
+
+  const restarted = createApp();
+  const fixed = {
+    onboarding_profile_completed: true,
+    onboarding_scope: 'work',
+    onboarding_roles: ['engineering', 'other'],
+    onboarding_who_for: 'not_asked',
+    onboarding_company_size: '2_10',
+    onboarding_jobs: ['research', 'other'],
+  };
+  const signup = (profile: unknown) =>
+    restarted.inject({
+      method: 'POST',
+      url: '/api/onboarding/updates-email',
+      payload: { email: 'owner@example.test', consent: true, profile },
+    });
+  assert.equal((await signup(fixed)).statusCode, 200);
+  assert.deepEqual(sent[1], fixed);
+  for (const invalid of [
+    { ...fixed, roleText: 'Private synthetic role' },
+    { ...fixed, onboarding_roles: ['engineering', 'engineering'] },
+    { ...fixed, onboarding_who_for: 'clients' },
+    {
+      ...fixed,
+      onboarding_scope: 'personal',
+      onboarding_roles: ['agency'],
+      onboarding_who_for: 'clients',
+      onboarding_company_size: 'not_asked',
+    },
+    { ...fixed, onboarding_company_size: 'not_asked' },
+    { ...fixed, onboarding_scope: 'private answer' },
+  ])
+    assert.notEqual((await signup(invalid)).statusCode, 200);
+  assert.equal(sent.length, 2);
+  const personalBusiness = {
+    ...fixed,
+    onboarding_scope: 'personal',
+    onboarding_roles: ['agency'],
+    onboarding_who_for: 'not_asked',
+    onboarding_company_size: 'not_asked',
+  };
+  assert.equal((await signup(personalBusiness)).statusCode, 200);
+  assert.deepEqual(sent[2], personalBusiness);
 });

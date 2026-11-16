@@ -5,7 +5,9 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
-import type { Message } from '../../shared/contracts';
+import { splitQuestion } from '../../shared/answer-choices';
+import type { Activity, Message } from '../../shared/contracts';
+import { LiveLine } from './live-line';
 import { reactionEmoji } from '../../shared/emoji';
 import {
   presentationImages,
@@ -33,7 +35,8 @@ import { TelegramChatLink, useTelegramChatUrl } from './telegram-chat-link';
 import { BrowserHandoff } from './browser-handoff';
 import { MessageAttachments } from './attachment-card';
 import { AudioPlayer } from './audio-player';
-import { AnswerChoices, type AnswerChoicesProps } from './answer-choices';
+import { AnswerChoices, ChoiceAnswer, type AnswerChoicesProps } from './answer-choices';
+import { ApprovalCard, ApprovalChoiceCard, ApprovalFields, CodeRequestCard } from './action-card';
 import { MessageLinkTooltip } from './message-link-tooltip';
 import { Tooltip } from './tooltip';
 import type { ImagePreview } from './attachment-images';
@@ -282,6 +285,43 @@ type MessagePanel =
   | { kind: 'menu'; point?: { x: number; y: number }; compact: boolean }
   | { kind: 'reactions'; expanded: boolean; fromMenu?: boolean; point?: { x: number; y: number } };
 
+export interface MessageWork {
+  title: string;
+  status: 'needs_you' | 'working' | 'idle';
+  live?: Activity;
+  onOpen?(): void;
+}
+
+function WorkLabel({ work }: { work: MessageWork }) {
+  const content = (
+    <>
+      {work.status !== 'idle' && <span className="message-work-dot" aria-hidden="true" />}
+      <span className="message-work-title">{work.title}</span>
+      {work.status === 'working' && (
+        <span className="message-work-step" role="status">
+          <LiveLine item={work.live} />
+        </span>
+      )}
+    </>
+  );
+  return work.onOpen ? (
+    <Tooltip content="Go to task">
+      <button
+        type="button"
+        className="message-work"
+        data-status={work.status}
+        onClick={work.onOpen}
+      >
+        {content}
+      </button>
+    </Tooltip>
+  ) : (
+    <div className="message-work" data-status={work.status}>
+      {content}
+    </div>
+  );
+}
+
 export function MessageBubble({
   message,
   pendingAudio,
@@ -291,12 +331,15 @@ export function MessageBubble({
   arriving = false,
   onReply,
   onAnswer,
-  onWriteAnswer,
   answersDisabled,
+  onApprove,
+  codeRequest,
   handoff,
   handoffPaused,
+  work,
 }: {
   message: Message;
+  work?: MessageWork;
   pendingAudio?: ImagePreview;
   connectedAppIds?: ReadonlySet<string>;
   grouped?: boolean;
@@ -304,13 +347,35 @@ export function MessageBubble({
   arriving?: boolean;
   onReply?(quote?: string): void;
   onAnswer?: AnswerChoicesProps['onAnswer'];
-  onWriteAnswer?(text: string): void;
   answersDisabled?: boolean;
+  onApprove?(approved: boolean, label: string): Promise<boolean | 'unavailable'>;
+  codeRequest?: 'otp' | 'payment';
   handoff?: boolean;
   handoffPaused?: boolean;
 }) {
   const dateFormat = useDateFormat();
-  const visibleText = message.audioCaption ?? message.text;
+  const visibleText =
+    (message.role === 'user' ? message.displayText : undefined) ??
+    message.audioCaption ??
+    message.text;
+  const card =
+    message.role !== 'assistant' || streaming
+      ? null
+      : message.approval && !message.approval.fields
+        ? 'approval'
+        : !message.answerChoices
+          ? null
+          : message.answerChoicesPending
+            ? onAnswer
+              ? 'choices'
+              : null
+            : message.choiceAnswer
+              ? 'answered'
+              : null;
+  const cardText = card ? splitQuestion(visibleText) : null;
+  const cardTitle = cardText && (
+    <MessageText text={cardText.question} connectedAppIds={connectedAppIds} />
+  );
   const canCopy = Boolean(
     visibleText.trim() || presentationSchema.safeParse(message.presentation).success,
   );
@@ -624,6 +689,7 @@ export function MessageBubble({
       tabIndex={-1}
     >
       <div className="message-content">
+        {work && <WorkLabel work={work} />}
         <div className="message-row">
           <div className={`message-bubble${!streaming && shownReaction ? ' has-reaction' : ''}`}>
             <div
@@ -681,6 +747,9 @@ export function MessageBubble({
               }}
             >
               {visibleReply && <MessageQuote message={visibleReply} />}
+              {cardText?.lead && (
+                <MessageText text={cardText.lead} connectedAppIds={connectedAppIds} />
+              )}
               {pendingAudio && (
                 <div className="message-attachments">
                   <AudioPlayer item={pendingAudio} />
@@ -689,14 +758,39 @@ export function MessageBubble({
               {message.role === 'user' && message.attachments.length > 0 && (
                 <MessageAttachments attachments={message.attachments} />
               )}
-              {visibleText && (
-                <MessageText
-                  text={visibleText}
-                  connectedAppIds={connectedAppIds}
-                  handoff={!streaming && handoff}
-                  handoffPaused={handoffPaused}
-                  handoffTurnId={message.turnId ?? undefined}
+              {card === 'approval' ? (
+                <ApprovalChoiceCard
+                  approval={message.approval!}
+                  disabled={answersDisabled}
+                  onAnswer={onApprove}
+                >
+                  {cardTitle}
+                </ApprovalChoiceCard>
+              ) : card === 'choices' ? (
+                <AnswerChoices
+                  key={message.id}
+                  choices={message.answerChoices!}
+                  question={message}
+                  title={cardTitle}
+                  disabled={answersDisabled}
+                  onAnswer={onAnswer!}
                 />
+              ) : card === 'answered' ? (
+                <ChoiceAnswer
+                  choices={message.answerChoices!}
+                  answer={message.choiceAnswer!}
+                  title={cardTitle}
+                />
+              ) : (
+                visibleText && (
+                  <MessageText
+                    text={visibleText}
+                    connectedAppIds={connectedAppIds}
+                    handoff={!streaming && handoff}
+                    handoffPaused={handoffPaused}
+                    handoffTurnId={message.turnId ?? undefined}
+                  />
+                )
               )}
               {message.role === 'assistant' &&
                 !streaming &&
@@ -719,26 +813,31 @@ export function MessageBubble({
             {!streaming && (
               <>
                 {canOpenMenu && (
-                  <button
-                    ref={menuTrigger}
-                    type="button"
-                    className="message-trigger message-menu-trigger"
-                    aria-label="Message actions"
-                    aria-haspopup="menu"
-                    aria-expanded={
-                      panel?.kind === 'menu' ||
-                      (panel?.kind === 'reactions' && panel.fromMenu === true)
-                    }
-                    onClick={() => openMenu()}
-                    onKeyDown={(event) => {
-                      if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
-                        event.preventDefault();
-                        openMenu();
+                  <Tooltip content="More message actions">
+                    <button
+                      ref={menuTrigger}
+                      type="button"
+                      className="message-trigger message-menu-trigger"
+                      aria-label="More message actions"
+                      aria-haspopup="menu"
+                      aria-expanded={
+                        panel?.kind === 'menu' ||
+                        (panel?.kind === 'reactions' && panel.fromMenu === true)
                       }
-                    }}
-                  >
-                    <Ellipsis size={17} aria-hidden="true" />
-                  </button>
+                      onClick={() => openMenu()}
+                      onKeyDown={(event) => {
+                        if (
+                          event.key === 'ContextMenu' ||
+                          (event.shiftKey && event.key === 'F10')
+                        ) {
+                          event.preventDefault();
+                          openMenu();
+                        }
+                      }}
+                    >
+                      <Ellipsis size={17} aria-hidden="true" />
+                    </button>
+                  </Tooltip>
                 )}
                 <Tooltip content={formatFullDateTime(message.createdAt, dateFormat)}>
                   <time className="message-time" dateTime={message.createdAt}>
@@ -835,21 +934,18 @@ export function MessageBubble({
         {message.role === 'assistant' && !streaming && message.presentation?.type === 'apps' && (
           <MessagePresentation value={message.presentation} messageId={message.id} />
         )}
-        {message.role === 'assistant' &&
-          !streaming &&
-          message.answerChoices &&
-          message.answerChoicesPending &&
-          onAnswer &&
-          onWriteAnswer && (
-            <AnswerChoices
-              key={message.id}
-              choices={message.answerChoices}
-              question={message}
-              disabled={answersDisabled}
-              onAnswer={onAnswer}
-              onWriteAnswer={onWriteAnswer}
+        {message.role === 'assistant' && !streaming && message.approval?.fields && (
+          <ApprovalCard approval={message.approval} disabled={answersDisabled} onAnswer={onApprove}>
+            <ApprovalFields
+              fields={message.approval.fields}
+              body={message.approval.body}
+              bodyCut={message.approval.bodyCut}
             />
-          )}
+          </ApprovalCard>
+        )}
+        {message.role === 'assistant' && !streaming && codeRequest && (
+          <CodeRequestCard kind={codeRequest} />
+        )}
         {quote &&
           onReply &&
           createPortal(

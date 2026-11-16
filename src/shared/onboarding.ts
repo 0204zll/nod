@@ -32,7 +32,7 @@ export const profileCompanySizes = [
   { id: '2_10', label: '2–10' },
   { id: '11_100', label: '11–100' },
   { id: '101_1000', label: '101–1,000' },
-  { id: '1000_plus', label: '1,000+' },
+  { id: '1000_plus', label: 'More than 1,000' },
 ] as const;
 export const profileJobs = [
   { id: 'email', label: 'Stay on top of email and Slack' },
@@ -58,6 +58,12 @@ export type OnboardingProfile = {
   jobs: ProfileJob[];
   jobsText?: string;
 };
+export function profileAsksWhoFor(
+  scope: ProfileScope | 'skipped' | undefined,
+  roles: readonly string[],
+) {
+  return scope !== 'personal' && profileBusinessRoles.some((role) => roles.includes(role));
+}
 export const communityLinks = {
   discord: 'https://discord.gg/n8n',
   forum: 'https://community.n8n.io/c/n8n-labs/48',

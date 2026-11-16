@@ -11,7 +11,7 @@ Nod keeps your data on your computer, or on your server if you self-host. This p
 
 Nod can share two kinds of data with the Nod team at n8n. Both help the team find where Nod gets stuck.
 
-- **Usage data** is on by default. It records the screens and features you use, and your onboarding and survey answers. Onboarding answers are your fixed About you choices, never what you type under **Something else**. They also appear on an installation profile so the team can filter events by those answers. It excludes your messages to Nod and Nod's replies. If you give your email in onboarding and tick its consent box, it is linked to the same profile.
+- **Usage data** is on by default. It records the screens and features you use, and your onboarding and survey answers. Onboarding answers are your fixed About you choices, never what you type under **Something else**. They also appear on a PostHog profile tied to a pseudonymous analytics ID so the team can filter events by those answers. It excludes your messages to Nod and Nod's replies. If you give your email in onboarding and tick its consent box, it is linked to the same profile.
 - **Conversation traces** are off by default. They include the conversation, with personal details removed on your computer first.
 
 ### Example: one request
@@ -34,7 +34,7 @@ turn_completed    outcome: succeeded, duration_ms: 9800
 task_classified   task_type: communication
 ```
 
-Each event also carries a random installation ID and the app version. The task label comes from a small model on your own model connection. Only the label, here `communication`, reaches n8n. When you submit About you while sharing usage, Nod stores its fixed choices on a PostHog person profile under the installation ID. The team can filter later events by those choices and use PostHog's current person properties to filter earlier events. If you give your email in onboarding and tick its consent box, the address joins that profile.
+Each event also carries a pseudonymous analytics ID. Nod includes its release version or source revision when available. The task label comes from a small model on your own model connection. Only the label, here `communication`, reaches n8n. When you submit About you while sharing usage, Nod stores its fixed choices on a PostHog person profile under that analytics ID. The team can filter later events by those choices and use PostHog's current person properties to filter earlier events. If you give your email in onboarding and tick its consent box, the address joins that profile.
 
 **A conversation trace** includes the conversation. Nod replaces the personal details it recognizes before the trace leaves your computer. This is the scrubber's real output for this request:
 
@@ -50,7 +50,7 @@ Nod:    Sends to [email]:
         anything is missing. [owner]
 ```
 
-The trace also includes Nod's instructions, the model name, token counts, and cost. Its ID changes every day and whenever Nod restarts.
+The trace also includes Nod's instructions, the model name, token counts, and cost. Its conversation ID changes after 30 minutes without a request to the model and whenever Nod restarts.
 
 "Jordi" is still there. Nod spots details by their shape, such as email addresses, phone numbers, and bank accounts. It also knows your name from your connected accounts. It can't spot every name in a sentence, so traces are pseudonymised, not anonymous.
 
@@ -61,8 +61,8 @@ The trace also includes Nod's instructions, the model name, token counts, and co
 | Default    | On                                                                                                                                                                                                                      |
 | Includes   | Screens and features you use, kinds of tasks, timings, costs, failures, basic device details such as browser, OS, screen and viewport size, pseudonymous session and window IDs, and your onboarding and survey answers |
 | Excludes   | Your messages to Nod, Nod's replies, what Nod reads, saved passwords and cards, and screen recordings or session replays. Survey answers may contain personal details because Nod sends them as typed                   |
-| Your email | If you give it in onboarding, it is linked to your usage data so that n8n can email you about Nod and other n8n products. Withdraw via the unsubscribe link in every email or at privacy@n8n.io.                        |
-| Stored in  | n8n's PostHog project in the EU                                                                                                                                                                                         |
+| Your email | If you give it in onboarding, it is linked to your usage data so that n8n can email you about Nod and other n8n products. Unsubscribe via the link in every email. Unlink your email from usage data at privacy@n8n.io. |
+| Stored in  | n8n's PostHog project in the EU. A consented email and any successfully shared fixed About you choices also go to n8n's Customer.io Labs workspace in the US.                                                           |
 | Switch     | **Share usage data**                                                                                                                                                                                                    |
 | Details    | [Analytics](/deploy/analytics/)                                                                                                                                                                                         |
 
@@ -75,7 +75,9 @@ The trace also includes Nod's instructions, the model name, token counts, and co
 | Switch         | **Share conversation traces**                                                                           |
 | Details        | [Conversation traces](/trust/conversation-traces/)                                                      |
 
-Both switches are in **Settings → Privacy & data**. Turning one off stops new sends at once. It does not delete data already sent, including About you answers and a consented email. To request deletion, use **Send feedback**. A server operator can turn either switch off for everyone.
+Both switches are in **Settings → Privacy & data**. Turning one off stops subsequent sends, though a send already in flight may finish. It does not delete data already sent, including About you answers and a consented email. To request deletion, use **Send feedback**. A server operator can turn either switch off for everyone.
+
+On a fresh packaged desktop profile, the default-on usage setting can send the first native setup-window open before you reach this switch. Turning sharing off later stops new sends but cannot recall that opening event.
 
 Select **How Nod uses your data** next to the **Privacy & data** heading to see this summary in Nod.
 
@@ -83,29 +85,42 @@ Select **How Nod uses your data** next to the **Privacy & data** heading to see 
 
 ## Where your data lives
 
-|                 | Desktop app                                                                                                                | Source install                     | Self-hosted server                 |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ---------------------------------- |
-| Runs on         | A private virtual machine on your computer                                                                                 | Docker containers on your computer | Your server                        |
-| Data folder     | Mac: `~/Library/Application Support/nod/` and `~/.nod-desktop/`. Windows: `%APPDATA%\nod\` and the `nod-` WSL distribution | `.local/` and Docker volumes       | Docker volumes and its `.env` file |
-| Who can read it | You                                                                                                                        | You                                | Anyone who administers the server  |
+|                 | Desktop app                                                                                                                                                                                          | Source install                     | Self-hosted server                 |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ---------------------------------- |
+| Runs on         | A private virtual machine on your computer                                                                                                                                                           | Docker containers on your computer | Your server                        |
+| Data folder     | Mac: `~/Library/Application Support/nod/` and `~/.nod-desktop/`. Windows: `%APPDATA%\nod\` and the `nod-` WSL distribution. Linux Flatpak: `~/.var/app/io.n8n.Nod/config/nod/` and `~/.nod-desktop/` | `.local/` and Docker volumes       | Docker volumes and its `.env` file |
+| Who can read it | You                                                                                                                                                                                                  | You                                | Anyone who administers the server  |
 
 For what Nod stores and for how long, see the [Security review guide](/trust/security-review/#what-nod-stores).
 
 ## What Nod sends to other services
 
-| Service                             | What it receives                                                                                                                                                                                                                                                                |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Your model services                 | Your conversation, what Nod reads for you, and screenshots. Image reading and [trust checks](/connect/models/#decision-checks) can use another service you connected.                                                                                                           |
-| Decision services, if you add them  | Each action Nod checks, with your messages and rules                                                                                                                                                                                                                            |
-| The apps you connect                | The actions Nod runs in them                                                                                                                                                                                                                                                    |
-| Composio and the connection service | Your app connections and the actions Nod sends. n8n hosts the [default service](/deploy/configuration/#apps-and-composio).                                                                                                                                                      |
-| Telegram and WhatsApp               | The messages in those chats                                                                                                                                                                                                                                                     |
-| Websites                            | What Nod browses, fills in, or submits. Nod also fetches the icons of your apps and logins.                                                                                                                                                                                     |
-| Exa                                 | Web searches. With a ChatGPT plan, OpenAI searches instead.                                                                                                                                                                                                                     |
-| Your voice service                  | [Voice messages](/use/channels/#files-and-voice-messages) you send, and the text of voice replies                                                                                                                                                                               |
-| n8n                                 | Desktop update checks, which show your IP address, app version, and platform. Usage data, traces, and feedback, if you allow them. An email you give in onboarding with its consent box ticked is linked to your usage data in n8n's PostHog project while usage sharing is on. |
+| Service                             | What it receives                                                                                                                                                                                                                                             |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Your model services                 | Your conversation, what Nod reads for you, and screenshots. Image reading and [trust checks](/connect/models/#decision-checks) can use another service you connected.                                                                                        |
+| Decision services, if you add them  | Each action Nod checks, with your messages and rules                                                                                                                                                                                                         |
+| The apps you connect                | The actions Nod runs in them                                                                                                                                                                                                                                 |
+| Composio and the connection service | Your app connections and the actions Nod sends. n8n hosts the [default service](/deploy/configuration/#apps-and-composio).                                                                                                                                   |
+| Telegram and WhatsApp               | The messages in those chats                                                                                                                                                                                                                                  |
+| Websites                            | What Nod browses, fills in, or submits. Nod also fetches the icons of your apps and logins.                                                                                                                                                                  |
+| Exa                                 | Web searches. With a ChatGPT plan, OpenAI searches instead.                                                                                                                                                                                                  |
+| Your voice service                  | [Voice messages](/use/channels/#files-and-voice-messages) you send, and the text of voice replies                                                                                                                                                            |
+| n8n                                 | Desktop update checks, which show your IP address, app version, and platform. Usage data, traces, and feedback, if you allow them. A consented onboarding email and fixed About you choices pass through an internal n8n workflow while usage sharing is on. |
+| Customer.io                         | An unverified onboarding email signup, the checkbox claim and receipt time, and fixed About you choices. n8n uses its Labs workspace in the US. Typed **Something else** answers do not go there.                                                            |
 
 Your model keys stay encrypted on your installation. They never enter a prompt, Nod's workspace, or its browser.
+
+### Composio Zero Data Retention
+
+**Nod's default app connection service uses Composio with Zero Data Retention (ZDR) enabled.** For covered calls, Composio does not write request arguments, response data, or error text to its execution logs. It still stores call metadata, such as the tool name, time, and status. It also stores the access tokens needed to keep your apps connected.
+
+ZDR covers eligible tool calls and proxy requests. Files, trigger events, and tool-search queries have separate retention rules. Composio removes staged upload and download files after 24 hours. Nod disables Composio's session sandbox. Model services, destination apps, and Nod's local data follow their own rules.
+
+ZDR applies to new covered calls and does not delete older logs. Calls through Composio Managed OAuth apps require Enterprise for ZDR coverage. See [Composio's ZDR coverage](https://docs.composio.dev/docs/security/zero-data-retention) for the full scope.
+
+ZDR does not limit the permissions you grant to an app. Nod's [trust check](/trust/approvals/) checks each app action against your words. If you use another connection service, its operator controls the Composio project and retention settings.
+
+For the other controls, see [How Nod protects app connections](/connect/apps/#how-nod-protects-app-connections).
 
 ## Feedback
 
@@ -115,9 +130,13 @@ See [Report contents and limits](/deploy/troubleshooting/#report-contents-and-li
 
 ## Email updates
 
-The last onboarding step lets you leave your email address for updates about Nod and other n8n products. Its consent checkbox starts unchecked. Ticking it means you agree that n8n GmbH links your email to your Nod usage data and emails you about Nod and other n8n products, including invitations to research. A line under the box says how to withdraw. Nod sends the address only when you enter it, tick that box, and select **Start chatting**, or **Continue** in the desktop app, while **Share usage data** is on. It stores the address as the `email` property on this installation's PostHog person profile, with a consent flag, time and version, and the exact checkbox wording and privacy policy link you agreed to. This checkbox controls the email, not the fixed About you answers. Ordinary events do not carry the address. If you leave the address blank or sharing is off, Nod does not send it.
+The last onboarding step lets you leave your email address for updates about Nod and other n8n products. Its consent checkbox starts unchecked. Ticking it means you agree that n8n GmbH links your email to your Nod usage data and emails you about Nod and other n8n products, including invitations to research. A line under the box says how to unsubscribe and how to unlink your email from your usage data.
 
-Submitting the form sends no email immediately. You can withdraw your consent at any time, with effect for the future, through the unsubscribe link in every email or at privacy@n8n.io. Turning off **Share usage data** stops new analytics and profile updates; it does not delete data already in PostHog. To remove stored answers or contact data, request deletion through **Send feedback** or at privacy@n8n.io. See n8n's [privacy policy](https://n8n.io/legal/privacy/).
+Nod sends the address only when you enter it, tick that box, and select **Start chatting**, or **Continue** in the desktop app, while **Share usage data** is on and the contact workflow is configured. It stores the address as the `email` property on this installation's PostHog person profile, with the consent flag, time, version, exact checkbox wording, and privacy policy link. An internal n8n workflow creates or updates an unverified Customer.io Labs profile with the address, consent flag, receipt time, version, exact checkbox wording, and privacy policy link. Customer.io also receives the fixed About you choices if you shared them successfully. Neither service receives words typed under **Something else**.
+
+The checkbox controls the email, not the fixed About you answers. Ordinary usage events do not carry the address. If you leave the address blank or sharing is off, Nod does not send it.
+
+Submitting the form sends no email immediately. Updates require a later email confirmation flow before they are sent. If submission fails partway through, your address may already be in PostHog or Customer.io; you can retry or request deletion. After updates begin, the unsubscribe link in each email stops future emails; it does not unlink your address from usage data. To unlink your address or request deletion of stored answers and contact data, use **Send feedback** or write to privacy@n8n.io. Turning off **Share usage data** stops new analytics and profile updates, but a submission already in flight may still finish. It does not delete data already in PostHog or Customer.io. See n8n's [privacy policy](https://n8n.io/legal/privacy/).
 
 ## What memory learns from
 
