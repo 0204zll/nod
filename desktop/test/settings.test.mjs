@@ -8076,10 +8076,9 @@ test('ready desktop updates share Later across engine windows and reopen for a n
   assert.deepEqual(restarts, []);
 });
 
-test('in-app update restart keeps Later safe and shares one confirmation', async (t) => {
-  const choice = deferred();
-  const shown = deferred();
-  const prompts = [];
+test('in-app update restart restarts once without asking again', async (t) => {
+  const restarted = deferred();
+  const started = deferred();
   const restarts = [];
   const updater = {
     ready: undefined,
@@ -8089,18 +8088,11 @@ test('in-app update restart keeps Later safe and shares one confirmation', async
     },
     async restart() {
       restarts.push(this.ready.version);
+      started.resolve();
+      await restarted.promise;
     },
   };
-  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
-    prompt: (options) => {
-      prompts.push(options);
-      if (prompts.length === 1) {
-        shown.resolve();
-        return choice.promise;
-      }
-      return { response: 0 };
-    },
-  });
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'));
   f.showEngine();
   await new Promise(setImmediate);
   const window = f.windows.at(-1);
@@ -8111,23 +8103,40 @@ test('in-app update restart keeps Later safe and shares one confirmation', async
   await f.checkUpdates(updater, false);
 
   const first = restart(event);
-  await shown.promise;
+  await started.promise;
   const second = restart(event);
-  assert.equal(prompts.length, 1);
   assert.equal(status(event).checking, true);
   assert.equal(f.updateMenu.enabled, false);
-  assert.match(prompts[0].message, /Nod 0\.5\.2 is ready/);
-  assert.deepEqual([...prompts[0].buttons], ['Restart', 'Later']);
-  assert.equal(prompts[0].defaultId, 1);
-  assert.equal(prompts[0].cancelId, 1);
-  choice.resolve({ response: 1 });
+  restarted.resolve();
   await Promise.all([first, second]);
-  assert.deepEqual(restarts, []);
-  assert.equal(status(event).readyVersion, '0.5.2');
+  assert.deepEqual(restarts, ['0.5.2']);
   assert.equal(status(event).checking, false);
+});
 
-  await restart(event);
-  assert.equal(prompts.length, 2);
+test('in-app update restart during a background check restarts without asking again', async (t) => {
+  const checked = deferred();
+  const restarts = [];
+  const updater = {
+    ready: undefined,
+    async check() {
+      await checked.promise;
+      this.ready = { version: '0.5.2' };
+      return this.ready;
+    },
+    async restart() {
+      restarts.push(this.ready.version);
+    },
+  };
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'));
+  f.showEngine();
+  await new Promise(setImmediate);
+  const window = f.windows.at(-1);
+  const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+  const restart = f.handlers.get('nod:updates:restart');
+  const background = f.checkUpdates(updater, false);
+  const clicked = restart(event);
+  checked.resolve();
+  await Promise.all([background, clicked]);
   assert.deepEqual(restarts, ['0.5.2']);
 });
 
