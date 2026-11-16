@@ -9,7 +9,7 @@ External clients connect to Nod over its existing HTTP and server-sent event rou
 
 ## Discover the contract
 
-Send `GET /api/client/capabilities` with the owner's configured `NOD_AUTH_TOKEN` as a bearer token. The normal host, origin, and cross-site guards run before discovery. Cookie-only access does not enable this endpoint. A valid token is never returned in its response.
+Send `GET /api/client/capabilities` with the owner's configured `NOD_AUTH_TOKEN` as a bearer token. The normal host, origin, and cross-site guards run before discovery. The endpoint is unavailable on cookie-only or desktop installations; it is registered only when bearer access is enabled. Cookie-only access does not enable discovery. A valid token is never returned in its response.
 
 The response is a small compatibility gate:
 

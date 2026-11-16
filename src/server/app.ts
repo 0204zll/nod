@@ -270,7 +270,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
           bearer: authToken !== undefined,
         },
   );
-  registerClientApi(app);
+  registerClientApi(app, authToken !== undefined && !desktopAccess);
   if (desktopAccess && dependencies.admission) registerWorkAdmission(app, dependencies.admission);
   app.setErrorHandler((error, request, reply) => {
     const known =

@@ -10,7 +10,7 @@ test('client capabilities require bearer auth without weakening host or origin c
   const app = Fastify({ trustProxy: false });
   t.after(() => app.close());
   registerLocalAccess(app, 4310, { key, origin: 'https://nod.example', bearer: true });
-  registerClientApi(app);
+  registerClientApi(app, true);
 
   const authorized = { host: 'nod.example', authorization: `Bearer ${key}` };
   const response = await app.inject({
@@ -39,3 +39,22 @@ test('client capabilities require bearer auth without weakening host or origin c
   ])
     assert.equal((await app.inject({ url: '/api/client/capabilities', headers })).statusCode, 403);
 });
+
+for (const desktop of [false, true])
+  test(`discovery is unavailable with ${desktop ? 'desktop' : 'cookie-only'} authentication`, async (t) => {
+    const key = randomBytes(32).toString('base64url');
+    const app = Fastify();
+    t.after(() => app.close());
+    registerLocalAccess(app, 4310, { key, desktop });
+    registerClientApi(app, false);
+    const response = await app.inject({
+      url: '/api/client/capabilities',
+      headers: {
+        host: '127.0.0.1:4310',
+        cookie: `${accessCookie(4310)}=${key}`,
+        'x-nod-desktop-token': key,
+        authorization: 'Bearer unsupported',
+      },
+    });
+    assert.equal(response.statusCode, 404);
+  });
