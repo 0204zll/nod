@@ -43,6 +43,7 @@ const passedEnvironment = [
   'DBUS_SESSION_BUS_ADDRESS',
   'AT_SPI_BUS_ADDRESS',
   'DISPLAY',
+  'XAUTHORITY',
   'WAYLAND_DISPLAY',
   'XDG_RUNTIME_DIR',
   'XDG_DATA_HOME',
@@ -103,6 +104,7 @@ export function createComputerHelper({
   presence,
   platform = process.platform,
   sandboxed = false,
+  requestPermission,
   ownerIdleSeconds = 1,
   ownerWaitMs = 15_000,
   lingerMs = 2000,
@@ -122,15 +124,29 @@ export function createComputerHelper({
     )
       throw stopped();
   }
-  function run(args, input) {
+  function run(args, input, command = spawnCommand) {
     const started = generation;
     const current = steps.getStore();
     const next = queue.then(() => {
       alive(started, current);
-      return spawnCommand(args, input, current);
+      return command(args, input, current);
     });
     queue = next.catch(() => {});
     return next;
+  }
+
+  function launchEntry(args, input, current) {
+    return new Promise((resolve, reject) => {
+      const child = execFile('/usr/bin/gio', args, { timeout: 10_000 }, (error) => {
+        children.delete(child);
+        current?.children.delete(child);
+        if (error)
+          reject(new Error(`ACTION_NOT_SUPPORTED: gio could not start the app: ${error.message}`));
+        else resolve({});
+      });
+      children.add(child);
+      current?.children.add(child);
+    });
   }
 
   function spawnCommand(args, input, current) {
@@ -307,40 +323,51 @@ export function createComputerHelper({
     awake();
   }
 
+  async function giveBack(previous, pid) {
+    if (!previous || (await frontmost())?.pid !== pid) return;
+    if (previous.pid === presence.ownPid) return presence.focusSelf();
+    if (previous.window)
+      await run(['focus-window', '--app', previous.app, '--window-id', previous.window]).catch(
+        () => {},
+      );
+  }
+
   async function release(handover = false) {
     const ending = session;
     session = undefined;
     if (!ending) return;
     clearTimeout(ending.timer);
     unframe();
-    if (handover) return ending.previous;
-    if (!ending.previous || (await frontmost())?.pid !== ending.pid) return;
-    if (ending.previous.pid === presence.ownPid) return presence.focusSelf();
-    if (ending.previous.window)
-      await run([
-        'focus-window',
-        '--app',
-        ending.previous.app,
-        '--window-id',
-        ending.previous.window,
-      ]).catch(() => {});
+    if (handover) return ending;
+    await giveBack(ending.previous, ending.pid);
   }
 
   async function focused(target, window, work) {
     if (session?.window !== target.window) {
       const handed = await release(true);
-      await waitForOwner(target, window.bounds);
-      const back = handed ? undefined : await frontmost();
-      session = {
-        window: target.window,
-        pid: window.pid,
-        previous: handed ?? (back && { pid: back.pid, app: back.app_name, window: back.id }),
-      };
-      frame(target, window.bounds);
-      await run(['focus-window', ...scope(target)]);
+      let previous = handed?.previous;
+      try {
+        await waitForOwner(target, window.bounds);
+        if (!handed) {
+          const back = await frontmost();
+          previous = back && { pid: back.pid, app: back.app_name, window: back.id };
+        }
+        frame(target, window.bounds);
+        await run(['focus-window', ...scope(target)]);
+      } catch (error) {
+        unframe();
+        if (handed) await giveBack(handed.previous, handed.pid);
+        throw error;
+      }
+      session = { window: target.window, pid: window.pid, previous };
     } else {
       clearTimeout(session.timer);
-      await waitForOwner(target, window.bounds);
+      try {
+        await waitForOwner(target, window.bounds);
+      } catch (error) {
+        await release();
+        throw error;
+      }
       frame(target, window.bounds);
     }
     try {
@@ -451,7 +478,9 @@ export function createComputerHelper({
   const operations = {
     permissions,
     request: async (request) => {
-      await run(['permissions', request.which === 'screen' ? '--guide' : '--request']);
+      if (platform === 'darwin' && requestPermission)
+        await requestPermission(request.which === 'screen' ? 'screen' : 'accessibility');
+      else await run(['permissions', request.which === 'screen' ? '--guide' : '--request']);
       return permissions();
     },
     apps: async () => {
@@ -462,7 +491,11 @@ export function createComputerHelper({
             pid: app.pid,
             bundle: app.bundle_id ?? (platform === 'linux' ? '' : app.name),
             ...(platform === 'linux'
-              ? { program: await readlink(`/proc/${app.pid}/exe`).then(basename, () => '') }
+              ? {
+                  program: sandboxed
+                    ? ''
+                    : await readlink(`/proc/${app.pid}/exe`).then(basename, () => ''),
+                }
               : platform === 'win32'
                 ? { program: app.name }
                 : {}),
@@ -483,15 +516,7 @@ export function createComputerHelper({
         return { pid: (await run(['launch', check(request.bundle, appName, 'app')])).pid };
       const found = await locate(request);
       if (platform === 'win32') return { pid: (await run(['launch', found.path])).pid };
-      await new Promise((resolve, reject) =>
-        execFile('gio', ['launch', found.entry], { timeout: 10_000 }, (error) =>
-          error
-            ? reject(
-                new Error(`ACTION_NOT_SUPPORTED: gio could not start the app: ${error.message}`),
-              )
-            : resolve(),
-        ),
-      );
+      await run(['launch', found.entry], undefined, launchEntry);
       for (let attempt = 0; attempt < 8; attempt++) {
         await delay(250);
         for (const app of (await run(['list-apps'])).apps)

@@ -17,6 +17,7 @@ import {
   screen,
   session,
   shell,
+  systemPreferences,
   Tray,
   utilityProcess,
 } from 'electron';
@@ -147,6 +148,13 @@ const computerHelper = createComputerHelper({
       : undefined,
   home: join(profileRoot, 'computer-use'),
   sandboxed: process.platform === 'linux' && Boolean(process.env.FLATPAK_ID),
+  requestPermission: async (which) => {
+    if (which === 'accessibility') systemPreferences.isTrustedAccessibilityClient(true);
+    else
+      await shell.openExternal(
+        'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+      );
+  },
 });
 const freshLocalProfile = await stat(profileRoot).then(
   () => false,

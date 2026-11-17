@@ -1451,6 +1451,9 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     for (const keys of ['win+r', 'super+a', 'alt+tab', 'ctrl+esc', 'ctrl+alt+t', 'ctrl+alt+delete'])
       assert.equal(systemShortcut(keys, platform), true, `${platform} ${keys}`);
   assert.equal(systemShortcut('alt+tab', 'darwin'), false);
+  assert.equal(systemShortcut('ctrl+alt+shift+t', 'linux'), true);
+  assert.equal(systemShortcut('alt+print+b', 'linux'), true);
+  assert.equal(systemShortcut('ctrl+shift+t', 'linux'), false);
   assert.equal(systemShortcut('ctrl+n', 'win32'), false);
   assert.equal(systemShortcut('cmd+n', 'darwin'), false);
   assert.equal(systemShortcut('cmd+n', 'linux'), true);
@@ -1784,6 +1787,17 @@ test('computer use on Windows keeps an opened app granted however the app list n
   assert.match(listed.apps.find((app) => app.pid === 31)?.blocked ?? '', /can’t identify/);
   assert.match(listed.apps.find((app) => app.pid === 32)?.blocked ?? '', /terminal/);
   assert.equal(listed.apps.find((app) => app.pid === 33)?.opened, true);
+  apps.push({ pid: 34, bundle: '', program: 'gedit', name: 'gedit', windows: [] });
+  assert.equal(
+    (
+      (await computer.execute(
+        turn,
+        'COMPUTER_APPS',
+        await computer.prepare(turn, 'COMPUTER_APPS', {}),
+      )) as { apps: Array<{ pid: number; opened?: boolean }> }
+    ).apps.find((app) => app.pid === 34)?.opened,
+    false,
+  );
   await assert.rejects(
     computer.prepare(turn, 'COMPUTER_OPEN', { bundle: 'Command Prompt' }),
     /terminal/,

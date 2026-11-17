@@ -8831,3 +8831,23 @@ test('computer use on Windows starts only windowed programs', async (t) => {
   assert.deepEqual(await desktop.helper.request({ op: 'open', bundle: 'notepad' }), { pid: 9 });
   assert.deepEqual(await desktop.calls(), [`launch ${join(root, 'System32', 'notepad.exe')}`]);
 });
+
+test('computer use keeps no focus session when the window cannot come to the front', async (t) => {
+  const desktop = await fakeDesktop(t, {
+    'list-windows': mailWindow,
+    'focus-window': refused('ACTION_NOT_SUPPORTED', 'focus-window is unavailable in this session'),
+    'press cmd+n': refused('STALE_REF', "The named window's exact focus could not be confirmed"),
+  });
+  const key = { op: 'key', keys: 'cmd+n', app: 'Mail', window: 'w-1' };
+  await assert.rejects(desktop.helper.request(key), /ACTION_NOT_SUPPORTED/);
+  assert.equal(desktop.events.at(-1), 'hidden');
+  await assert.rejects(desktop.helper.request(key), /ACTION_NOT_SUPPORTED/);
+  assert.deepEqual(
+    (await desktop.calls()).filter((call) => call.startsWith('focus-window')),
+    ['focus-window --app Mail --window-id w-1', 'focus-window --app Mail --window-id w-1'],
+  );
+  assert.equal(
+    (await desktop.calls()).some((call) => call.includes('--headed')),
+    false,
+  );
+});

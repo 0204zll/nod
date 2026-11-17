@@ -106,6 +106,7 @@ const otherSystemKeys = new Set([
   'opt+f1',
   'ctrl+opt+backspace',
   'opt+f2',
+  'opt+f3',
   'opt+f4',
   'ctrl+opt+delete',
   'ctrl+opt+del',
@@ -127,6 +128,10 @@ const modifierNames: Record<string, string> = {
   super: 'cmd',
   win: 'cmd',
   windows: 'cmd',
+  lwin: 'cmd',
+  rwin: 'cmd',
+  logo: 'cmd',
+  mod4: 'cmd',
   '⌘': 'cmd',
   control: 'ctrl',
   ctl: 'ctrl',
@@ -148,7 +153,16 @@ export function systemShortcut(keys: string, platform: string = process.platform
   const key = parts.pop() ?? '';
   const combo = [...parts.sort(), key].join('+');
   if (platform === 'darwin') return systemKeys.has(combo);
-  return parts.includes('cmd') || key === 'cmd' || otherSystemKeys.has(combo);
+  const pressed = [...parts, key];
+  return (
+    pressed.includes('cmd') ||
+    pressed.includes('print') ||
+    pressed.includes('sysrq') ||
+    [...otherSystemKeys].some((blocked) => {
+      const needed = blocked.split('+');
+      return needed.at(-1) === key && needed.slice(0, -1).every((part) => parts.includes(part));
+    })
+  );
 }
 
 function leaf(id: string) {
@@ -170,7 +184,7 @@ const blockedApps: Array<[RegExp, string]> = [
     'an app that runs scripts or commands',
   ],
   [
-    /^(com\.apple\.systempreferences|com\.apple\.settings|com\.apple\.keychainaccess|com\.apple\.activitymonitor|com\.apple\.diskutility|com\.apple\.securityagent|com\.apple\.migrateassistant|com\.apple\.installer|com\.apple\.loginwindow|systemsettings|control|mmc|regedit|regedt32|taskmgr|gpedit|msconfig|secpol|lusrmgr|compmgmt|services|eventvwr|devmgmt|diskmgmt|consent|credentialuibroker|logonui|lockapp|org\.gnome\.settings|gnome-control-center|org\.kde\.systemsettings|org\.gnome\.seahorse\.application|seahorse|org\.gnome\.diskutility|gnome-disks|org\.gnome\.systemmonitor|gnome-system-monitor|org\.kde\.plasma-systemmonitor|org\.kde\.kwalletmanager5?|kwalletmanager5?|polkit-.*|org\.gnome\.software|software-properties-.*|synaptic|sechealthui|securityhealthsystray|gcr-prompter|pinentry.*|quickassist|msra|mstsc|logoff|tsdiscon|shutdown|schtasks|certutil|reg|sc|net1?|wmic|msiexec|systemreset|rstrui)$/,
+    /^(com\.apple\.systempreferences|com\.apple\.settings|com\.apple\.keychainaccess|com\.apple\.activitymonitor|com\.apple\.diskutility|com\.apple\.securityagent|com\.apple\.migrateassistant|com\.apple\.installer|com\.apple\.loginwindow|systemsettings|control|mmc|regedit|regedt32|taskmgr|gpedit|msconfig|secpol|lusrmgr|compmgmt|services|eventvwr|devmgmt|diskmgmt|consent|credentialuibroker|logonui|lockapp|org\.gnome\.settings|gnome-control-center|org\.kde\.systemsettings|org\.gnome\.seahorse\.application|seahorse|org\.gnome\.diskutility|gnome-disks|org\.gnome\.systemmonitor|gnome-system-monitor|org\.kde\.plasma-systemmonitor|org\.kde\.kwalletmanager5?|kwalletmanager5?|polkit-.*|org\.gnome\.software|software-properties-.*|synaptic|sechealthui|securityhealthsystray|gcr-prompter|pinentry.*|quickassist|msra|mstsc|logoff|tsdiscon|shutdown|schtasks|certutil|reg|sc|net1?|wmic|msiexec|systemreset|rstrui|credwiz|systemproperties.*|msdt|resmon|perfmon|netplwiz|useraccountcontrolsettings|rekeywiz|sysdm)$/,
     'system settings or security',
   ],
   [
@@ -288,7 +302,14 @@ export function createComputerUse(
 ) {
   const { desktop, platform = process.platform } = options;
   const mac = platform === 'darwin';
-  const sameApp = (a: string, b: string) => appKey(a) === appKey(b);
+  const keysOf = (app: { bundle?: string; program?: string }) =>
+    [app.bundle, app.program].filter((id): id is string => Boolean(id)).map(appKey);
+  const sameApp = (
+    a: { bundle?: string; program?: string },
+    b: { bundle?: string; program?: string },
+  ) => keysOf(a).some((key) => keysOf(b).includes(key));
+  const isGranted = (root: string, app: Identity) =>
+    keysOf(app).some((key) => grants.get(root)?.has(key));
   const grants = new Map<string, Set<string>>();
   const controls = new Map<string, Map<string, Control>>();
   let listing: { at: number; apps: Promise<App[]> } | undefined;
@@ -356,7 +377,7 @@ export function createComputerUse(
   }
 
   function granted(root: string, app: Identity) {
-    if (!grants.get(root)?.has(appKey(app.bundle)))
+    if (!isGranted(root, app))
       throw new IntegrationError(
         `Nod hasn't opened ${app.name} in this request. Use open {bundle: "${app.bundle}"} first.`,
         403,
@@ -374,12 +395,12 @@ export function createComputerUse(
     return current;
   }
 
-  function grant(root: string, bundleId: string) {
+  function grant(root: string, app: Identity) {
     const current = forRoot(grants, root, () => new Set<string>());
-    const key = appKey(bundleId);
-    if (current.size >= grantLimit && !current.has(key))
+    const keys = keysOf(app);
+    if (current.size >= grantLimit * 2 && !keys.some((key) => current.has(key)))
       throw new IntegrationError(`This request already opened ${grantLimit} apps.`, 409);
-    current.add(key);
+    for (const key of keys) current.add(key);
   }
 
   function remember(root: string, entries: Array<[string, Control]>) {
@@ -471,7 +492,7 @@ export function createComputerUse(
     if (action === 'COMPUTER_APPS') return input;
     if (action === 'COMPUTER_OPEN') {
       const app =
-        (await running(signal)).find((item) => sameApp(item.bundle, input.bundle!)) ??
+        (await running(signal)).find((item) => sameApp(item, { bundle: input.bundle })) ??
         ((await ask({ op: 'locate', bundle: input.bundle }, signal)) as Identity);
       allowed(app, keptOut, false);
       return {
@@ -639,7 +660,7 @@ export function createComputerUse(
               ? { blocked: rule.why }
               : {
                   ...(rule.kind === 'view' ? { viewOnly: rule.why } : {}),
-                  ...(grants.get(root)?.has(appKey(app.bundle))
+                  ...(isGranted(root, app)
                     ? { opened: true, windows: app.windows }
                     : { opened: false }),
                 }),
@@ -651,16 +672,14 @@ export function createComputerUse(
       const target = prepared.app!;
       allowed(target, keptOut, false);
       return async () => {
-        grant(root, target.bundle);
-        const already = (await running(signal)).find((item) => sameApp(item.bundle, target.bundle));
+        grant(root, target);
+        const already = (await running(signal)).find((item) => sameApp(item, target));
         const launched = async () => {
           try {
             return ((await ask({ op: 'open', bundle: target.bundle }, signal)) as { pid?: number })
               .pid;
           } catch (error) {
-            const started = (await running(signal)).find((item) =>
-              sameApp(item.bundle, target.bundle),
-            );
+            const started = (await running(signal)).find((item) => sameApp(item, target));
             if (!started) throw error;
             return started.pid;
           }
