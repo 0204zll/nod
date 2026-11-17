@@ -117,6 +117,8 @@ For `openrouter/free` and `openrouter/auto`, Nod uses an 8,192-token working win
 
 Working limits come from [`src/providers/pi/context.ts`](https://github.com/n8n-io/nod/blob/main/src/providers/pi/context.ts). Model registration, Pi sessions and provider requests use the same effective context and output limits. The same policy sets compaction, safety margins and tool output bounds. The turn runtime and capability reports also use this policy. An audio model and its text companion share the smaller context and output limits. An explicit request can use less output.
 
+Normal agent requests start with an output limit of 2,048 tokens, within the model's working limit. Pi fits thinking and answers inside that limit. After a truncated response, Pi's native compaction and retry can use the full working output limit for the rest of that turn. Completed tools do not run again. The next turn starts with the small limit again. Explicit request limits, compaction summaries and cache warming keep their own budgets. Account limits can still refuse a request.
+
 Audio sessions use Pi's native model routing. Requests with retained recordings use the audio model. Other requests and compaction summaries use its text companion. Pi can identify the model that answered and apply that model's overflow recovery.
 
 Pi manages request limits, saved context, compaction and provider-reported overflow. This includes resumed sessions and sessions opened with another model. Pi selects the history boundary, runs its summary routine and makes at most one compact-and-retry attempt for a failed model request. Nod does not add a second request-size check or output reservation.

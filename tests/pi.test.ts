@@ -458,17 +458,19 @@ test('models and routers complete tool discovery inside the endpoint context', a
 
 test('model checks fit the output limit of the selected text model', async (t) => {
   const { nativeAudioModel } = await import('../src/providers/pi/model-catalog.ts');
-  for (const kind of ['text', 'anthropic', 'audio text companion'])
+  for (const kind of ['text', 'anthropic', 'google', 'audio text companion'])
     await t.test(kind, async (t) => {
-      const text = smallContextAccess('compatible', 'fixture-output-limit', 128000);
-      if (kind === 'anthropic') {
-        text.provider = 'anthropic';
+      const id = kind === 'google' ? 'gemini-2.5-pro' : 'fixture-output-limit';
+      const text = smallContextAccess('compatible', id, 128000);
+      if (kind === 'anthropic' || kind === 'google') {
+        text.provider = kind;
         text.read = async () => ({ type: 'api_key', key: 'fixture-output-key' });
         text.definition.spec = {
           ...text.definition.spec,
-          provider: 'anthropic',
-          api: 'anthropic-messages',
+          provider: kind,
+          api: kind === 'google' ? 'google-generative-ai' : 'anthropic-messages',
           baseUrl: 'http://127.0.0.1:1',
+          reasoning: true,
         };
       }
       const access: import('../src/ports/models.ts').ModelAccess =
@@ -499,14 +501,32 @@ test('model checks fit the output limit of the selected text model', async (t) =
             }
           : text;
       const requests: Array<{ model: string; max_tokens: number }> = [];
-      t.mock.method(globalThis, 'fetch', async (_url: RequestInfo | URL, init?: RequestInit) => {
-        const body = JSON.parse(String(init?.body));
+      t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+        const body = await new Request(url, init).json();
+        body.model ??= id;
+        body.max_tokens ??= body.generationConfig?.maxOutputTokens;
         requests.push(body);
         if (body.max_tokens > Number(text.definition.spec.maxTokens))
           return Response.json(
             { error: { message: 'The requested output exceeds the model limit.' } },
             { status: 400 },
           );
+        if (kind === 'google') {
+          const thinking = body.generationConfig?.thinkingConfig?.thinkingBudget;
+          if (thinking > 0) assert.ok(thinking <= body.max_tokens - 1024);
+          return new Response(
+            `data: ${JSON.stringify({
+              candidates: [
+                {
+                  content: { role: 'model', parts: [{ text: '{"allowed":true}' }] },
+                  finishReason: 'STOP',
+                },
+              ],
+              usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
+            })}\n\n`,
+            { headers: { 'content-type': 'text/event-stream' } },
+          );
+        }
         if (kind === 'anthropic') {
           const events = [
             {
@@ -566,11 +586,38 @@ test('model checks fit the output limit of the selected text model', async (t) =
           }),
           { allowed: true },
         );
+      const directory = await mkdtemp(join(tmpdir(), 'nod-agent-output-'));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      if (kind === 'anthropic' || kind === 'google') text.effort = 'high';
+      const agent = createPiAgent({
+        provider: access.provider,
+        resolve: async () => access,
+        sessionRoot: directory,
+      });
+      t.after(() => agent.dispose());
+      const events: AgentEvent[] = [];
+      const session = await agent.open({
+        ...fakeExecution(randomUUID()),
+        restricted: true,
+        systemPrompt: 'Answer the synthetic request.',
+        workspace: sandbox.workspace,
+        tools: [],
+        runTool: sandbox.runTool,
+        shouldStop: () => false,
+        onEvent: (event) => events.push(event),
+      });
+      await session.prompt('Hello.', []);
+      await session.dispose();
+      assert.ok(!events.some((event) => event.type === 'error'));
+      assert.ok(
+        events.some((event) => event.type === 'final' && event.text === '{"allowed":true}'),
+      );
       assert.deepEqual(
         requests.map(({ model, max_tokens }) => ({ model, max_tokens })),
         [
-          { model: 'fixture-output-limit', max_tokens: 4096 },
-          { model: 'fixture-output-limit', max_tokens: 512 },
+          { model: id, max_tokens: 4096 },
+          { model: id, max_tokens: 512 },
+          { model: id, max_tokens: 2048 },
         ],
       );
     });
@@ -594,6 +641,116 @@ test('wide output models reserve room for request input', async (t) => {
   assert.equal(result.stopReason, 'stop');
   assert.equal(bodies.length, 1);
   assert.equal(bodies[0].max_tokens, 50_000);
+});
+
+test('Pi starts with a small output limit and recovers long responses without repeating tools', async (t) => {
+  const requests: Array<{ max_tokens: number; tools?: unknown[] }> = [];
+  let step = 0;
+  t.mock.method(globalThis, 'fetch', async (_url: RequestInfo | URL, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    requests.push(body);
+    const summary = !body.tools?.length;
+    if (!summary && step < 3 && body.max_tokens > 3000)
+      return Response.json(
+        { error: { message: 'The synthetic account cannot reserve that much output.' } },
+        { status: 402 },
+      );
+    const current = summary ? -1 : step++;
+    const tool = current === 1;
+    const length = current === 2;
+    const chunk = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
+    return new Response(
+      chunk({
+        id: `fixture-output-${requests.length}`,
+        choices: [
+          {
+            index: 0,
+            delta: tool
+              ? {
+                  role: 'assistant',
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'inspect-once',
+                      type: 'function',
+                      function: { name: 'inspect_fixture', arguments: '{}' },
+                    },
+                  ],
+                }
+              : {
+                  role: 'assistant',
+                  content: summary
+                    ? 'Synthetic summary: inspect the fixture and report the result.'
+                    : length
+                      ? 'Synthetic incomplete response'
+                      : 'Synthetic complete response',
+                },
+          },
+        ],
+      }) +
+        chunk({
+          id: `fixture-output-${requests.length}`,
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: tool ? 'tool_calls' : length ? 'length' : 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 100, completion_tokens: length ? body.max_tokens : 5 },
+        }) +
+        'data: [DONE]\n\n',
+      { headers: { 'content-type': 'text/event-stream' } },
+    );
+  });
+  const access = smallContextAccess('compatible', 'fixture-output', 1_000_000);
+  access.definition.spec.maxTokens = 128_000;
+  const directory = await mkdtemp(join(tmpdir(), 'nod-output-budget-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const agent = createPiAgent({
+    provider: 'compatible',
+    resolve: async () => access,
+    sessionRoot: directory,
+  });
+  t.after(() => agent.dispose());
+  const execution = fakeExecution(randomUUID());
+  const events: AgentEvent[] = [];
+  let tools = 0;
+  for (const prompt of ['Hello.', 'Inspect the fixture.', 'Hello again.']) {
+    const session = await agent.open({
+      ...execution,
+      restricted: true,
+      systemPrompt: 'Complete the synthetic request.',
+      workspace: sandbox.workspace,
+      tools: [
+        {
+          name: 'inspect_fixture',
+          description: 'Inspect the synthetic fixture.',
+          parameters: Type.Object({}),
+          execute: async () => {
+            tools++;
+            return { content: [{ type: 'text', text: 'The fixture is ready.' }] };
+          },
+        },
+      ],
+      runTool: sandbox.runTool,
+      shouldStop: () => false,
+      onEvent: (event) => events.push(event),
+    });
+    await session.prompt(prompt, []);
+    await session.dispose();
+  }
+  assert.equal(tools, 1);
+  assert.deepEqual(
+    requests.filter((body) => body.tools?.length).map((body) => body.max_tokens),
+    [2048, 2048, 2048, 128_000, 2048],
+  );
+  assert.ok(requests.some((body) => !body.tools?.length));
+  assert.ok(!events.some((event) => event.type === 'error'));
+  assert.deepEqual(
+    events.flatMap((event) => (event.type === 'final' ? [event.text] : [])),
+    ['Synthetic complete response', 'Synthetic complete response', 'Synthetic complete response'],
+  );
 });
 
 test('small Pi sessions save full output and keep nested results available to scripts', async (t) => {
@@ -4884,7 +5041,7 @@ test('oversized owner input stays complete in the workspace and permits later tu
       );
       assert.ok(!events.some((event) => event.type === 'error'));
       assert.equal(bodies.length, 4);
-      assert.equal(bodies[0].max_tokens, 4096);
+      assert.equal(bodies[0].max_tokens, 2048);
       const file = JSON.stringify(bodies[0]).match(/workspaceFile\\":\\"([^\\]+)\\"/)![1];
       assert.equal(await readFile(join(workspace.path, file).replace(prefix, root), 'utf8'), owner);
       assert.ok(
@@ -6536,8 +6693,11 @@ test('full 32k Pi sessions distinguish context exhaustion from output truncation
   const outputLimit = await turn('fixture-output-limit', 'List the synthetic calendars.');
   assert.ok(outputLimit.outcome.failure);
   assert.deepEqual(outputLimit.ending, { type: 'message_end', status: 'incomplete' });
-  assert.equal(bodies.length, 1);
-  assert.equal(bodies[0].max_tokens, 8192);
+  assert.equal(bodies.length, 3);
+  assert.deepEqual(
+    bodies.filter((body) => body.tools?.length).map((body) => body.max_tokens),
+    [2048, 8192],
+  );
   assert.equal(outputLimit.usage[0].outputTokens, bodies[0].max_tokens);
   assert.ok(outputLimit.usage[0].totalTokens < 32_768);
 
@@ -9089,10 +9249,7 @@ test('native audio reaches the selected Pi model with tools and survives a reope
   await first.dispose();
   assert.equal(calls, 1);
   assert.ok(bodies[0].tools?.length);
-  assert.equal(
-    bodies[0].max_tokens ?? bodies[0].max_completion_tokens,
-    piSession!.model!.maxTokens,
-  );
+  assert.equal(bodies[0].max_tokens ?? bodies[0].max_completion_tokens, 2048);
   const audio = (body: (typeof bodies)[number]) =>
     body.messages.flatMap((message) =>
       Array.isArray(message.content)

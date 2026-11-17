@@ -14,6 +14,10 @@ import {
   contentText,
   type AssistantMessage,
 } from '@earendil-works/pi-ai';
+import {
+  clampThinkingBudgetToAnswerRoom,
+  DEFAULT_THINKING_BUDGETS,
+} from '@earendil-works/pi-ai/api/simple-options';
 import { Agent as Connections, Dispatcher1Wrapper, buildConnector } from 'undici';
 import { Compile } from 'typebox/compile';
 import {
@@ -1049,9 +1053,35 @@ export function createPiAgent(options: {
       };
 
       const stream = session.agent.streamFunction;
+      let outputTokens = 2048;
       session.agent.streamFunction = async (target, context, options) => {
-        const response = await stream(target, context, options);
+        const maxTokens = Math.min(
+          options?.maxTokens ?? (compaction ? target.maxTokens : outputTokens),
+          target.maxTokens,
+        );
+        const response = await stream({ ...target, maxTokens }, context, {
+          ...options,
+          maxTokens,
+          ...(options?.maxTokens === undefined && maxTokens < target.maxTokens
+            ? {
+                thinkingBudgets: Object.fromEntries(
+                  (['minimal', 'low', 'medium', 'high'] as const).map((level) => [
+                    level,
+                    clampThinkingBudgetToAnswerRoom(
+                      options?.thinkingBudgets?.[level] ?? DEFAULT_THINKING_BUDGETS[level]!,
+                      maxTokens,
+                    ),
+                  ]),
+                ),
+              }
+            : {}),
+        });
         if (compaction) compaction.requests.push(await response.result());
+        else
+          void response.result().then((message) => {
+            if (options?.maxTokens === undefined && isRecoverableLength(message, target.maxTokens))
+              outputTokens = target.maxTokens;
+          });
         return response;
       };
 
