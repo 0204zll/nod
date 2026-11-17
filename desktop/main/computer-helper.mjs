@@ -453,7 +453,6 @@ export function createComputerHelper({
 
   let ready;
   async function operate(request) {
-    if (process.platform !== 'darwin') throw new Error('Computer use works only on macOS for now.');
     await access(binary, constants.X_OK).catch(() => {
       throw new Error(`agent-desktop is missing at ${binary}.`);
     });
