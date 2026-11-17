@@ -41,7 +41,7 @@ import {
 import { runProcess, serviceEnvironment } from '../src/providers/process.ts';
 import { prepareLocalDirectories } from '../scripts/local-database.ts';
 import { createLocalFiles, localFileRules } from '../src/server/local-files.ts';
-import { computerAppRule, createComputerUse } from '../src/server/computer-use.ts';
+import { computerAppRule, createComputerUse, systemShortcut } from '../src/server/computer-use.ts';
 import type { Pool } from 'pg';
 
 if (process.env.NOD_TEST_WORKSPACE_IMAGE)
@@ -1430,6 +1430,28 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     assert.equal(computerAppRule(bundle).kind, 'blocked', bundle);
   for (const bundle of ['com.google.Chrome', 'com.apple.Safari', 'com.microsoft.VSCode'])
     assert.equal(computerAppRule(bundle).kind, 'view', bundle);
+  for (const bundle of [
+    'C:\\Windows\\System32\\cmd.exe',
+    'CMD.EXE',
+    'powershell',
+    'WindowsTerminal.exe',
+    'explorer.exe',
+    'regedit',
+    'org.gnome.Terminal',
+    'org.gnome.Nautilus.desktop',
+    'gnome-control-center',
+    'io.n8n.Nod',
+  ])
+    assert.equal(computerAppRule(bundle).kind, 'blocked', bundle);
+  for (const bundle of ['msedge.exe', 'firefox', 'org.mozilla.firefox', 'code'])
+    assert.equal(computerAppRule(bundle).kind, 'view', bundle);
+  assert.equal(computerAppRule('notepad.exe').kind, 'use');
+  assert.equal(computerAppRule('C:\\Apps\\Slack\\slack.exe', ['slack']).kind, 'blocked');
+  for (const keys of ['win+r', 'super+a', 'alt+tab', 'ctrl+alt+t', 'ctrl+alt+delete'])
+    assert.equal(systemShortcut(keys, 'win32') || systemShortcut(keys, 'linux'), true, keys);
+  assert.equal(systemShortcut('ctrl+n', 'win32'), false);
+  assert.equal(systemShortcut('cmd+n', 'darwin'), false);
+  assert.equal(systemShortcut('cmd+n', 'linux'), true);
   assert.equal(computerAppRule('com.apple.iWork.Numbers').kind, 'use');
   assert.equal(
     computerAppRule('com.apple.iWork.Numbers', ['com.apple.iWork.Numbers']).kind,
@@ -1500,6 +1522,7 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     ],
   };
   const computer = createComputerUse(pool, 'owner', {
+    platform: 'darwin',
     desktop: {
       request: async (request) => {
         calls.push(request);

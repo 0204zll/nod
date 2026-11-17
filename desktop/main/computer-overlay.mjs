@@ -7,7 +7,10 @@ import {
   screen,
 } from 'electron';
 
-const stopShortcut = 'CommandOrControl+Shift+Escape';
+const mac = process.platform === 'darwin';
+const stopShortcut = mac ? 'CommandOrControl+Shift+Escape' : 'Control+Alt+Shift+Escape';
+const stopLabel = mac ? '⌘⇧⎋' : 'Ctrl+Alt+Shift+Esc';
+const wayland = process.platform === 'linux' && process.env.XDG_SESSION_TYPE === 'wayland';
 const pillSize = { width: 380, height: 48 };
 
 const glowPage = `<!doctype html><html><head><meta charset="utf-8"><style>
@@ -18,7 +21,7 @@ html,body{margin:0;height:100%;background:transparent;overflow:hidden}
 </style></head><body><div class="glow"></div></body></html>`;
 
 const pillPage = `<!doctype html><html><head><meta charset="utf-8"><style>
-html,body{margin:0;height:100%;background:transparent;overflow:hidden;font:500 13px/1 -apple-system,BlinkMacSystemFont,sans-serif}
+html,body{margin:0;height:100%;background:transparent;overflow:hidden;font:500 13px/1 -apple-system,BlinkMacSystemFont,system-ui,'Segoe UI',sans-serif}
 .pill{box-sizing:border-box;height:40px;margin:4px auto;display:flex;align-items:center;gap:10px;padding:0 6px 0 14px;width:max-content;max-width:372px;border-radius:20px;background:#fff;color:#1a1a1a;box-shadow:0 0 0 1px rgba(255,145,172,.9),0 6px 18px rgba(135,0,60,.25)}
 .dot{width:8px;height:8px;border-radius:50%;background:#ff5c8a;animation:pulse 1.2s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.35}}
@@ -29,7 +32,7 @@ button{font:inherit;border:0;border-radius:14px;height:28px;padding:0 12px;backg
 button:hover{background:#ffbcca}
 kbd{font:inherit;opacity:.6}
 @media (prefers-color-scheme:dark){.pill{background:#1f1f1f;color:#f5f5f5}}
-</style></head><body><div class="pill"><span class="dot"></span><span class="text" id="text"></span><button id="stop">Stop <kbd>⌘⇧⎋</kbd></button></div>
+</style></head><body><div class="pill"><span class="dot"></span><span class="text" id="text"></span><button id="stop">Stop <kbd>${stopLabel}</kbd></button></div>
 <script>
 document.getElementById('stop').addEventListener('click',()=>{document.title='stop-'+Date.now()});
 window.render=(text,quiet)=>{document.getElementById('text').textContent=text;document.body.classList.toggle('quiet',quiet)};
@@ -133,7 +136,8 @@ export function createComputerOverlay({ onStop, focusSelf }) {
     const call = ++latest;
     await windows();
     if (call !== latest) return;
-    if (background) placeAtTop();
+    const framed = !background && !wayland;
+    if (!framed) placeAtTop();
     else
       place({
         x: Math.round(bounds.x),
@@ -150,8 +154,8 @@ export function createComputerOverlay({ onStop, focusSelf }) {
       .executeJavaScript(`render(${JSON.stringify(text)},${background})`)
       .catch(() => {});
     if (call !== latest) return;
-    if (background) glow.hide();
-    else glow.showInactive();
+    if (framed) glow.showInactive();
+    else glow.hide();
     pill.showInactive();
     if (!shown && !globalShortcut.isRegistered(stopShortcut))
       globalShortcut.register(stopShortcut, stop);

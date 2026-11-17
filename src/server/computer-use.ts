@@ -20,7 +20,7 @@ const ref = z
   .regex(/^@[a-z0-9]{6,32}:e\d{1,7}$/, 'Use a ref like @s8f3k2p9:e12 from your latest snapshot.');
 const window = z
   .string()
-  .regex(/^[A-Za-z0-9:_-]{1,64}$/)
+  .regex(/^[A-Za-z0-9:._-]{1,200}$/)
   .optional();
 const bundle = z.string().min(1).max(255);
 const schemas = {
@@ -48,17 +48,7 @@ const schemas = {
   COMPUTER_SET_VALUE: z.object({ ref, text: z.string().max(100_000) }).strict(),
   COMPUTER_TYPE: z.object({ ref, text: z.string().min(1).max(10_000) }).strict(),
   COMPUTER_KEY: z.object({ pid, window, keys: z.string().min(1).max(40) }).strict(),
-  COMPUTER_KEEP_OUT: z
-    .object({
-      bundle: z
-        .string()
-        .trim()
-        .regex(
-          /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/,
-          'Name the app by its bundle ID, such as com.apple.MobileSMS for Messages; apps lists them.',
-        ),
-    })
-    .strict(),
+  COMPUTER_KEEP_OUT: z.object({ bundle: z.string().trim().min(1).max(200) }).strict(),
 };
 type Action = keyof typeof schemas;
 const observing = new Set<Action>([
@@ -107,10 +97,31 @@ const systemKeys = new Set([
   'ctrl+left',
   'ctrl+right',
 ]);
+const otherSystemKeys = new Set([
+  'opt+space',
+  'opt+tab',
+  'opt+f2',
+  'opt+f4',
+  'ctrl+opt+delete',
+  'ctrl+opt+del',
+  'ctrl+shift+esc',
+  'ctrl+opt+t',
+  'ctrl+opt+l',
+  'ctrl+opt+up',
+  'ctrl+opt+down',
+  'ctrl+opt+left',
+  'ctrl+opt+right',
+  'print',
+  'shift+print',
+  'opt+print',
+  ...Array.from({ length: 12 }, (_, index) => `ctrl+opt+f${index + 1}`),
+]);
 const modifierNames: Record<string, string> = {
   command: 'cmd',
   meta: 'cmd',
   super: 'cmd',
+  win: 'cmd',
+  windows: 'cmd',
   '⌘': 'cmd',
   control: 'ctrl',
   ctl: 'ctrl',
@@ -124,43 +135,59 @@ const modifierNames: Record<string, string> = {
 const systemMenu =
   /^(apple|services|restart|shut down|log out\b.*|lock screen|force quit\b.*|system settings|system preferences|sleep|about this mac|recent items)(…|\.\.\.)?$/i;
 
-function systemShortcut(keys: string) {
+export function systemShortcut(keys: string, platform: string = process.platform) {
   const parts = keys
     .toLowerCase()
     .split('+')
     .map((part) => modifierNames[part.trim()] ?? part.trim());
   const key = parts.pop() ?? '';
-  return systemKeys.has([...parts.sort(), key].join('+'));
+  const combo = [...parts.sort(), key].join('+');
+  if (platform === 'darwin') return systemKeys.has(combo);
+  return parts.includes('cmd') || key === 'cmd' || otherSystemKeys.has(combo);
+}
+
+export function appKey(id: string) {
+  return (
+    id
+      .trim()
+      .toLowerCase()
+      .split(/[\\/]/)
+      .at(-1)
+      ?.replace(/\.(exe|desktop)$/, '') ?? ''
+  );
 }
 
 const blockedApps: Array<[RegExp, string]> = [
-  [/^(dev\.nod\.desktop(\..+)?|com\.github\.Electron)$/i, 'Nod itself'],
+  [/^(dev\.nod\.desktop(\..+)?|com\.github\.electron|io\.n8n\.nod|nod)$/, 'Nod itself'],
   [
-    /^(com\.apple\.Terminal|com\.googlecode\.iterm2|dev\.warp\.Warp.*|com\.mitchellh\.ghostty|net\.kovidgoyal\.kitty|(io|org)\.alacritty|co\.zeit\.hyper|com\.github\.wez\.wezterm|com\.raphaelamorim\.rio|org\.tabby)$/i,
+    /^(com\.apple\.terminal|com\.googlecode\.iterm2|dev\.warp\.warp.*|com\.mitchellh\.ghostty|net\.kovidgoyal\.kitty|(io|org)\.alacritty|co\.zeit\.hyper|com\.github\.wez\.wezterm|org\.wezfurlong\.wezterm|com\.raphaelamorim\.rio|org\.tabby|wt|windowsterminal|cmd|powershell(_ise)?|pwsh|conhost|openconsole|wsl|bash|mintty|org\.gnome\.terminal|org\.gnome\.console|org\.gnome\.ptyxis|ptyxis|kgx|gnome-terminal(-server)?|org\.kde\.konsole|konsole|org\.kde\.yakuake|yakuake|guake|xterm|uxterm|com\.gexperts\.tilix|tilix|terminator|kitty|alacritty|wezterm|xfce4-terminal|lxterminal|terminology|foot|x-terminal-emulator)$/,
     'a terminal',
   ],
   [
-    /^(com\.apple\.ScriptEditor2|com\.apple\.Automator|com\.apple\.shortcuts|com\.raycast\.macos|com\.runningwithcrayons\.Alfred|com\.docker\.docker)$/i,
+    /^(com\.apple\.scripteditor2|com\.apple\.automator|com\.apple\.shortcuts|com\.raycast\.macos|com\.runningwithcrayons\.alfred|com\.docker\.docker|docker desktop|wscript|cscript|mshta|rundll32|regsvr32|python[w0-9.]*|node)$/,
     'an app that runs scripts or commands',
   ],
   [
-    /^(com\.apple\.systempreferences|com\.apple\.Settings|com\.apple\.keychainaccess|com\.apple\.ActivityMonitor|com\.apple\.DiskUtility|com\.apple\.SecurityAgent|com\.apple\.MigrateAssistant|com\.apple\.installer|com\.apple\.loginwindow)$/i,
+    /^(com\.apple\.systempreferences|com\.apple\.settings|com\.apple\.keychainaccess|com\.apple\.activitymonitor|com\.apple\.diskutility|com\.apple\.securityagent|com\.apple\.migrateassistant|com\.apple\.installer|com\.apple\.loginwindow|systemsettings|control|mmc|regedit|regedt32|taskmgr|gpedit|msconfig|secpol|lusrmgr|compmgmt|services|eventvwr|devmgmt|diskmgmt|consent|credentialuibroker|logonui|lockapp|org\.gnome\.settings|gnome-control-center|org\.kde\.systemsettings|org\.gnome\.seahorse\.application|seahorse|org\.gnome\.diskutility|gnome-disks|org\.gnome\.systemmonitor|gnome-system-monitor|org\.kde\.plasma-systemmonitor|org\.kde\.kwalletmanager5?|kwalletmanager5?|polkit-.*|org\.gnome\.software|software-properties-.*|synaptic)$/,
     'system settings or security',
   ],
-  [/^com\.apple\.finder$/i, 'Finder; use the files tool for local files'],
   [
-    /(^com\.apple\.Passwords$)|1password|onepassword|bitwarden|dashlane|lastpass|keepass|nordpass|enpass|proton\.pass|keeper/i,
+    /^(com\.apple\.finder|explorer|org\.gnome\.nautilus|nautilus|org\.kde\.dolphin|dolphin|nemo|thunar|pcmanfm|caja)$/,
+    'a file manager; use the files tool for local files',
+  ],
+  [
+    /(^com\.apple\.passwords$)|1password|onepassword|bitwarden|dashlane|lastpass|keepass|nordpass|enpass|proton\.pass|keeper/,
     'a password manager',
   ],
-  [/ledger\.live|exodus|electrum|trezor|metamask|phantom|wallet/i, 'a crypto wallet'],
+  [/ledger\.live|exodus|electrum|trezor|metamask|phantom|wallet/, 'a crypto wallet'],
 ];
 const viewOnlyApps: Array<[RegExp, string]> = [
   [
-    /^(com\.google\.Chrome.*|com\.apple\.Safari.*|company\.thebrowser\..*|org\.mozilla\..*|com\.microsoft\.edgemac.*|com\.brave\.Browser.*|com\.operasoftware\..*|com\.vivaldi\..*|app\.zen-browser\..*|com\.kagi\..*|ai\.perplexity\..*|com\.openai\.atlas.*|org\.chromium\..*)$/i,
+    /^(com\.google\.chrome.*|com\.apple\.safari.*|company\.thebrowser\..*|org\.mozilla\..*|com\.microsoft\.edge.*|com\.brave\.browser.*|com\.operasoftware\..*|com\.vivaldi\..*|app\.zen-browser\..*|com\.kagi\..*|ai\.perplexity\..*|com\.openai\.atlas.*|org\.chromium\..*|chrome|google-chrome(-stable|-beta)?|chromium(-browser)?|msedge|microsoft-edge(-stable)?|firefox(-esr)?|brave(-browser)?|opera|vivaldi(-stable)?|arc|librewolf|zen|org\.gnome\.epiphany|epiphany)$/,
     "a web browser; use Nod's own browser for websites",
   ],
   [
-    /^(com\.microsoft\.VSCode.*|com\.todesktop\..*|com\.exafunction\..*|dev\.zed\..*|com\.jetbrains\..*|com\.apple\.dt\.Xcode|com\.stablyai\.orca)$/i,
+    /^(com\.microsoft\.vscode.*|com\.visualstudio\.code.*|com\.todesktop\..*|com\.exafunction\..*|dev\.zed\..*|com\.jetbrains\..*|com\.apple\.dt\.xcode|com\.stablyai\.orca|code(-insiders)?|cursor|windsurf|zed|devenv|jetbrains-.*|idea64|pycharm64|webstorm64)$/,
     'a code editor that can run commands',
   ],
 ];
@@ -197,12 +224,14 @@ export function isComputerAction(action: string): action is Action {
 }
 
 export function computerAppRule(bundleId: string, keptOut: string[] = []) {
-  if (keptOut.some((entry) => entry.toLowerCase() === bundleId.toLowerCase()))
+  const names = [appKey(bundleId), bundleId.trim().toLowerCase().split(/[\\/]/).at(-1) ?? ''];
+  const matches = (pattern: RegExp) => names.some((name) => pattern.test(name));
+  if (keptOut.some((entry) => names.includes(appKey(entry))))
     return { kind: 'blocked' as const, why: 'an app the owner keeps Nod out of' };
   for (const [pattern, why] of blockedApps)
-    if (pattern.test(bundleId)) return { kind: 'blocked' as const, why };
+    if (matches(pattern)) return { kind: 'blocked' as const, why };
   for (const [pattern, why] of viewOnlyApps)
-    if (pattern.test(bundleId)) return { kind: 'view' as const, why };
+    if (matches(pattern)) return { kind: 'view' as const, why };
   return { kind: 'use' as const };
 }
 
@@ -210,7 +239,7 @@ function secure(node: Node) {
   return (node.states?.includes('secure') ?? false) || /secure|password/i.test(node.role ?? '');
 }
 
-function renderComputerTree(tree: Node | undefined, menuBar = false) {
+function renderComputerTree(tree: Node | undefined, menuBar = false, mac = true) {
   const lines: string[] = [];
   const refs: Array<Node & { ref_id: string }> = [];
   let length = 0;
@@ -218,7 +247,7 @@ function renderComputerTree(tree: Node | undefined, menuBar = false) {
     if (
       length > treeChars ||
       (menuBar && depth === 1 && index < 2) ||
-      (/menu/i.test(node.role ?? '') && systemMenu.test(node.name?.trim() ?? ''))
+      (mac && /menu/i.test(node.role ?? '') && systemMenu.test(node.name?.trim() ?? ''))
     )
       return;
     const hidden = secure(node);
@@ -247,15 +276,17 @@ function renderComputerTree(tree: Node | undefined, menuBar = false) {
 export function createComputerUse(
   pool: Pool,
   ownerId: string,
-  options: { desktop?: DesktopControl },
+  options: { desktop?: DesktopControl; platform?: string },
 ) {
-  const { desktop } = options;
+  const { desktop, platform = process.platform } = options;
+  const mac = platform === 'darwin';
+  const sameApp = (a: string, b: string) => appKey(a) === appKey(b);
   const grants = new Map<string, Set<string>>();
   const controls = new Map<string, Map<string, Control>>();
   let listing: { at: number; apps: Promise<App[]> } | undefined;
 
   function unavailable() {
-    return new IntegrationError('Computer use works only in the Nod desktop app on macOS.', 503);
+    return new IntegrationError('Computer use works only in the Nod desktop app.', 503);
   }
 
   async function settings(database: Query = pool) {
@@ -419,12 +450,14 @@ export function createComputerUse(
     if (action === 'COMPUTER_APPS') return input;
     if (action === 'COMPUTER_OPEN') {
       const app =
-        (await running(signal)).find((item) => item.bundle === input.bundle) ??
+        (await running(signal)).find((item) => sameApp(item.bundle, input.bundle!)) ??
         ((await ask({ op: 'locate', bundle: input.bundle }, signal)) as {
           bundle: string;
           name: string;
+          path?: string;
         });
       allowed(app, keptOut, false);
+      if ('path' in app && app.path) allowed({ bundle: app.path, name: app.name }, keptOut, false);
       return { app: { bundle: app.bundle, name: app.name } };
     }
     if (targeted.has(action)) {
@@ -435,7 +468,7 @@ export function createComputerUse(
         control: { role: found.role, name: found.name, window: found.window },
       };
     }
-    if (action === 'COMPUTER_KEY' && systemShortcut(input.keys!))
+    if (action === 'COMPUTER_KEY' && systemShortcut(input.keys!, platform))
       throw new IntegrationError(
         `${input.keys} is a system shortcut, so Nod never sends it. Use the app's own controls.`,
         403,
@@ -499,11 +532,14 @@ export function createComputerUse(
     let rendered = renderComputerTree(
       ((await ask(request, signal)) as { tree?: Node }).tree,
       Boolean(request.menu),
+      mac,
     );
     let note = '';
     if (rendered.truncated && !prepared.ref && !menu) {
       rendered = renderComputerTree(
         ((await ask({ ...request, skeleton: true }, signal)) as { tree?: Node }).tree,
+        false,
+        mac,
       );
       note =
         'This window is large, so this is its outline. Snapshot again with the ref of one part to read it.\n';
@@ -540,7 +576,7 @@ export function createComputerUse(
       signal,
     )) as { matches?: Node[] };
     const shownMatches = matches.filter((node) => node.ref_id).slice(0, findLimit);
-    const rendered = shownMatches.map((node) => renderComputerTree(node));
+    const rendered = shownMatches.map((node) => renderComputerTree(node, false, mac));
     remember(
       root,
       rendered.flatMap(({ refs }) =>
@@ -593,13 +629,15 @@ export function createComputerUse(
       allowed(target, keptOut, false);
       return async () => {
         grant(root, target.bundle);
-        const already = (await running(signal)).find((item) => item.bundle === target.bundle);
+        const already = (await running(signal)).find((item) => sameApp(item.bundle, target.bundle));
         const launched = async () => {
           try {
             return ((await ask({ op: 'open', bundle: target.bundle }, signal)) as { pid?: number })
               .pid;
           } catch (error) {
-            const started = (await running(signal)).find((item) => item.bundle === target.bundle);
+            const started = (await running(signal)).find((item) =>
+              sameApp(item.bundle, target.bundle),
+            );
             if (!started) throw error;
             return started.pid;
           }
@@ -685,6 +723,18 @@ export function createComputerUse(
     if (!desktop) throw unavailable();
     await lineage(turn, database);
     const input = validate('COMPUTER_KEEP_OUT', { bundle: bundleId });
+    if (
+      mac
+        ? !/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(input.bundle!)
+        : !/^[A-Za-z0-9][A-Za-z0-9 _.-]*$/.test(input.bundle!)
+    )
+      throw new IntegrationError(
+        mac
+          ? 'Name the app by its bundle ID, such as com.apple.MobileSMS for Messages; apps lists them.'
+          : platform === 'win32'
+            ? 'Name the app by its program name, such as slack.exe; apps lists them.'
+            : 'Name the app by its desktop ID, such as org.gnome.TextEditor; apps lists them.',
+      );
     return addKeepOut(database, ownerId, 'computer_keep_out', input.bundle!, keepOutLimit, 'apps');
   }
 
@@ -694,15 +744,19 @@ export function createComputerUse(
       desktop && enabled
         ? ((await desktop
             .request({ op: 'permissions' }, AbortSignal.timeout(3_000))
-            .catch(() => undefined)) as { accessibility?: boolean; screen?: boolean } | undefined)
+            .catch(() => undefined)) as
+            { accessibility?: string; screen?: string; surfaces?: string[] } | undefined)
         : undefined;
     return {
       available: Boolean(desktop),
+      platform,
+      experimental: !mac,
       enabled,
       keptOut,
       permissions: {
-        accessibility: permissions?.accessibility ?? false,
-        screen: permissions?.screen ?? false,
+        accessibility: permissions?.accessibility ?? 'unknown',
+        screen: permissions?.screen ?? 'unknown',
+        ready: permissions ? (permissions.surfaces?.length ?? 0) > 0 : true,
       },
     };
   }

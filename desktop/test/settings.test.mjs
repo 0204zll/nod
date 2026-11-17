@@ -8501,7 +8501,7 @@ test('legacy account completion migrates to device progress without changing key
   assert.deepEqual(await f.reopen().environment(), environment);
 });
 
-async function fakeDesktop(t, answers) {
+async function fakeDesktop(t, answers, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'nod-desktop-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const log = join(root, 'log.jsonl');
@@ -8547,6 +8547,8 @@ process.stdout.write(JSON.stringify(key ? answers[key] : { ok: true, data: {} })
     ownerWaitMs: 300,
     lingerMs: 20,
     backgroundLingerMs: 20,
+    platform: 'darwin',
+    ...options,
   });
   return {
     helper,
@@ -8693,4 +8695,82 @@ test('computer use shows Nod working in an app during background steps, then hid
   assert.deepEqual(await desktop.calls(), ['click @s1abcdef:e1']);
   assert.deepEqual(desktop.events, ['background']);
   await waitFor(() => assert.ok(desktop.events.includes('hidden')), { interval: 10 });
+});
+
+test('computer use pastes with ctrl+v on Linux and Windows, and types from the front on Windows', async (t) => {
+  const linux = await fakeDesktop(t, { 'list-windows': mailWindow }, { platform: 'linux' });
+  await linux.helper.request({
+    op: 'type',
+    ref: '@s1abcdef:e1',
+    app: 'Mail',
+    window: 'w-1',
+    role: 'document',
+    text: 'Hi Toni',
+  });
+  assert.equal((await linux.calls()).at(-1), 'press ctrl+v --app Mail --window-id w-1 --headed');
+
+  const windows = await fakeDesktop(t, { 'list-windows': mailWindow }, { platform: 'win32' });
+  await windows.helper.request({
+    op: 'type',
+    ref: '@s1abcdef:e1',
+    app: 'Mail',
+    window: 'w-1',
+    role: 'textfield',
+    text: 'Hi',
+  });
+  assert.deepEqual(await windows.calls(), [
+    'focus-window --app Mail --window-id w-1',
+    'type @s1abcdef:e1 --stdin --headed',
+  ]);
+});
+
+test('computer use on Linux opens only installed desktop apps that do not run in a terminal', async (t) => {
+  const data = await mkdtemp(join(tmpdir(), 'nod-desktop-entries-'));
+  t.after(() => rm(data, { recursive: true, force: true }));
+  await mkdir(join(data, 'applications'));
+  await writeFile(
+    join(data, 'applications', 'org.gnome.TextEditor.desktop'),
+    '[Desktop Entry]\nType=Application\nName=Text Editor\nExec=gnome-text-editor\n',
+  );
+  await writeFile(
+    join(data, 'applications', 'org.gnome.Terminal.desktop'),
+    '[Desktop Entry]\nType=Application\nName=Terminal\nExec=gnome-terminal\nTerminal=true\n',
+  );
+  const saved = { home: process.env.XDG_DATA_HOME, dirs: process.env.XDG_DATA_DIRS };
+  process.env.XDG_DATA_HOME = data;
+  process.env.XDG_DATA_DIRS = join(data, 'none');
+  t.after(() => {
+    for (const [name, value] of [
+      ['XDG_DATA_HOME', saved.home],
+      ['XDG_DATA_DIRS', saved.dirs],
+    ])
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+  });
+  const desktop = await fakeDesktop(
+    t,
+    { launch: { ok: true, data: { pid: 7 } } },
+    { platform: 'linux' },
+  );
+  assert.deepEqual(await desktop.helper.request({ op: 'locate', bundle: 'org.gnome.TextEditor' }), {
+    bundle: 'org.gnome.TextEditor',
+    name: 'Text Editor',
+  });
+  await assert.rejects(
+    desktop.helper.request({ op: 'open', bundle: 'org.gnome.Terminal' }),
+    /runs in a terminal/,
+  );
+  await assert.rejects(
+    desktop.helper.request({ op: 'open', bundle: 'bash' }),
+    /No app with the desktop ID/,
+  );
+  assert.deepEqual(await desktop.calls(), []);
+  await desktop.helper.request({ op: 'open', bundle: 'org.gnome.TextEditor' });
+  assert.deepEqual(await desktop.calls(), ['launch org.gnome.TextEditor']);
+
+  const flatpak = await fakeDesktop(t, {}, { platform: 'linux', sandboxed: true });
+  await assert.rejects(
+    flatpak.helper.request({ op: 'open', bundle: 'org.gnome.TextEditor' }),
+    /Flatpak sandbox/,
+  );
 });

@@ -1,12 +1,13 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFile } from 'node:child_process';
 import { access, chmod, constants, mkdir, readdir, readFile, rm } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const answerMs = 30_000;
 const ref = /^@[a-z0-9]{6,32}:e\d{1,7}$/;
-const windowId = /^[A-Za-z0-9:_-]{1,64}$/;
+const windowId = /^[A-Za-z0-9:._-]{1,200}$/;
 const appName = /^[^\0\r\n]{1,200}$/;
 const keys = /^[a-z0-9+.,\-=/ ]{1,40}$/i;
 const needsFocus =
@@ -25,6 +26,31 @@ const appSteps = new Set([
 ]);
 const chromiumFrameworks =
   /Electron Framework|Chromium|Chrome Framework|Edge Framework|Brave Browser Framework/i;
+const passedEnvironment = [
+  'HOME',
+  'PATH',
+  'LANG',
+  'DBUS_SESSION_BUS_ADDRESS',
+  'DISPLAY',
+  'WAYLAND_DISPLAY',
+  'XDG_RUNTIME_DIR',
+  'XDG_DATA_HOME',
+  'XDG_DATA_DIRS',
+  'XDG_SESSION_TYPE',
+  'XDG_CURRENT_DESKTOP',
+  'SystemRoot',
+  'SystemDrive',
+  'windir',
+  'USERPROFILE',
+  'TEMP',
+  'TMP',
+  'LOCALAPPDATA',
+  'APPDATA',
+  'PATHEXT',
+  'ComSpec',
+];
+const desktopId = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/;
+const programName = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,99}$/;
 
 function output(file, args) {
   return new Promise((resolve) =>
@@ -36,8 +62,9 @@ export function createComputerHelper({
   binary,
   helper,
   home,
-  requestPermission,
   presence,
+  platform = process.platform,
+  sandboxed = false,
   ownerIdleSeconds = 1,
   ownerWaitMs = 15_000,
   lingerMs = 2000,
@@ -77,8 +104,11 @@ export function createComputerHelper({
           timeout: answerMs,
           maxBuffer: 32 * 1024 * 1024,
           env: {
-            HOME: process.env.HOME,
-            PATH: process.env.PATH,
+            ...Object.fromEntries(
+              passedEnvironment.flatMap((name) =>
+                process.env[name] === undefined ? [] : [[name, process.env[name]]],
+              ),
+            ),
             AGENT_DESKTOP_HOME: home,
             ...(helper ? { AGENT_DESKTOP_MACOS_HELPER_PATH: helper } : {}),
           },
@@ -123,12 +153,16 @@ export function createComputerHelper({
   ];
 
   async function permissions() {
-    const data = await run(['permissions']);
+    const data = await run(['status']);
+    surfaces = data.supported_surfaces ?? [];
     return {
-      accessibility: data.accessibility?.state === 'granted',
-      screen: data.screen_recording?.state === 'granted',
+      platform,
+      accessibility: data.permissions?.accessibility?.state ?? 'unknown',
+      screen: data.permissions?.screen_recording?.state ?? 'unknown',
+      surfaces,
     };
   }
+  let surfaces;
 
   async function screenshot(request) {
     await mkdir(join(home, 'tmp'), { recursive: true, mode: 0o700 });
@@ -146,6 +180,7 @@ export function createComputerHelper({
   let session;
 
   function chromium(pid) {
+    if (platform !== 'darwin') return false;
     if (!chromiumApps.has(pid))
       chromiumApps.set(
         pid,
@@ -160,12 +195,7 @@ export function createComputerHelper({
   }
 
   async function frontmost() {
-    const front = (await output('/usr/bin/lsappinfo', ['front'])).trim();
-    if (!front) return undefined;
-    const pid = (await output('/usr/bin/lsappinfo', ['info', '-only', 'pid', front])).match(
-      /\bpid"?\s*=\s*(\d+)/,
-    )?.[1];
-    return pid ? Number(pid) : undefined;
+    return (await run(['list-windows']).catch(() => [])).find((item) => item.is_focused);
   }
 
   async function windowOf(target) {
@@ -245,7 +275,7 @@ export function createComputerHelper({
     if (!ending) return;
     clearTimeout(ending.timer);
     unframe();
-    if (!ending.previous || (await frontmost()) !== ending.pid) return;
+    if (!ending.previous || (await frontmost())?.pid !== ending.pid) return;
     if (ending.previous.pid === presence.ownPid) return presence.focusSelf();
     if (ending.previous.window)
       await run([
@@ -261,15 +291,11 @@ export function createComputerHelper({
     if (session?.window !== target.window) {
       await release();
       await waitForOwner(target, window.bounds);
-      const [front, windows] = await Promise.all([
-        frontmost(),
-        run(['list-windows']).catch(() => []),
-      ]);
-      const back = windows.find((item) => item.pid === front && item.is_focused);
+      const back = await frontmost();
       session = {
         window: target.window,
         pid: window.pid,
-        previous: front && { pid: front, app: back?.app_name, window: back?.id },
+        previous: back && { pid: back.pid, app: back.app_name, window: back.id },
       };
       frame(target, window.bounds);
       await run(['focus-window', ...scope(target)]);
@@ -313,10 +339,10 @@ export function createComputerHelper({
     else unframe();
   }
 
-  async function act(request, args, input, found = windowOf(request)) {
+  async function act(request, args, { input, found = windowOf(request), front = false } = {}) {
     const target = { app: request.app, window: request.window };
     const window = await found;
-    const inFront = window && (await chromium(window.pid));
+    const inFront = window && (front || (await chromium(window.pid)));
     if (!inFront)
       try {
         return await run(args, input);
@@ -325,7 +351,7 @@ export function createComputerHelper({
       }
     if (inFront) stale.add(target.window);
     return focused(target, window, async () => {
-      if (args[0] === 'press') return run([...args, '--headed'], input);
+      if (front || args[0] === 'press') return run([...args, '--headed'], input);
       try {
         return await run(args, input);
       } catch (error) {
@@ -342,12 +368,11 @@ export function createComputerHelper({
       return paste(request, target, window);
     if (pasteRoles.has(request.role))
       throw new Error('ACTION_NOT_SUPPORTED: Nod can type into this area only in its own window.');
-    return act(
-      request,
-      ['type', check(request.ref, ref, 'ref'), '--stdin'],
-      String(request.text ?? ''),
-      Promise.resolve(window),
-    );
+    return act(request, ['type', check(request.ref, ref, 'ref'), '--stdin'], {
+      input: String(request.text ?? ''),
+      found: Promise.resolve(window),
+      front: platform === 'win32',
+    });
   }
 
   async function paste(request, target, window) {
@@ -357,7 +382,12 @@ export function createComputerHelper({
       const saved = await presence.clipboard.save();
       await presence.clipboard.write(String(request.text ?? ''));
       try {
-        return await run(['press', 'cmd+v', ...scope(target), '--headed']);
+        return await run([
+          'press',
+          platform === 'darwin' ? 'cmd+v' : 'ctrl+v',
+          ...scope(target),
+          '--headed',
+        ]);
       } finally {
         await delay(400);
         try {
@@ -382,7 +412,9 @@ export function createComputerHelper({
   const operations = {
     permissions,
     request: async (request) => {
-      await requestPermission(request.which === 'screen' ? 'screen' : 'accessibility');
+      await run(['permissions', request.which === 'screen' ? '--guide' : '--request']).catch(
+        () => {},
+      );
       return permissions();
     },
     apps: async () => {
@@ -398,16 +430,13 @@ export function createComputerHelper({
         })),
       };
     },
-    locate: async (request) => {
-      const bundle = check(request.bundle, /^[A-Za-z0-9.-]{1,200}$/, 'bundle ID');
-      const path = (await output('/usr/bin/mdfind', [`kMDItemCFBundleIdentifier == "${bundle}"`]))
-        .split('\n')
-        .find((line) => line.endsWith('.app'));
-      if (!path) throw new Error('No app with that bundle ID is installed.');
-      return { bundle, name: path.split('/').at(-1).slice(0, -4) };
-    },
+    locate,
     open: async (request) => {
-      const opened = await run(['launch', check(request.bundle, appName, 'app')]);
+      const found = platform === 'darwin' ? undefined : await locate(request);
+      const opened = await run([
+        'launch',
+        found?.path ?? found?.bundle ?? check(request.bundle, appName, 'app'),
+      ]);
       return { pid: opened.pid };
     },
     snapshot: (request) =>
@@ -417,7 +446,7 @@ export function createComputerHelper({
           : [
               'snapshot',
               ...scope(request),
-              ...(request.menu ? ['--surface', 'menubar'] : []),
+              ...(request.menu ? ['--surface', await menuBar()] : []),
               ...(request.skeleton ? ['--skeleton'] : []),
             ];
         const data = await run([...args, '-i', '--compact']);
@@ -434,7 +463,8 @@ export function createComputerHelper({
       ),
     screenshot: (request) => observe(request, () => screenshot(request)),
     press: (request) => act(request, ['click', check(request.ref, ref, 'ref')]),
-    focus: (request) => act(request, ['focus', check(request.ref, ref, 'ref')]),
+    focus: (request) =>
+      act(request, ['focus', check(request.ref, ref, 'ref')], { front: platform === 'win32' }),
     select: (request) =>
       act(request, [
         'select',
@@ -442,14 +472,87 @@ export function createComputerHelper({
         check(request.option, appName, 'option'),
       ]),
     set_value: (request) =>
-      act(
-        request,
-        ['set-value', check(request.ref, ref, 'ref'), '--stdin'],
-        String(request.text ?? ''),
-      ),
+      act(request, ['set-value', check(request.ref, ref, 'ref'), '--stdin'], {
+        input: String(request.text ?? ''),
+      }),
     type,
     key: (request) => act(request, ['press', check(request.keys, keys, 'keys'), ...scope(request)]),
   };
+
+  async function menuBar() {
+    surfaces ??= (await run(['status'])).supported_surfaces ?? [];
+    if (!surfaces.includes('menubar'))
+      throw new Error(
+        'ACTION_NOT_SUPPORTED: This computer has no separate menu bar; the menus are in the window.',
+      );
+    return 'menubar';
+  }
+
+  async function locate(request) {
+    if (platform === 'darwin') {
+      const bundle = check(request.bundle, /^[A-Za-z0-9.-]{1,200}$/, 'bundle ID');
+      const path = (await output('/usr/bin/mdfind', [`kMDItemCFBundleIdentifier == "${bundle}"`]))
+        .split('\n')
+        .find((line) => line.endsWith('.app'));
+      if (!path) throw new Error('No app with that bundle ID is installed.');
+      return { bundle, name: path.split('/').at(-1).slice(0, -4) };
+    }
+    if (platform === 'win32') {
+      const name = check(request.bundle, programName, 'program name').replace(/\.exe$/i, '');
+      const root = process.env.SystemRoot ?? 'C:\\Windows';
+      for (const path of [join(root, 'System32', `${name}.exe`), join(root, `${name}.exe`)])
+        if (
+          await access(path).then(
+            () => true,
+            () => false,
+          )
+        )
+          return { bundle: `${name}.exe`, name, path };
+      for (const hive of ['HKCU', 'HKLM']) {
+        const path = (
+          await output('reg', [
+            'query',
+            `${hive}\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${name}.exe`,
+            '/ve',
+          ])
+        )
+          .match(/REG_(?:EXPAND_)?SZ\s+"?([^"\r\n]+?)"?\s*$/m)?.[1]
+          ?.replace(/%([^%]+)%/g, (whole, variable) => process.env[variable] ?? whole);
+        if (path) return { bundle: `${name}.exe`, name, path };
+      }
+      throw new Error(`No program named ${name} is installed. Use the name of its .exe file.`);
+    }
+    if (sandboxed)
+      throw new Error(
+        'ACTION_NOT_SUPPORTED: Nod runs in a Flatpak sandbox, so it can only use apps that are already open. Ask the owner to open the app, then try again.',
+      );
+    const id = check(request.bundle, desktopId, 'desktop ID').replace(/\.desktop$/, '');
+    const directories = [
+      process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'),
+      ...(process.env.XDG_DATA_DIRS ?? '/usr/local/share:/usr/share').split(':'),
+    ];
+    for (const directory of directories) {
+      const entry = await readFile(join(directory, 'applications', `${id}.desktop`), 'utf8').catch(
+        () => undefined,
+      );
+      if (entry === undefined) continue;
+      const fields = Object.fromEntries(
+        (entry.split(/^\[/m).find((section) => section.startsWith('Desktop Entry]')) ?? '')
+          .split('\n')
+          .map((line) => line.match(/^([A-Za-z]+)=(.*)$/))
+          .filter(Boolean)
+          .map((match) => [match[1], match[2].trim()]),
+      );
+      if (fields.Type !== 'Application' || fields.Hidden === 'true')
+        throw new Error(`${id} is not an app Nod can open.`);
+      if (fields.Terminal === 'true')
+        throw new Error(`${fields.Name ?? id} runs in a terminal, so Nod never opens it.`);
+      return { bundle: id, name: fields.Name || id };
+    }
+    throw new Error(
+      `No app with the desktop ID ${id} is installed. Use the ID from its .desktop file, such as org.gnome.TextEditor.`,
+    );
+  }
 
   let ready;
   async function operate(request) {

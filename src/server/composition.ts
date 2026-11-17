@@ -505,7 +505,7 @@ export function createDefaultAdapters(
       open: desktopMode ? desktopOnePassword() : forkedOnePassword(env.NOD_APP_VERSION || 'source'),
     }),
     trash: desktopMode ? desktopTrash() : undefined,
-    desktop: desktopMode && process.platform === 'darwin' ? desktopControl() : undefined,
+    desktop: desktopMode ? desktopControl() : undefined,
     keepAwake: desktopMode ? desktopKeepAwake() : undefined,
     workspace: createDockerWorkspace({
       container: env.WORKSPACE_CONTAINER || 'nod-workspace',

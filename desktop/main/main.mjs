@@ -17,12 +17,11 @@ import {
   screen,
   session,
   shell,
-  systemPreferences,
   Tray,
   utilityProcess,
 } from 'electron';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { appendFile, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
@@ -117,8 +116,11 @@ app.setPath(
 );
 const profileRoot = join(app.getPath('userData'), 'profiles', 'local');
 const agentDesktop = app.isPackaged
-  ? join(process.resourcesPath, '..', 'Helpers')
+  ? process.platform === 'darwin'
+    ? join(process.resourcesPath, '..', 'Helpers')
+    : join(process.resourcesPath, 'agent-desktop')
   : join(desktopRoot, 'node_modules', 'agent-desktop', 'bin');
+const executable = process.platform === 'win32' ? '.exe' : '';
 const computerOverlay = createComputerOverlay({
   onStop: () => {
     void computerHelper.cancel();
@@ -130,7 +132,9 @@ const computerHelper = createComputerHelper({
   presence: computerOverlay,
   binary: join(
     agentDesktop,
-    app.isPackaged ? 'agent-desktop' : `agent-desktop-${process.platform}-${process.arch}`,
+    app.isPackaged
+      ? `agent-desktop${executable}`
+      : `agent-desktop-${process.platform}-${process.arch}${executable}`,
   ),
   helper:
     process.platform === 'darwin'
@@ -142,13 +146,7 @@ const computerHelper = createComputerHelper({
         )
       : undefined,
   home: join(profileRoot, 'computer-use'),
-  requestPermission: async (which) => {
-    if (which === 'accessibility') systemPreferences.isTrustedAccessibilityClient(true);
-    else
-      await shell.openExternal(
-        'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
-      );
-  },
+  sandboxed: process.platform === 'linux' && existsSync('/.flatpak-info'),
 });
 const freshLocalProfile = await stat(profileRoot).then(
   () => false,

@@ -26,18 +26,33 @@ export async function hardenElectron(application) {
 
 const directory = dirname(fileURLToPath(import.meta.url));
 
-export async function copyAgentDesktop(application) {
-  const desktop = join(directory, '..');
-  const helpers = join(application, 'Contents', 'Helpers');
-  await mkdir(helpers, { recursive: true });
-  for (const [source, target] of [
-    [`agent-desktop-darwin-${process.arch}`, 'agent-desktop'],
-    [`agent-desktop-macos-helper-darwin-${process.arch}`, 'agent-desktop-macos-helper'],
-  ])
-    await cp(join(desktop, 'node_modules', 'agent-desktop', 'bin', source), join(helpers, target));
+export async function copyAgentDesktop(application, platform = 'darwin', arch = process.arch) {
+  const bin = join(directory, '..', 'node_modules', 'agent-desktop', 'bin');
+  const mac = platform === 'darwin';
+  const resources = mac
+    ? join(application, 'Contents', 'Resources')
+    : join(application, 'resources');
+  const target = mac ? join(application, 'Contents', 'Helpers') : join(resources, 'agent-desktop');
+  const files = mac
+    ? [
+        [`agent-desktop-darwin-${arch}`, 'agent-desktop'],
+        [`agent-desktop-macos-helper-darwin-${arch}`, 'agent-desktop-macos-helper'],
+      ]
+    : platform === 'win32'
+      ? [[`agent-desktop-win32-${arch}.exe`, 'agent-desktop.exe']]
+      : [
+          [`agent-desktop-linux-${arch}`, 'agent-desktop'],
+          [
+            `agent-desktop-linux-clipboard-owner-linux-${arch}`,
+            'agent-desktop-linux-clipboard-owner',
+          ],
+        ];
+  await mkdir(target, { recursive: true });
+  for (const [source, name] of files) await cp(join(bin, source), join(target, name));
+  await mkdir(join(resources, 'licenses'), { recursive: true });
   await cp(
-    join(desktop, 'licenses', 'agent-desktop.md'),
-    join(application, 'Contents', 'Resources', 'licenses', 'agent-desktop.md'),
+    join(directory, '..', 'licenses', 'agent-desktop.md'),
+    join(resources, 'licenses', 'agent-desktop.md'),
   );
 }
 export function desktopBuildOptions(env = process.env) {

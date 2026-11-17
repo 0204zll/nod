@@ -115,7 +115,12 @@ export function createDesktop(apps: DesktopApp[]): FakeDesktop {
     switch (request.op) {
       case 'permissions':
       case 'request':
-        return { accessibility: true, screen: true };
+        return {
+          platform: 'darwin',
+          accessibility: 'granted',
+          screen: 'granted',
+          surfaces: ['window', 'menubar'],
+        };
       case 'apps':
         return { apps: apps.filter((item) => item.running).map(info) };
       case 'locate': {
