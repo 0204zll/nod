@@ -7,7 +7,7 @@ sidebar:
 
 Computer use lets Nod work in apps on your computer, for example to write a list in TextEdit, fill a table in Numbers or write a reply into a Mail draft. Nod reads each app's window through the system's accessibility service, the same information screen readers use, and presses its buttons, chooses its menu items and types into its fields. It works in the desktop app, using the open-source [agent-desktop](https://github.com/vercel-labs/agent-desktop) tool bundled in the app, and never moves your pointer. It works in the background where it can, and brings an app to the front only for steps that need it; see [When Nod brings an app to the front](#when-nod-brings-an-app-to-the-front). A source install and a self-hosted server don't offer it.
 
-It works on macOS. On Windows and Linux it is experimental: it uses the same checks, but hasn't been tested on many computers yet. See [Windows and Linux](#windows-and-linux) for what differs.
+Computer use is experimental on macOS, Windows and Linux: it hasn't been tested on many computers yet. Windows and Linux use the same checks as macOS; see [Windows and Linux](#windows-and-linux) for what differs.
 
 Nod uses computer use last. When a [connected app](/connect/apps/) can do the work, Nod uses it, even when you name the service: "message Priya on Slack" goes through your Slack connection. It uses the app on your computer instead only when you ask for it, such as "in the Slack app on my Mac", or when no connection can do the work, for example when Slack isn't connected but its app is on your computer. For files Nod uses [local files](/connect/local-files/), and for other websites its own browser.
 
@@ -79,7 +79,7 @@ Afterwards Nod gives focus back to the window you were using, unless you've alre
 
 ## Windows and Linux
 
-Computer use on Windows and Linux is experimental. The checks and refusals are the same as on macOS. What differs:
+The checks and refusals on Windows and Linux are the same as on macOS. What differs:
 
 - **App IDs.** Nod names apps by their program name on Windows, such as `notepad.exe`, and by their desktop ID on Linux, such as `org.gnome.TextEditor`. On Linux it opens only installed desktop apps, never a command, a terminal, or a system, settings or file manager app; an app that's already open is checked only against Nod's list. On Windows it starts only windowed programs, never a command-line tool.
 - **Windows:** Nod can read but not operate an app that runs as administrator.
