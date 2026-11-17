@@ -62,11 +62,11 @@ const passedEnvironment = [
 ];
 const desktopId = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/;
 const programName = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,99}$/;
-const refusedCategories = /(^|;)(TerminalEmulator|Settings|System|FileManager|Security)(;|$)/;
+const refusedCategories = /(^|;)(Settings|System|FileManager|Security)(;|$)/;
 
 async function windowsProgram(path) {
   const file = await open(path).catch(() => undefined);
-  if (!file) return false;
+  if (!file) return undefined;
   try {
     const header = Buffer.alloc(1024);
     await file.read(header, 0, header.length, 0);
@@ -85,7 +85,6 @@ async function windowsProgram(path) {
 function launcher(exec = '') {
   const words = exec.split(/\s+/).filter((word) => word && !/^[A-Z_]+=/.test(word));
   if (words[0] && basename(words[0]) === 'env') words.shift();
-  while (words[0] && /^[A-Z_]+=/.test(words[0])) words.shift();
   if (words[0] && basename(words[0]) === 'flatpak' && words[1] === 'run')
     return words.slice(2).find((word) => !word.startsWith('-')) ?? 'flatpak';
   return words[0] ? basename(words[0]) : '';
@@ -308,12 +307,13 @@ export function createComputerHelper({
     awake();
   }
 
-  async function release() {
+  async function release(handover = false) {
     const ending = session;
     session = undefined;
     if (!ending) return;
     clearTimeout(ending.timer);
     unframe();
+    if (handover) return ending.previous;
     if (!ending.previous || (await frontmost())?.pid !== ending.pid) return;
     if (ending.previous.pid === presence.ownPid) return presence.focusSelf();
     if (ending.previous.window)
@@ -328,13 +328,13 @@ export function createComputerHelper({
 
   async function focused(target, window, work) {
     if (session?.window !== target.window) {
-      await release();
+      const handed = await release(true);
       await waitForOwner(target, window.bounds);
-      const back = await frontmost();
+      const back = handed ? undefined : await frontmost();
       session = {
         window: target.window,
         pid: window.pid,
-        previous: back && { pid: back.pid, app: back.app_name, window: back.id },
+        previous: handed ?? (back && { pid: back.pid, app: back.app_name, window: back.id }),
       };
       frame(target, window.bounds);
       await run(['focus-window', ...scope(target)]);
@@ -476,7 +476,7 @@ export function createComputerHelper({
     },
     locate: async (request) => {
       const { bundle, name, program } = await locate(request);
-      return { bundle, name, ...(program ? { program } : {}) };
+      return { bundle, name, program };
     },
     open: async (request) => {
       if (platform === 'darwin')
@@ -492,11 +492,14 @@ export function createComputerHelper({
             : resolve(),
         ),
       );
-      for (let attempt = 0; attempt < 20; attempt++) {
-        const { apps } = await run(['list-apps']);
-        const started = apps.find((app) => app.bundle_id === found.bundle);
-        if (started) return { pid: started.pid };
+      for (let attempt = 0; attempt < 8; attempt++) {
         await delay(250);
+        for (const app of (await run(['list-apps'])).apps)
+          if (
+            app.bundle_id === found.bundle ||
+            (await readlink(`/proc/${app.pid}/exe`).then(basename, () => '')) === found.program
+          )
+            return { pid: app.pid };
       }
       return {};
     },
@@ -537,7 +540,10 @@ export function createComputerHelper({
         input: String(request.text ?? ''),
       }),
     type,
-    key: (request) => act(request, ['press', check(request.keys, keys, 'keys'), ...scope(request)]),
+    key: (request) =>
+      act(request, ['press', check(request.keys, keys, 'keys'), ...scope(request)], {
+        front: platform === 'win32',
+      }),
   };
 
   async function menuBar() {
@@ -561,31 +567,30 @@ export function createComputerHelper({
     if (platform === 'win32') {
       const name = check(request.bundle, programName, 'program name').replace(/\.exe$/i, '');
       const root = process.env.SystemRoot ?? 'C:\\Windows';
-      const candidates = [join(root, 'System32', `${name}.exe`), join(root, `${name}.exe`)];
-      for (const hive of ['HKCU', 'HKLM'])
-        candidates.push(
-          (
-            await output('reg', [
-              'query',
-              `${hive}\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${name}.exe`,
-              '/ve',
-            ])
-          )
-            .match(/REG_(?:EXPAND_)?SZ\s+"?([^"\r\n]+?)"?\s*$/m)?.[1]
-            ?.replace(/%([^%]+)%/g, (whole, variable) => process.env[variable] ?? whole) ?? '',
+      const registered = () =>
+        Promise.all(
+          ['HKCU', 'HKLM'].map(async (hive) =>
+            (
+              await output('reg', [
+                'query',
+                `${hive}\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${name}.exe`,
+                '/ve',
+              ])
+            )
+              .match(/REG_(?:EXPAND_)?SZ\s+"?([^"\r\n]+?)"?\s*$/m)?.[1]
+              ?.replace(/%([^%]+)%/g, (whole, variable) => process.env[variable] ?? whole),
+          ),
         );
-      for (const path of candidates.filter(Boolean)) {
-        if (
-          !(await access(path).then(
-            () => true,
-            () => false,
-          ))
-        )
-          continue;
-        if (!(await windowsProgram(path)))
-          throw new Error(`${name} is not a windowed app, so Nod never starts it.`);
-        return { bundle: `${name}.exe`, name, path, program: basename(path) };
-      }
+      for (const paths of [
+        async () => [join(root, 'System32', `${name}.exe`), join(root, `${name}.exe`)],
+        registered,
+      ])
+        for (const path of (await paths()).filter(Boolean)) {
+          const windowed = await windowsProgram(path);
+          if (windowed === undefined) continue;
+          if (!windowed) throw new Error(`${name} is not a windowed app, so Nod never starts it.`);
+          return { bundle: `${name}.exe`, name, path, program: basename(path) };
+        }
       throw new Error(`No program named ${name} is installed. Use the name of its .exe file.`);
     }
     if (sandboxed)

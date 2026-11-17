@@ -21,7 +21,7 @@ import {
   utilityProcess,
 } from 'electron';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { appendFile, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
@@ -146,7 +146,7 @@ const computerHelper = createComputerHelper({
         )
       : undefined,
   home: join(profileRoot, 'computer-use'),
-  sandboxed: process.platform === 'linux' && existsSync('/.flatpak-info'),
+  sandboxed: process.platform === 'linux' && Boolean(process.env.FLATPAK_ID),
 });
 const freshLocalProfile = await stat(profileRoot).then(
   () => false,

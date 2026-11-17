@@ -151,15 +151,12 @@ export function systemShortcut(keys: string, platform: string = process.platform
   return parts.includes('cmd') || key === 'cmd' || otherSystemKeys.has(combo);
 }
 
+function leaf(id: string) {
+  return id.trim().toLowerCase().split(/[\\/]/).at(-1) ?? '';
+}
+
 export function appKey(id: string) {
-  return (
-    id
-      .trim()
-      .toLowerCase()
-      .split(/[\\/]/)
-      .at(-1)
-      ?.replace(/\.(exe|desktop)$/, '') ?? ''
-  );
+  return leaf(id).replace(/\.(exe|desktop)$/, '');
 }
 
 const blockedApps: Array<[RegExp, string]> = [
@@ -235,7 +232,7 @@ export function isComputerAction(action: string): action is Action {
 }
 
 export function computerAppRule(bundleId: string, keptOut: string[] = []) {
-  const names = [appKey(bundleId), bundleId.trim().toLowerCase().split(/[\\/]/).at(-1) ?? ''];
+  const names = [appKey(bundleId), leaf(bundleId)];
   const matches = (pattern: RegExp) => names.some((name) => pattern.test(name));
   if (keptOut.some((entry) => names.includes(appKey(entry))))
     return { kind: 'blocked' as const, why: 'an app the owner keeps Nod out of' };
@@ -481,7 +478,7 @@ export function createComputerUse(
         app: {
           bundle: app.bundle,
           name: app.name,
-          ...(app.program ? { program: app.program } : {}),
+          program: app.program,
         },
       };
     }
@@ -579,7 +576,7 @@ export function createComputerUse(
   function control(app: App, prepared: ComputerPrepared, node: Node, menu = false): Control {
     return {
       bundle: app.bundle,
-      ...(app.program ? { program: app.program } : {}),
+      program: app.program,
       app: app.name,
       window: String(prepared.windowTitle ?? ''),
       ...(prepared.window ? { windowId: String(prepared.window) } : {}),
@@ -776,7 +773,6 @@ export function createComputerUse(
     return {
       available: Boolean(desktop),
       platform,
-      experimental: !mac,
       enabled,
       keptOut,
       permissions: {

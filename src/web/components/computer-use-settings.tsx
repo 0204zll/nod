@@ -8,7 +8,6 @@ type Permission = 'granted' | 'denied' | 'not_required' | 'unknown';
 type Status = {
   available: boolean;
   platform: string;
-  experimental: boolean;
   enabled: boolean;
   keptOut: string[];
   permissions: { accessibility: Permission; screen: Permission; ready: boolean };
@@ -78,8 +77,7 @@ export function ComputerUseSettings() {
           />
         </div>
         <p className="field-hint">
-          {data.experimental &&
-            'Experimental on this system: it hasn’t been tested on many computers yet. '}
+          {!mac && 'Experimental on this system: it hasn’t been tested on many computers yet. '}
           Nod opens an app only when your request names it or needs it, and asks before a step that
           sends, saves over, deletes or buys anything. Browsers and code editors stay view-only;
           terminals, system settings, {fileManager} and password managers are never used.
@@ -116,13 +114,15 @@ export function ComputerUseSettings() {
             </div>
             <p className="field-hint">
               {permissionText[which].hint}
-              {mac &&
-                data.permissions[which] !== 'granted' &&
-                ' macOS opens System Settings, Privacy & Security; turn on Nod there, then come back.'}
-              {mac &&
-                data.permissions[which] !== 'granted' &&
-                which === 'screen' &&
-                ' If you already turned it on, quit and reopen Nod; macOS applies it only after a restart.'}
+              {mac && data.permissions[which] !== 'granted' && (
+                <>
+                  {
+                    ' macOS opens System Settings, Privacy & Security; turn on Nod there, then come back.'
+                  }
+                  {which === 'screen' &&
+                    ' If you already turned it on, quit and reopen Nod; macOS applies it only after a restart.'}
+                </>
+              )}
             </p>
           </section>
         ))}
