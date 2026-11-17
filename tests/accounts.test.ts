@@ -958,6 +958,46 @@ test('trust decisions select only owner evidence and keep reply evidence separat
     ['Look at the budget folder', undefined],
   ] as const)
     assert.equal(trustBasis({ run: true, because }, scheduled)?.kind, kind);
+  const informal = withOwnerIds(
+    { userMessages: [{ at: '2026-11-03T09:00:00Z', text: 'clica no icone de lapis e salva' }] },
+    ['owner-message'],
+  );
+  for (const [because, kind] of [
+    ['…clica no icone de lapis', 'message'],
+    ['clica no ícone de lápis', 'message'],
+    ['clica no ícone … salva', undefined],
+    ['apaga o ícone', undefined],
+  ] as const)
+    assert.equal(trustBasis({ run: true, because }, informal)?.kind, kind, because);
+  const conditional = withOwnerIds(
+    { userMessages: [{ at: '2026-11-03T09:00:00Z', text: 'send it if x ≠ 1' }] },
+    ['owner-message'],
+  );
+  for (const [because, kind] of [
+    ['send it if x ≠ 1', 'message'],
+    ['send it if x = 1', undefined],
+  ] as const)
+    assert.equal(trustBasis({ run: true, because }, conditional)?.kind, kind, because);
+  const recipient = withOwnerIds(
+    {
+      userMessages: [
+        {
+          at: '2026-11-03T09:00:00Z',
+          text: 'manda o relatorio para lena@example.test e publica em docs.example.test/relatorio',
+        },
+        { at: '2026-11-03T09:01:00Z', text: 'avisa cafe.example.test, ação:sim' },
+      ],
+    },
+    ['owner-message', 'owner-reply'],
+  );
+  for (const [because, kind] of [
+    ['manda o relatório para lena@example.test', 'message'],
+    ['manda o relatorio para lena@exämple.test', undefined],
+    ['publica em docs.exämple.test/relatorio', undefined],
+    ['avisa café.example.test', undefined],
+    ['acao:sim', 'message'],
+  ] as const)
+    assert.equal(trustBasis({ run: true, because }, recipient)?.kind, kind, because);
   assert.equal(
     trustDecision(scheduled).question.choices.some(({ value }) =>
       String(value).startsWith('message:'),
