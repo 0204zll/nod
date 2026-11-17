@@ -513,7 +513,7 @@ test('model checks fit the output limit of the selected text model', async (t) =
           );
         if (kind === 'google') {
           const thinking = body.generationConfig?.thinkingConfig?.thinkingBudget;
-          if (thinking > 0) assert.ok(thinking <= body.max_tokens - 1024);
+          if (text.effort === 'high') assert.ok(thinking > 0 && thinking <= body.max_tokens - 1024);
           return new Response(
             `data: ${JSON.stringify({
               candidates: [
