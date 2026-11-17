@@ -40,6 +40,8 @@ Linux bundles include the runtime pack. The build allows at most two parts, each
 
 Desktop builds include the server source, built web files, production dependencies, required runtime files, and licenses. The server runs TypeScript through `tsx`.
 
+Mac release jobs install optional dependencies for their target CPU and ARM64. Intel jobs use x64 Node through Rosetta on Apple silicon runners. Bun selects its native ARM64 binary there, so both CPU variants must be available during installation. The packaged app still uses its target CPU.
+
 Builds exclude frontend source, duplicate public files, lockfiles, development package settings, source maps, and type declarations. Dependency tests, examples, build scripts, and unused TypeScript sources are also excluded. Files that a package declares as runtime entry points stay in the bundle. Speech source archives stay with their licenses.
 
 Packaged windows disable DevTools. The production menu excludes developer tools and force reload. It keeps standard reload, zoom, fullscreen, and onboarding replay. Source runs keep the development controls.
