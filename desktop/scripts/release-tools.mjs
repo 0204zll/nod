@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash, X509Certificate } from 'node:crypto';
-import { mkdtemp, open, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, open, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -25,6 +25,21 @@ export async function hardenElectron(application) {
 }
 
 const directory = dirname(fileURLToPath(import.meta.url));
+
+export async function copyAgentDesktop(application) {
+  const desktop = join(directory, '..');
+  const helpers = join(application, 'Contents', 'Helpers');
+  await mkdir(helpers, { recursive: true });
+  for (const [source, target] of [
+    [`agent-desktop-darwin-${process.arch}`, 'agent-desktop'],
+    [`agent-desktop-macos-helper-darwin-${process.arch}`, 'agent-desktop-macos-helper'],
+  ])
+    await cp(join(desktop, 'node_modules', 'agent-desktop', 'bin', source), join(helpers, target));
+  await cp(
+    join(desktop, 'licenses', 'agent-desktop.md'),
+    join(application, 'Contents', 'Resources', 'licenses', 'agent-desktop.md'),
+  );
+}
 export function desktopBuildOptions(env = process.env) {
   const tracesToken = env.NOD_TRACES_TOKEN;
   if (tracesToken && !/^[A-Za-z0-9_-]{32,128}$/.test(tracesToken))
@@ -350,7 +365,7 @@ export async function signApplication(application, electronVersion, configuratio
           configuration.mode === 'developer-id' ? 'http://timestamp.apple.com/ts01' : 'none',
         ...(path.endsWith('/limactl')
           ? { entitlements: join(directory, 'lima-entitlements.plist') }
-          : path.endsWith('/docker')
+          : path.endsWith('/docker') || path.includes('/Contents/Helpers/agent-desktop')
             ? { entitlements: join(directory, 'empty-entitlements.plist') }
             : configuration.mode === 'self-signed'
               ? {

@@ -134,6 +134,7 @@ export interface RuntimeContext {
   account?: RuntimeAccount;
   connectedApps?: ConnectedApp[];
   localFiles?: boolean;
+  computerUse?: boolean;
   mcpServers?: ConnectedMcpServer[];
   currentMessageId?: string;
   automatic?: boolean;

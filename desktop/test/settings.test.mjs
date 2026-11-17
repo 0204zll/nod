@@ -43,6 +43,7 @@ import {
 import { createDesktopAnalytics } from '../main/analytics.mjs';
 import { createAppPreferencesStore } from '../main/app-preferences.mjs';
 import { createChatReadCursorStore } from '../main/chat-read-cursors.mjs';
+import { createComputerHelper } from '../main/computer-helper.mjs';
 import { createReadinessNotice, createUnreadBadge, isQuietTime } from '../main/notifications.mjs';
 import { saveArtifactDownload } from '../main/downloads.mjs';
 import { createArtifactFiles } from '../main/artifact-files.mjs';
@@ -715,6 +716,8 @@ async function runningDesktop(
       }),
     }),
     createChatReadCursorStore,
+    createComputerHelper: () => ({ request: async () => ({}) }),
+    createComputerOverlay: () => ({}),
     createArtifactFiles: createFiles,
     saveArtifactDownload,
     createReadinessNotice,
@@ -8496,4 +8499,198 @@ test('legacy account completion migrates to device progress without changing key
   assert.equal(Object.hasOwn(migrated, 'onboardingCompleted'), false);
   assert.deepEqual(migrated.secrets, value.secrets);
   assert.deepEqual(await f.reopen().environment(), environment);
+});
+
+async function fakeDesktop(t, answers) {
+  const root = await mkdtemp(join(tmpdir(), 'nod-desktop-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const log = join(root, 'log.jsonl');
+  const binary = join(root, 'agent-desktop');
+  await writeFile(
+    binary,
+    `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const input = fs.readFileSync(0, 'utf8');
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, input }) + '\\n');
+const answers = ${JSON.stringify(answers)};
+const key = Object.keys(answers).find((prefix) => args.join(' ').startsWith(prefix));
+process.stdout.write(JSON.stringify(key ? answers[key] : { ok: true, data: {} }));
+`,
+    { mode: 0o755 },
+  );
+  const events = [];
+  let clipboard = 'owner copied this';
+  const presence = {
+    ownPid: -1,
+    idle: [5],
+    idleSeconds: () => (presence.idle.length > 1 ? presence.idle.shift() : presence.idle[0]),
+    show: (state) =>
+      events.push(state.background ? 'background' : state.waiting ? 'waiting' : 'shown'),
+    hide: () => events.push('hidden'),
+    focusSelf: () => events.push('focus Nod'),
+    clipboard: {
+      save: () => clipboard,
+      write: (text) => {
+        clipboard = text;
+      },
+      restore: (saved) => {
+        clipboard = saved;
+      },
+    },
+  };
+  const helper = createComputerHelper({
+    binary,
+    home: join(root, 'home'),
+    requestPermission: async () => {},
+    presence,
+    ownerWaitMs: 300,
+    lingerMs: 20,
+    backgroundLingerMs: 20,
+  });
+  return {
+    helper,
+    presence,
+    events,
+    clipboard: () => clipboard,
+    calls: async () =>
+      (await readFile(log, 'utf8').catch(() => ''))
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line).args.join(' '))
+        .filter((call) => !call.startsWith('list-windows')),
+  };
+}
+
+const mailWindow = {
+  ok: true,
+  data: [
+    {
+      id: 'w-1',
+      pid: process.pid,
+      app_name: 'Mail',
+      is_focused: true,
+      bounds: { x: 10, y: 10, width: 400, height: 300 },
+    },
+  ],
+};
+const refused = (code, message) => ({ ok: false, error: { code, message } });
+
+test('computer use takes focus only after a refusal before delivery, and only while the owner pauses', async (t) => {
+  const desktop = await fakeDesktop(t, {
+    'list-windows': mailWindow,
+    'press cmd+n --app Mail --window-id w-1 --headed': { ok: true, data: {} },
+    'press cmd+n': refused(
+      'STALE_REF',
+      "The named window's exact focus could not be confirmed, so no key was sent",
+    ),
+    'click @s1abcdef:e1': refused(
+      'ACTION_FAILED',
+      'AXPress did not establish a verifiable effect; mutation outcome is uncertain',
+    ),
+  });
+  const key = { op: 'key', keys: 'cmd+n', app: 'Mail', window: 'w-1' };
+  desktop.presence.idle = [0, 0, 5];
+  await desktop.helper.request(key);
+  assert.deepEqual(await desktop.calls(), [
+    'press cmd+n --app Mail --window-id w-1',
+    'focus-window --app Mail --window-id w-1',
+    'press cmd+n --app Mail --window-id w-1 --headed',
+  ]);
+  assert.deepEqual(desktop.events.slice(0, 3), ['background', 'waiting', 'shown']);
+  await waitFor(() => assert.ok(desktop.events.includes('hidden')), { interval: 10 });
+
+  await assert.rejects(
+    desktop.helper.request({
+      op: 'press',
+      ref: '@s1abcdef:e1',
+      app: 'Mail',
+      window: 'w-1',
+      role: 'button',
+    }),
+    /ACTION_FAILED/,
+  );
+  assert.equal((await desktop.calls()).filter((call) => call.startsWith('click')).length, 1);
+
+  desktop.presence.idle = [0];
+  const before = (await desktop.calls()).length;
+  await assert.rejects(desktop.helper.request(key), /OWNER_ACTIVE/);
+  assert.deepEqual((await desktop.calls()).slice(before), [
+    'press cmd+n --app Mail --window-id w-1',
+  ]);
+});
+
+test('computer use Stop ends only its own step, and no step starts after its deadline', async (t) => {
+  const desktop = await fakeDesktop(t, {
+    'list-windows': mailWindow,
+    'press cmd+n --app Mail --window-id w-1 --headed': { ok: true, data: {} },
+    'press cmd+n': refused('STALE_REF', "The named window's exact focus could not be confirmed"),
+  });
+  desktop.presence.idle = [0];
+  const pending = desktop.helper.request({
+    op: 'key',
+    keys: 'cmd+n',
+    app: 'Mail',
+    window: 'w-1',
+    step: 'mine',
+  });
+  await waitFor(() => assert.ok(desktop.events.includes('waiting')), { interval: 10 });
+  await desktop.helper.request({ op: 'cancel', step: 'another' });
+  const settled = await Promise.race([
+    pending.then(
+      () => 'done',
+      () => 'failed',
+    ),
+    new Promise((resolve) => setTimeout(() => resolve('waiting'), 100)),
+  ]);
+  assert.equal(settled, 'waiting');
+  await desktop.helper.request({ op: 'cancel', step: 'mine' });
+  await assert.rejects(pending, /STOPPED/);
+  assert.deepEqual(await desktop.calls(), ['press cmd+n --app Mail --window-id w-1']);
+  assert.equal(desktop.events.at(-1), 'hidden');
+
+  await assert.rejects(
+    desktop.helper.request({
+      op: 'press',
+      ref: '@s1abcdef:e1',
+      app: 'Mail',
+      window: 'w-1',
+      role: 'button',
+      deadline: Date.now() - 1,
+    }),
+    /STOPPED/,
+  );
+  assert.deepEqual(await desktop.calls(), ['press cmd+n --app Mail --window-id w-1']);
+});
+
+test('computer use pastes into a message body in front and restores the owner clipboard', async (t) => {
+  const desktop = await fakeDesktop(t, { 'list-windows': mailWindow });
+  await desktop.helper.request({
+    op: 'type',
+    ref: '@s1abcdef:e1',
+    app: 'Mail',
+    window: 'w-1',
+    role: 'scrollarea',
+    text: 'Hi Toni',
+  });
+  assert.deepEqual(await desktop.calls(), [
+    'focus-window --app Mail --window-id w-1',
+    'focus @s1abcdef:e1',
+    'press cmd+v --app Mail --window-id w-1 --headed',
+  ]);
+  assert.equal(desktop.clipboard(), 'owner copied this');
+});
+
+test('computer use shows Nod working in an app during background steps, then hides it', async (t) => {
+  const desktop = await fakeDesktop(t, { 'list-windows': mailWindow });
+  await desktop.helper.request({
+    op: 'press',
+    ref: '@s1abcdef:e1',
+    app: 'Mail',
+    window: 'w-1',
+    role: 'button',
+  });
+  assert.deepEqual(await desktop.calls(), ['click @s1abcdef:e1']);
+  assert.deepEqual(desktop.events, ['background']);
+  await waitFor(() => assert.ok(desktop.events.includes('hidden')), { interval: 10 });
 });

@@ -41,6 +41,7 @@ import {
 import { runProcess, serviceEnvironment } from '../src/providers/process.ts';
 import { prepareLocalDirectories } from '../scripts/local-database.ts';
 import { createLocalFiles, localFileRules } from '../src/server/local-files.ts';
+import { computerAppRule, createComputerUse } from '../src/server/computer-use.ts';
 import type { Pool } from 'pg';
 
 if (process.env.NOD_TEST_WORKSPACE_IMAGE)
@@ -1415,4 +1416,280 @@ test('local files stay in home, skip secrets and kept-out folders, and never ove
   } finally {
     await rm(base, { recursive: true, force: true });
   }
+});
+
+test('computer use refuses blocked apps, keeps browsers view-only and acts only on refs Nod showed', async () => {
+  for (const bundle of [
+    'com.apple.Terminal',
+    'com.googlecode.iterm2',
+    'com.apple.finder',
+    'com.apple.systempreferences',
+    'com.1password.1password',
+    'dev.nod.desktop',
+  ])
+    assert.equal(computerAppRule(bundle).kind, 'blocked', bundle);
+  for (const bundle of ['com.google.Chrome', 'com.apple.Safari', 'com.microsoft.VSCode'])
+    assert.equal(computerAppRule(bundle).kind, 'view', bundle);
+  assert.equal(computerAppRule('com.apple.iWork.Numbers').kind, 'use');
+  assert.equal(
+    computerAppRule('com.apple.iWork.Numbers', ['com.apple.iWork.Numbers']).kind,
+    'blocked',
+  );
+
+  let source = 'user';
+  let proactive = false;
+  let root = 'root-turn';
+  const pool = {
+    query: async (sql: string) => {
+      if (sql.startsWith('SELECT computer_use'))
+        return { rows: [{ computer_use: true, computer_keep_out: [] }] };
+      if (sql.startsWith('WITH RECURSIVE'))
+        return { rows: [{ id: root, source, message_id: 'message', proactive }] };
+      assert.fail(`Unexpected query: ${sql}`);
+    },
+  } as unknown as Pool;
+  const calls: Array<Record<string, unknown>> = [];
+  const apps = [
+    {
+      pid: 11,
+      bundle: 'com.apple.TextEdit',
+      name: 'TextEdit',
+      windows: [{ id: 'w-1', title: 'Draft' }],
+    },
+    {
+      pid: 12,
+      bundle: 'com.google.Chrome',
+      name: 'Chrome',
+      windows: [{ id: 'w-2', title: 'Inbox' }],
+    },
+    {
+      pid: 13,
+      bundle: 'com.apple.Terminal',
+      name: 'Terminal',
+      windows: [{ id: 'w-3', title: 'zsh' }],
+    },
+  ];
+  const window = {
+    role: 'window',
+    name: 'Draft',
+    children: [
+      { role: 'button', name: 'Send', ref_id: '@sdraft01:e1', available_actions: ['Click'] },
+      { role: 'textfield', name: 'Subject', value: 'Hi', ref_id: '@sdraft01:e2' },
+      { role: 'textfield', ref_id: '@sdraft01:e3', states: ['secure', 'focused'], value: null },
+      { role: 'securetextfield', name: 'PIN', ref_id: '@sdraft01:e4' },
+    ],
+  };
+  const menuBar = {
+    role: 'menu',
+    children: [
+      {
+        role: 'menuitem',
+        name: 'Apple',
+        children: [{ role: 'menuitem', name: 'Restart…', ref_id: '@smenu001:e1' }],
+      },
+      {
+        role: 'menuitem',
+        name: 'TextEdit',
+        children: [{ role: 'menuitem', name: 'Services', ref_id: '@smenu001:e3' }],
+      },
+      {
+        role: 'menuitem',
+        name: 'File',
+        children: [{ role: 'menuitem', name: 'New', ref_id: '@smenu001:e2' }],
+      },
+    ],
+  };
+  const computer = createComputerUse(pool, 'owner', {
+    desktop: {
+      request: async (request) => {
+        calls.push(request);
+        if (request.op === 'apps') return { apps };
+        if (request.op === 'locate') {
+          const found = apps.find((app) => app.bundle === request.bundle);
+          if (!found) throw new Error('No app with that bundle ID is installed.');
+          return { bundle: found.bundle, name: found.name };
+        }
+        if (request.op === 'snapshot')
+          return {
+            tree: request.menu
+              ? menuBar
+              : request.app === 'Chrome'
+                ? {
+                    role: 'window',
+                    children: [{ role: 'button', name: 'Compose', ref_id: '@schrome1:e1' }],
+                  }
+                : window,
+          };
+        if (request.op === 'screenshot') return { image: 'synthetic' };
+        if (request.op === 'find')
+          return {
+            matches: [
+              { role: 'textfield', name: 'Message to Ada', ref_id: '@sfind001:e1', value: '' },
+              { role: 'textfield', name: 'Password', ref_id: '@sfind001:e2', states: ['secure'] },
+            ],
+          };
+        return { disposition: { delivery: 'delivered_verified' } };
+      },
+    },
+  });
+  const turn = { turnId: 'turn', threadId: 'thread' };
+
+  source = 'event';
+  await assert.rejects(computer.prepare(turn, 'COMPUTER_APPS', {}), /work the owner started/);
+  source = 'user';
+  proactive = true;
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: 11 }),
+    /work the owner started/,
+  );
+  proactive = false;
+  assert.equal(calls.length, 0);
+
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_OPEN', { bundle: 'com.apple.Terminal' }),
+    /never uses it/,
+  );
+  await assert.rejects(computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: 11 }), /open \{bundle/);
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' }),
+    /no snapshot with that ref/,
+  );
+  await computer.execute(
+    turn,
+    'COMPUTER_OPEN',
+    await computer.prepare(turn, 'COMPUTER_OPEN', { bundle: 'com.apple.TextEdit' }),
+  );
+  assert.ok(!calls.some((call) => call.op === 'open'));
+  const listed = (await computer.execute(turn, 'COMPUTER_APPS', {})) as {
+    apps: Array<Record<string, unknown>>;
+  };
+  assert.deepEqual(
+    listed.apps.find((app) => app.pid === 13),
+    { pid: 13, bundle: 'com.apple.Terminal', name: 'Terminal', blocked: 'a terminal' },
+  );
+  assert.equal(listed.apps.find((app) => app.pid === 12)?.windows, undefined);
+
+  const snapshot = (await computer.execute(
+    turn,
+    'COMPUTER_SNAPSHOT',
+    await computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: 11 }),
+  )) as { tree: string };
+  assert.match(snapshot.tree, /button "Send" @sdraft01:e1/);
+  assert.match(snapshot.tree, /\[password, hidden\]/);
+  assert.doesNotMatch(snapshot.tree, /@sdraft01:e3/);
+  const menu = (await computer.execute(
+    turn,
+    'COMPUTER_SNAPSHOT',
+    await computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: 11, menu: true }),
+  )) as { tree: string };
+  assert.doesNotMatch(menu.tree, /Restart/);
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@smenu001:e1' }),
+    /no snapshot with that ref/,
+  );
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_SET_VALUE', { ref: '@sdraft01:e3', text: 'x' }),
+    /no snapshot with that ref/,
+  );
+  await assert.rejects(
+    computer.execute(
+      turn,
+      'COMPUTER_SCREENSHOT',
+      await computer.prepare(turn, 'COMPUTER_SCREENSHOT', { pid: 11 }),
+    ),
+    /password field has focus/,
+  );
+
+  const press = await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' });
+  assert.equal(computer.needsCheck('COMPUTER_PRESS', press), true);
+  assert.deepEqual(computer.checked('COMPUTER_PRESS', press), {
+    app: { bundle: 'com.apple.TextEdit', name: 'TextEdit' },
+    control: { role: 'button', name: 'Send', window: 'Draft' },
+    step: 'press',
+  });
+  await computer.execute(turn, 'COMPUTER_PRESS', press);
+  assert.deepEqual(calls.at(-1), {
+    op: 'press',
+    ref: '@sdraft01:e1',
+    app: 'TextEdit',
+    role: 'button',
+    window: 'w-1',
+  });
+  const found = (await computer.execute(
+    turn,
+    'COMPUTER_FIND',
+    await computer.prepare(turn, 'COMPUTER_FIND', { pid: 11, role: 'textfield' }),
+  )) as { matches: string };
+  assert.match(found.matches, /textfield "Message to Ada" @sfind001:e1/);
+  assert.doesNotMatch(found.matches, /@sfind001:e2/);
+  assert.deepEqual(calls.at(-1), { op: 'find', app: 'TextEdit', window: 'w-1', role: 'textfield' });
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_TYPE', { ref: '@sfind001:e2', text: 'x' }),
+    /no snapshot with that ref/,
+  );
+  await computer.prepare(turn, 'COMPUTER_TYPE', { ref: '@sfind001:e1', text: 'Hi Ada' });
+  const typed = await computer.prepare(turn, 'COMPUTER_SET_VALUE', {
+    ref: '@sdraft01:e2',
+    text: 'Hello',
+  });
+  assert.equal(computer.needsCheck('COMPUTER_SET_VALUE', typed), false);
+  const line = await computer.prepare(turn, 'COMPUTER_TYPE', {
+    ref: '@sdraft01:e2',
+    text: 'Hello\n',
+  });
+  assert.equal(computer.needsCheck('COMPUTER_TYPE', line), true);
+
+  await computer.execute(
+    turn,
+    'COMPUTER_OPEN',
+    await computer.prepare(turn, 'COMPUTER_OPEN', { bundle: 'com.google.Chrome' }),
+  );
+  await computer.execute(
+    turn,
+    'COMPUTER_SNAPSHOT',
+    await computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: 12 }),
+  );
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_KEY', { pid: 12, keys: 'cmd+n' }),
+    /can only look at it/,
+  );
+
+  assert.doesNotMatch(menu.tree, /Services/);
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: 11, ref: '@smenu001:e3' }),
+    /no snapshot with that ref/,
+  );
+  assert.doesNotMatch(snapshot.tree, /@sdraft01:e4/);
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_KEY', { pid: 11, keys: 'Command+Space' }),
+    /system shortcut/,
+  );
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_KEY', { pid: 11, keys: 'cmd+opt+escape' }),
+    /system shortcut/,
+  );
+  const chromeSnapshot = (await computer.execute(
+    turn,
+    'COMPUTER_SNAPSHOT',
+    await computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: 12 }),
+  )) as { tree: string };
+  const chromeRef = chromeSnapshot.tree.match(/(@[a-z0-9]+:e\d+)/)![1]!;
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: 11, ref: chromeRef }),
+    /not part of TextEdit/,
+  );
+  const pressed = await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' });
+  root = 'other-root';
+  await assert.rejects(
+    computer.execute(turn, 'COMPUTER_PRESS', pressed),
+    (error: Error & { notRun?: boolean }) => error.notRun === true,
+  );
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: 11 }),
+    /hasn't opened TextEdit/,
+  );
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' }),
+    /no snapshot with that ref/,
+  );
 });

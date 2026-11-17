@@ -7104,7 +7104,7 @@ test('analytics follow visible Settings sections, Apps tabs and the Scheduled pa
       const events = event => sent.filter(item => item.event === event);
       const settings = () => events('settings_viewed').map(item => item.properties.tab);
       const tabs = () => events('tab_viewed').map(item => [item.properties.page, item.properties.tab]);
-      const sectionLabels = ['General', 'Notifications', 'Models', 'Voice & audio', 'Memory', 'Privacy & data'];
+      const sectionLabels = ['General', 'Notifications', 'Models', 'Voice & audio', 'Memory', 'Computer use', 'Privacy & data'];
       try {
         await act(async () => root.render(createElement(AccountSettings, {
           account, open: true, initialTab: 'General', openRequest: 0, onOpenChange() {},
@@ -7114,9 +7114,9 @@ test('analytics follow visible Settings sections, Apps tabs and the Scheduled pa
         const navigation = [...document.querySelectorAll('.settings-nav-item')];
         assert.deepEqual(navigation.map(item => item.textContent), sectionLabels);
         for (const item of navigation.slice(1)) await act(async () => item.click());
-        assert.deepEqual(settings(), ['general', 'notifications', 'models', 'voice', 'memory', 'privacy']);
+        assert.deepEqual(settings(), ['general', 'notifications', 'models', 'voice', 'memory', 'computer', 'privacy']);
         await act(async () => navigation.at(-1).click());
-        assert.equal(settings().length, 6);
+        assert.equal(settings().length, 7);
         const scroller = document.querySelector('.settings-scroll');
         Object.defineProperties(scroller, { scrollHeight: { value: 2000 }, clientHeight: { value: 400 } });
         document.querySelectorAll('.settings-category > h2').forEach((heading, index) => {
@@ -7134,7 +7134,7 @@ test('analytics follow visible Settings sections, Apps tabs and the Scheduled pa
         consent(true);
         await act(async () => navigation[3].click());
         assert.equal(settings().at(-1), 'voice');
-        for (const path of ['/settings', '/settings/notifications', '/settings/models', '/settings/voice', '/settings/memory', '/settings/privacy']) {
+        for (const path of ['/settings', '/settings/notifications', '/settings/models', '/settings/voice', '/settings/memory', '/settings/computer-use', '/settings/privacy']) {
           window.history.replaceState(null, '', path);
           capturePageview(path);
           assert.equal(events('$pageview').at(-1).properties.route, '/settings');

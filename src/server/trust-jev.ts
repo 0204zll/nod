@@ -6,7 +6,11 @@ import type {
   DecisionRequest,
   DecisionSelection,
 } from '../ports/decisions.ts';
-import { trustDecision, type TrustWords } from './trust-basis.ts';
+import {
+  opensContent as opensOwnerContent,
+  trustDecision,
+  type TrustWords,
+} from './trust-basis.ts';
 import { trustFacts, trustTimeZone } from './trust-facts.ts';
 import { jevPolicy } from './trust-jev-policy.ts';
 import model from './trust-jev-model.json' with { type: 'json' };
@@ -244,7 +248,7 @@ export async function checkJevTrust(
   const opensContent =
     (action?.name === 'NOD_browser' &&
       (action.arguments?.step === 'upload' || action.arguments?.command?.action === 'upload')) ||
-    ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT'].includes(action?.name ?? '');
+    opensOwnerContent(action?.name);
   const effect = first.additional.effect?.choice;
   if (typeof effect !== 'string' || !(effect in jevPolicy.effect.choices))
     throw new Error('The trust effects are incomplete.');

@@ -76,6 +76,7 @@ const inlineChars = 40_000;
 const imageBudget = 16 * 1024 * 1024;
 const imageTypes = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const parentTools = new Set([
+  'computer',
   'sign_in',
   'pay',
   'browser_session',
@@ -98,6 +99,7 @@ const parallelTools = new Set([
 const orderedTools = new Set([
   'apps',
   'files',
+  'computer',
   'manage_personal_context',
   'skills',
   'read_source',
@@ -119,6 +121,7 @@ const delimitedTools = new Set([
   'proactive_issue',
   'apps',
   'files',
+  'computer',
   'delegate',
   'browser',
   'browser_session',
@@ -403,6 +406,7 @@ export function createAgentRuntime(dependencies: {
     const appName = (name: string, params: unknown) => {
       if (name.startsWith('mcp__')) return servers.get(name.split('__')[1]);
       if (name === 'files') return 'local files';
+      if (name === 'computer') return 'computer use';
       if (name !== 'apps') return undefined;
       const { action, args } = (params ?? {}) as {
         action?: unknown;

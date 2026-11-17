@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { computerInternalArgs, isComputerAction } from './computer-use.ts';
 import { z } from 'zod';
 import type { ModelReview } from '../ports/decisions.ts';
 import type { ApprovalDescription, ApprovalPresentation } from './approvals.ts';
@@ -254,6 +255,7 @@ export function createCommunication(options: {
       delete args[key];
       delete details[key];
     }
+    if (isComputerAction(proposal.action)) for (const key of computerInternalArgs) delete args[key];
     if (proposal.action === 'NOD_browser') {
       delete args.target;
       if (args.command && typeof args.command === 'object' && !Array.isArray(args.command)) {

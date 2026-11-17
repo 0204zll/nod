@@ -140,6 +140,7 @@ test(
       { entered(turnId: string): void; wait: Promise<void>; messages: string[] } | undefined;
     const ids: string[] = [];
     const asked = new Set<string>();
+    const desktopSteps: string[] = [];
     const cleared = new Set<string>();
     const ownerWords: string[] = [];
     let decisionsEnabled = true;
@@ -265,7 +266,8 @@ test(
                   !readRequiresConsent &&
                   (Boolean(fileRequest) ||
                     (allowMethodBrowser && words.action?.name === 'NOD_browser') ||
-                    asked.has(words.userMessages?.at(-1)?.text ?? '') ||
+                    (words.action?.name !== 'COMPUTER_PRESS' &&
+                      asked.has(words.userMessages?.at(-1)?.text ?? '')) ||
                     cleared.has(String(words.action?.arguments?.recipient_email)) ||
                     metadataRead);
                 return run
@@ -413,6 +415,29 @@ test(
           },
         },
         localFilesHome: localHome,
+        desktop: {
+          request: async (input: { op: string } & Record<string, unknown>) => {
+            const app = {
+              pid: 41,
+              bundle: 'com.apple.TextEdit',
+              name: 'TextEdit',
+              windows: [{ id: 'w-41', title: 'Notes' }],
+            };
+            if (input.op === 'locate') return { bundle: app.bundle, name: app.name };
+            if (input.op === 'apps') return { apps: [app] };
+            if (input.op === 'permissions') return {};
+            if (input.op === 'snapshot')
+              return {
+                tree: {
+                  role: 'window',
+                  name: 'Notes',
+                  children: [{ role: 'button', name: 'Delete', ref_id: '@snotes01:e7' }],
+                },
+              };
+            desktopSteps.push(input.op);
+            return { disposition: { delivery: 'delivered_verified' } };
+          },
+        },
         trash: {
           ready: async () => true,
           put: (path: string) => rm(path, { recursive: true }),
@@ -3818,6 +3843,58 @@ test(
           assert.equal((await approvalsFor(held))[0].status, 'expired');
           assert.equal(existsSync(heldPath), false);
           assert.equal(await readFile(source, 'utf8'), 'Synthetic local report');
+        },
+      );
+      await t.test(
+        'computer use opens a named app and runs an approved step only after the owner answers',
+        async () => {
+          const send = async (body: Record<string, unknown>) => {
+            for (;;) {
+              const sent = await request('POST', '/api/messages', body);
+              if (sent.statusCode !== 429) return sent;
+              await delay(Number(sent.headers['retry-after'] ?? 1) * 1000);
+            }
+          };
+          const enabled = await request('PATCH', '/api/computer-use', { enabled: true });
+          assert.equal(enabled.statusCode, 200, enabled.body);
+          assert.equal(enabled.json().enabled, true);
+          const text = `Open TextEdit and clear the notes ${randomUUID()}`;
+          asked.add(text);
+          batches.set(text, {
+            subagents: false,
+            sequential: true,
+            calls: [
+              { tool: 'computer', action: 'open', args: { bundle: 'com.apple.TextEdit' } },
+              { tool: 'computer', action: 'snapshot', args: { pid: 41 } },
+              { tool: 'computer', action: 'press', args: { ref: '@snotes01:e7' } },
+            ],
+          });
+          const response = await send({ text });
+          assert.equal(response.statusCode, 200, response.body);
+          const turn = response.json().turnId as string;
+          ids.push(response.json().threadId as string);
+          await waitFor(turn, 'waiting');
+          assert.deepEqual(desktopSteps, []);
+          const [held] = await approvalsFor(turn);
+          assert.equal(held.action, 'COMPUTER_PRESS');
+          assert.equal(held.status, 'pending');
+          assert.deepEqual(held.args.control, {
+            role: 'button',
+            name: 'Delete',
+            window: 'Notes',
+          });
+          const accepted = await send({
+            text: 'Yes',
+            replyToMessageId: held.confirmation_message_id,
+            clientMessageId: randomUUID(),
+            approvalAnswer: { approvalId: held.id, approved: true },
+          });
+          assert.equal(accepted.statusCode, 200, accepted.body);
+          await waitFor(accepted.json().turnId, 'succeeded');
+          assert.equal((await approvalsFor(turn))[0].status, 'completed');
+          assert.deepEqual(desktopSteps, ['press']);
+          const disabled = await request('PATCH', '/api/computer-use', { enabled: false });
+          assert.equal(disabled.json().enabled, false);
         },
       );
       await t.test('shutdown saves usage from the last provider before it returns', async () => {

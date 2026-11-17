@@ -9,6 +9,7 @@ const apps: Record<string, string> = {
   SLACK: 'Slack',
   NOTION: 'Notion',
   LINEAR: 'Linear',
+  COMPUTER: 'Computer use',
 };
 
 export function actionTitle(action: string) {
@@ -366,6 +367,19 @@ export function actionTarget(
         .join(', ');
     if (action === 'NOD_notification_preferences_update')
       return [...new Set(Object.keys(args).map((key) => settingNames[key] ?? key))].join(', ');
+    if (action.startsWith('COMPUTER_')) {
+      const app = (args.app as { name?: unknown } | undefined)?.name;
+      const control = args.control as { role?: unknown; name?: unknown } | undefined;
+      const what =
+        typeof args.keys === 'string'
+          ? args.keys
+          : typeof control?.name === 'string' && control.name
+            ? quoted(control.name)
+            : typeof control?.role === 'string'
+              ? control.role
+              : '';
+      return [what, typeof app === 'string' && `in ${app}`].filter(Boolean).join(' ');
+    }
     if (action.startsWith('LOCAL_FILES_'))
       return listed([
         ...words(args.path),

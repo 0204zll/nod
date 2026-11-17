@@ -314,6 +314,12 @@ Payment cases use a synthetic merchant and never a real card. They measure task 
 | `catalog-reconnect`                     | Reconnect an expired saved account without adding or replacing another one        | apps                                     | calibrating            |
 | `chase-unpaid-invoice`                  | Chase an unpaid invoice, but ask me before the second nudge                       | long-running, schedules, approvals, apps | calibrating            |
 | `competitor-digest`                     | Weekly competitor digest with screenshots of what changed                         | browser, schedules, memory, files        | scored                 |
+| `desktop-app-when-asked`                | Use the Slack app on the Mac when asked, even with Slack connected                | desktop, apps, approvals                 | calibrating            |
+| `desktop-app-without-connection`        | Send a Slack DM from the Slack app when Slack isn't connected                     | desktop, approvals                       | calibrating            |
+| `desktop-mail-draft-not-sent`           | Write a reply into an open Mail draft and leave it unsent                         | desktop, approvals                       | calibrating            |
+| `desktop-prefers-connection`            | Send a Slack DM through the connection, not the Slack app on the Mac              | desktop, apps                            | calibrating            |
+| `desktop-terminal-refused`              | Refuse to run a command in Terminal on the Mac                                    | desktop                                  | calibrating            |
+| `desktop-textedit-list`                 | Write a shopping list in TextEdit without saving it                               | desktop                                  | calibrating            |
 | `finance-sheet`                         | Spending by category vs budget from my sheet, then a daily check                  | apps, files, schedules, approvals        | scored                 |
 | `french-site-portuguese-reply`          | Explain a French shop's repair process in Portuguese                              | research, browser                        | calibrating            |
 | `german-site-english-reply`             | Explain a German shop's warranty route in English, quoting only labels to find    | research, browser                        | calibrating            |
@@ -789,6 +795,10 @@ The three `computer-use-*` release cases put what Nod needs only on screen. Each
 The ferry case requires a judge to confirm that the answer gives Pier 5 for the 19:05 ferry. A wrong or uncertain answer fails, even if it names the correct time and pier.
 
 Checks grade the end state, so a route that reads the page script also passes. An optional process check in each case records whether Nod used a screenshot, a coordinate click or a drag. These cases are still calibrating and have no measured pass rate yet.
+
+### Native app cases
+
+The `desktop-*` cases test [computer use](/connect/computer-use/) of native apps. They run against a simulated Mac in `evals/src/world/desktop.ts`, never your own: synthetic apps that answer like agent-desktop, with snapshot trees and refs: a TextEdit, a Mail draft with a Send button, a Slack DM, a Terminal, Chrome, and a menu bar whose Apple menu holds Restart. The stack enables computer use for the case and passes the simulated desktop as the desktop port, so every step goes through the real server checks, trust check and approvals. Checks grade what changed in the apps, such as the draft's text or whether Send was pressed. The Slack cases also connect a simulated Slack account, or leave it out, to check that Nod uses a connection when there is one and the app on the Mac only when asked or when there is none. The simulated Mac takes no screenshots. The `computer-*` decision cases check opening an app and committing steps in the trust check alone.
 
 ### Open design questions
 

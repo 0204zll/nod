@@ -52,7 +52,9 @@ import { createMailCheck } from './mail-check.ts';
 import type { CredentialKeyStore } from '../ports/key-store.ts';
 import type { PasswordManager } from '../ports/password-manager.ts';
 import type { Trash } from '../ports/trash.ts';
+import type { DesktopControl } from '../ports/desktop.ts';
 import { desktopTrash } from '../providers/trash.ts';
+import { desktopControl } from '../providers/desktop.ts';
 import type { KeepAwake } from '../ports/keep-awake.ts';
 import { desktopKeepAwake } from '../providers/keep-awake.ts';
 import type { MemoryCurator } from '../ports/memory-curator.ts';
@@ -89,6 +91,7 @@ import {
 import { createDiscoveredOAuth } from '../providers/discovered/oauth.ts';
 import { createDiscoveredConnections } from './discovered-connections.ts';
 import { createLocalFiles, isLocalFilesAction } from './local-files.ts';
+import { createComputerUse, isComputerAction } from './computer-use.ts';
 import { createAppGrantVault } from './vault-app-grants.ts';
 import { createDockerWorkspace } from '../providers/docker/index.ts';
 import { createEnvironmentKeyStore } from '../providers/environment/key-store.ts';
@@ -227,6 +230,7 @@ export interface ApplicationAdapters {
   keyStore: CredentialKeyStore;
   passwordManager?: PasswordManager;
   trash?: Trash;
+  desktop?: DesktopControl;
   keepAwake?: KeepAwake;
   localFilesHome?: string;
   memoryCurator?: MemoryCurator;
@@ -501,6 +505,7 @@ export function createDefaultAdapters(
       open: desktopMode ? desktopOnePassword() : forkedOnePassword(env.NOD_APP_VERSION || 'source'),
     }),
     trash: desktopMode ? desktopTrash() : undefined,
+    desktop: desktopMode && process.platform === 'darwin' ? desktopControl() : undefined,
     keepAwake: desktopMode ? desktopKeepAwake() : undefined,
     workspace: createDockerWorkspace({
       container: env.WORKSPACE_CONTAINER || 'nod-workspace',
@@ -1251,6 +1256,7 @@ async function initializeApplication(
   let browserConnections!: Awaited<ReturnType<typeof createBrowserConnections>>;
   const previews = adapters.linkPreviews;
   const icon = previews ? cachedIcons((origin) => previews.icon(origin)) : undefined;
+  const computerUse = createComputerUse(pool, ownerId, { desktop: adapters.desktop });
   const localFiles = createLocalFiles(pool, ownerId, {
     dataRoot,
     home: adapters.localFilesHome,
@@ -1469,6 +1475,21 @@ async function initializeApplication(
           ),
           { notRun: true },
         );
+      if (isComputerAction(action)) {
+        const result = await computerUse.execute(
+          { threadId: provenance.threadId, turnId: provenance.turnId },
+          action,
+          args,
+          provenance.signal,
+        );
+        await ledger.action(
+          provenance.turnId,
+          action,
+          provenance.basis ?? { kind: 'approved' },
+          actionTarget(action, args, provenance.details),
+        );
+        return result;
+      }
       const turnLock = provenance.signal
         ? { turnId: provenance.turnId, signal: provenance.signal }
         : provenance.turnId;
@@ -1684,7 +1705,7 @@ async function initializeApplication(
       return result;
     },
     async (action, args, expectedRevision, client) => {
-      if (['NOD_browser', 'NOD_vault_allow'].includes(action)) return;
+      if (['NOD_browser', 'NOD_vault_allow'].includes(action) || isComputerAction(action)) return;
       if (action === 'NOD_limits_update') limitsInput.parse(args);
       else if (action.startsWith('NOD_')) {
         if (
@@ -2598,7 +2619,48 @@ async function initializeApplication(
         return vault.request(turn, ownerId, request);
       },
       localFiles: localFiles.available,
+      computerUse: computerUse.available,
       integration: async (turn, action, args, options) => {
+        if (isComputerAction(action)) {
+          if (action === 'COMPUTER_KEEP_OUT') {
+            await options.admit?.(false);
+            return withTurnLock(
+              { turnId: turn.turnId, signal: options.signal },
+              async (client) => ({
+                keptOut: await computerUse.keepOut(turn, String(args.bundle ?? ''), client),
+              }),
+            );
+          }
+          const prepared = await computerUse.prepare(turn, action, args, options.signal);
+          if (!computerUse.needsCheck(action, prepared)) {
+            await options.admit?.(false);
+            return computerUse.execute(turn, action, prepared, options.signal);
+          }
+          const verdict = await trust.check(
+            turn,
+            action,
+            computerUse.checked(action, prepared),
+            options.signal,
+          );
+          await options.admit?.(verdict.confirm);
+          return approvals.request(turn, action, prepared, {
+            allowed: !verdict.confirm,
+            expectedChatRevision:
+              verdict.confirm || verdict.basis.kind !== 'read' ? verdict.chatRevision : undefined,
+            signal: options.signal,
+            run: async () => {
+              const result = await computerUse.execute(turn, action, prepared, options.signal);
+              await ledger.action(
+                turn.turnId,
+                action,
+                verdict.confirm ? { kind: 'approved' } : verdict.basis,
+                actionTarget(action, prepared),
+              );
+              return result;
+            },
+            details: verdict.confirm ? { reason: verdict.reason } : {},
+          });
+        }
         if (action === 'LOCAL_FILES_KEEP_OUT') {
           await options.admit?.(false);
           return withTurnLock({ turnId: turn.turnId, signal: options.signal }, async (client) => ({
@@ -2882,6 +2944,7 @@ async function initializeApplication(
   adapters.integrationBrowser?.registerRoutes(app);
   integrations.registerRoutes(app);
   localFiles.registerRoutes(app);
+  computerUse.registerRoutes(app);
   personal.registerRoutes(app);
   onboardingSuggestions.registerRoutes(app);
   onboardingProfile.registerRoutes(app);
