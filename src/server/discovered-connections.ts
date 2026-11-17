@@ -20,6 +20,7 @@ import { logFailure } from './failure-log.ts';
 import type { createAppGrantVault } from './vault-app-grants.ts';
 import type { TurnRef } from './thread.ts';
 import { isIntegrationFile } from './integration-files.ts';
+import { redactSecretText } from './redaction.ts';
 import type { AnalyticsEvent, CaptureAnalytics } from './analytics.ts';
 import {
   captureConnection,
@@ -945,7 +946,12 @@ export async function createDiscoveredConnections(
         } catch (cause) {
           authorizationFailed = true;
           authorizationError = cause;
-          throw error('The service sign-in could not start. Check its access method.', 502);
+          const reason =
+            (cause instanceof Error && (cause.message || Object(cause).errorCode)) || String(cause);
+          throw error(
+            `The service sign-in could not start: ${redactSecretText(String(reason)).slice(0, 500)}`,
+            502,
+          );
         }
         const updated = await client.query(
           `UPDATE discovered_connection_proposals
