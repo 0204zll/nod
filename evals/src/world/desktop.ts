@@ -33,6 +33,7 @@ export interface DesktopStep {
 export type FakeDesktop = DesktopControl & {
   apps: DesktopApp[];
   steps: DesktopStep[];
+  requests: DesktopRequest[];
   app(bundle: string): DesktopApp;
 };
 
@@ -40,6 +41,8 @@ const textRoles = new Set(['textfield', 'textarea']);
 
 export function createDesktop(apps: DesktopApp[]): FakeDesktop {
   const steps: DesktopStep[] = [];
+  const requests: DesktopRequest[] = [];
+  const menuElements = new WeakSet<DesktopElement>();
   const pids = new Map(apps.map((app, index) => [app.bundle, 500 + index]));
   const refs = new Map<string, { app: DesktopApp; element: DesktopElement }>();
   let snapshots = 0;
@@ -105,13 +108,39 @@ export function createDesktop(apps: DesktopApp[]): FakeDesktop {
     };
   }
 
+  function contains(node: DesktopElement, element: DesktopElement): boolean {
+    return node === element || (node.children ?? []).some((child) => contains(child, element));
+  }
+
   function find(request: DesktopRequest) {
     const entry = refs.get(String(request.ref ?? ''));
-    if (!entry) throw new Error('STALE_REF: That ref is not current. Take a new snapshot.');
+    if (
+      !entry ||
+      !(
+        menuElements.has(entry.element) ||
+        entry.app.windows.some((window) => contains(window.root, entry.element))
+      )
+    )
+      throw new Error('STALE_REF: That ref is not current. Take a new snapshot.');
     return entry;
   }
 
+  function search(element: DesktopElement, text: string, role: string) {
+    const found: DesktopElement[] = [];
+    const walk = (node: DesktopElement) => {
+      if (
+        (!role || node.role === role) &&
+        (!text || `${node.name ?? ''} ${node.value ?? ''}`.toLowerCase().includes(text))
+      )
+        found.push(node);
+      node.children?.forEach(walk);
+    };
+    walk(element);
+    return found;
+  }
+
   async function request(request: DesktopRequest): Promise<Record<string, unknown>> {
+    requests.push(request);
     switch (request.op) {
       case 'permissions':
       case 'request':
@@ -143,7 +172,15 @@ export function createDesktop(apps: DesktopApp[]): FakeDesktop {
         }
         const app = byName(request.app);
         if (!app) throw new Error(`${String(request.app)} is not running.`);
-        if (request.menu) return { tree: tree(app, menuBar(app), id, { next: 1 }) };
+        if (request.menu) {
+          const bar = menuBar(app);
+          const mark = (node: DesktopElement) => {
+            menuElements.add(node);
+            node.children?.forEach(mark);
+          };
+          mark(bar);
+          return { tree: tree(app, bar, id, { next: 1 }) };
+        }
         const window = request.window
           ? app.windows.find((item) => item.id === request.window)
           : app.windows[0];
@@ -180,6 +217,27 @@ export function createDesktop(apps: DesktopApp[]): FakeDesktop {
         });
         return { disposition: { delivery: 'delivered_verified' } };
       }
+      case 'find': {
+        const app = byName(request.app);
+        if (!app) throw new Error(`${String(request.app)} is not running.`);
+        const window = request.window
+          ? app.windows.find((item) => item.id === request.window)
+          : app.windows[0];
+        if (!window) throw new Error('AMBIGUOUS_TARGET: name a window.');
+        const id = `sfake${String(++snapshots).padStart(4, '0')}`;
+        const counter = { next: 1 };
+        return {
+          matches: search(
+            window.root,
+            String(request.text ?? '').toLowerCase(),
+            String(request.role ?? ''),
+          ).map((node) => {
+            const rendered = tree(app, node, id, counter);
+            delete rendered.children;
+            return rendered;
+          }),
+        };
+      }
       case 'select':
         find(request);
         return { disposition: { delivery: 'delivered_verified' } };
@@ -196,8 +254,12 @@ export function createDesktop(apps: DesktopApp[]): FakeDesktop {
   return {
     apps,
     steps,
+    requests,
     app: (bundle) => apps.find((item) => item.bundle === bundle)!,
-    request: async (input) => request(input),
+    request: async (input, signal) => {
+      signal?.throwIfAborted();
+      return request(input);
+    },
   };
 }
 

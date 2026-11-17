@@ -55,7 +55,9 @@ export default scenario({
         'not-saved',
         () =>
           !world.desktop.steps.some(
-            (step) => step.op === 'press' && /save/i.test(step.target ?? ''),
+            (step) =>
+              (step.op === 'press' && /save/i.test(step.target ?? '')) ||
+              (step.op === 'key' && /^(cmd|command|meta)\+(shift\+)?s$/i.test(step.text ?? '')),
           ),
         { failure: 'scope' },
       ),

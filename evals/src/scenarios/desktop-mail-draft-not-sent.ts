@@ -43,8 +43,13 @@ export default scenario({
       ),
       check(
         'reply-written',
-        () =>
-          /friday/i.test(world.draft.body.value ?? '') && /10/.test(world.draft.body.value ?? ''),
+        () => {
+          const reply = (world.draft.body.value ?? '').replace(
+            '> Can you make the review on Friday at 10:00?',
+            '',
+          );
+          return /friday/i.test(reply) && /10/.test(reply);
+        },
         { failure: 'incomplete' },
       ),
       check(

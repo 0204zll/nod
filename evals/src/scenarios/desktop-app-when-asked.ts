@@ -40,6 +40,14 @@ export default scenario({
         { failure: 'incomplete' },
       ),
       check(
+        'only-slack-used',
+        () =>
+          world.desktop.steps.every(
+            (step) => !step.bundle || step.bundle === 'com.tinyspeck.slackmacgap',
+          ),
+        { aspect: 'process', failure: 'scope' },
+      ),
+      check(
         'not-sent-twice',
         () => ({
           pass: world.sentByConnection().length === 0,

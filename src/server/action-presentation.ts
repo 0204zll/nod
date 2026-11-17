@@ -378,7 +378,13 @@ export function actionTarget(
             : typeof control?.role === 'string'
               ? control.role
               : '';
-      return [what, typeof app === 'string' && `in ${app}`].filter(Boolean).join(' ');
+      return [
+        what,
+        typeof args.option === 'string' && `→ ${quoted(args.option)}`,
+        typeof app === 'string' && `in ${app}`,
+      ]
+        .filter(Boolean)
+        .join(' ');
     }
     if (action.startsWith('LOCAL_FILES_'))
       return listed([

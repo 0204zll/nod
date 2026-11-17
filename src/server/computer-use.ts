@@ -214,7 +214,7 @@ const viewOnlyApps: Array<[RegExp, string]> = [
 
 type Window = { id: string; title: string };
 type App = { pid: number; bundle: string; program?: string; name: string; windows?: Window[] };
-type Identity = { bundle: string; program?: string; name: string };
+type Identity = { bundle: string; program?: string; name: string; pid?: number };
 type Node = {
   role?: string;
   name?: string | null;
@@ -227,6 +227,7 @@ type Node = {
 type Control = {
   bundle: string;
   program?: string;
+  pid?: number;
   app: string;
   window: string;
   windowId?: string;
@@ -302,15 +303,13 @@ export function createComputerUse(
 ) {
   const { desktop, platform = process.platform } = options;
   const mac = platform === 'darwin';
-  const keysOf = (app: { bundle?: string; program?: string }) =>
-    [app.bundle, app.program].filter((id): id is string => Boolean(id)).map(appKey);
-  const sameApp = (
-    a: { bundle?: string; program?: string },
-    b: { bundle?: string; program?: string },
-  ) => keysOf(a).some((key) => keysOf(b).includes(key));
+  const identity = (app: { bundle?: string; pid?: number }) =>
+    app.bundle ? `id:${appKey(app.bundle)}` : app.pid ? `pid:${app.pid}` : '';
+  const sameApp = (item: Identity, target: { bundle?: string }) =>
+    Boolean(item.bundle) && appKey(item.bundle) === appKey(target.bundle ?? '');
   const isGranted = (root: string, app: Identity) =>
-    keysOf(app).some((key) => grants.get(root)?.has(key));
-  const grants = new Map<string, Set<string>>();
+    [...(grants.get(root)?.values() ?? [])].some((ids) => ids.includes(identity(app)));
+  const grants = new Map<string, Map<string, string[]>>();
   const controls = new Map<string, Map<string, Control>>();
   let listing: { at: number; apps: Promise<App[]> } | undefined;
 
@@ -395,12 +394,16 @@ export function createComputerUse(
     return current;
   }
 
-  function grant(root: string, app: Identity) {
-    const current = forRoot(grants, root, () => new Set<string>());
-    const keys = keysOf(app);
-    if (current.size >= grantLimit * 2 && !keys.some((key) => current.has(key)))
+  function grant(root: string, target: Identity, app?: Identity) {
+    const current = forRoot(grants, root, () => new Map<string, string[]>());
+    const key = identity(target);
+    if (current.size >= grantLimit && !current.has(key))
       throw new IntegrationError(`This request already opened ${grantLimit} apps.`, 409);
-    for (const key of keys) current.add(key);
+    const ids = new Set([key, ...(current.get(key) ?? []), ...(app ? [identity(app)] : [])]);
+    current.set(
+      key,
+      [...ids].filter((id) => id),
+    );
   }
 
   function remember(root: string, entries: Array<[string, Control]>) {
@@ -425,7 +428,7 @@ export function createComputerUse(
   function targetOf(root: string, refId: string, keptOut: string[]) {
     const found = shown(root, refId);
     if (found.secure) throw new IntegrationError('Nod never uses password fields.', 403);
-    const app = { bundle: found.bundle, program: found.program, name: found.app };
+    const app = { bundle: found.bundle, program: found.program, pid: found.pid, name: found.app };
     allowed(app, keptOut, true);
     granted(root, app);
     return found;
@@ -520,7 +523,7 @@ export function createComputerUse(
     const base = { ...input, app: { bundle: app.bundle, name: app.name } };
     if (input.ref) {
       const part = shown(root, input.ref);
-      if (part.bundle !== app.bundle)
+      if (identity(part) !== identity(app))
         throw new IntegrationError(`That ref is not part of ${app.name}.`, 403);
       return {
         ...base,
@@ -598,6 +601,7 @@ export function createComputerUse(
     return {
       bundle: app.bundle,
       program: app.program,
+      pid: app.pid,
       app: app.name,
       window: String(prepared.windowTitle ?? ''),
       ...(prepared.window ? { windowId: String(prepared.window) } : {}),
@@ -672,21 +676,31 @@ export function createComputerUse(
       const target = prepared.app!;
       allowed(target, keptOut, false);
       return async () => {
-        grant(root, target);
-        const already = (await running(signal)).find((item) => sameApp(item, target));
-        const launched = async () => {
+        listing = undefined;
+        const before = await running(signal);
+        const already = before.find((item) => sameApp(item, target));
+        if (already) unique(before, already.name);
+        let pid = already?.pid;
+        if (pid === undefined)
           try {
-            return ((await ask({ op: 'open', bundle: target.bundle }, signal)) as { pid?: number })
+            pid = ((await ask({ op: 'open', bundle: target.bundle }, signal)) as { pid?: number })
               .pid;
           } catch (error) {
-            const started = (await running(signal)).find((item) => sameApp(item, target));
-            if (!started) throw error;
-            return started.pid;
+            pid = (await running(signal)).find((item) => sameApp(item, target))?.pid;
+            if (pid === undefined) throw error;
           }
+        listing = undefined;
+        const after = await running(signal);
+        const app =
+          after.find((item) => item.pid === pid) ?? after.find((item) => sameApp(item, target));
+        if (app) unique(after, app.name);
+        grant(root, target, app);
+        return {
+          pid: app?.pid ?? pid,
+          bundle: target.bundle,
+          name: target.name,
+          windows: app?.windows ?? [],
         };
-        const pid = already?.pid ?? (await launched());
-        const app = already ?? (await running(signal)).find((item) => item.pid === pid);
-        return { pid, bundle: target.bundle, name: target.name, windows: app?.windows ?? [] };
       };
     }
     if (targeted.has(action)) {

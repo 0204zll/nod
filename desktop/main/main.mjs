@@ -1745,6 +1745,7 @@ function stayAwake(working) {
 }
 
 async function stopEngine() {
+  void computerHelper.cancel().catch(() => {});
   stayAwake(false);
   enginePreferencesReady = false;
   engineRuntimeReady = false;

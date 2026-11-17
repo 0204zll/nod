@@ -46,7 +46,7 @@ Each step that could commit something goes through the same [trust check](/trust
 
 ## What Nod never does
 
-Nod refuses, without a judgment call:
+Nod refuses these, without a judgment call. It recognizes apps by their ID and program, so an app that isn't on its list isn't refused automatically; [keep Nod out of it](#keep-nod-out-of-an-app) instead:
 
 - Terminals and apps that run scripts or commands, such as Terminal, iTerm, Script Editor, Automator, Shortcuts, Raycast, Windows Terminal, Command Prompt, PowerShell and GNOME Terminal.
 - System settings and security, such as System Settings, Keychain Access, Activity Monitor, Disk Utility and macOS security prompts, Windows Settings, Control Panel, Registry Editor and Task Manager, and GNOME or KDE Settings, Passwords and Keys, and Disks.
@@ -81,7 +81,7 @@ Afterwards Nod gives focus back to the window you were using, unless you've alre
 
 Computer use on Windows and Linux is experimental. The checks and refusals are the same as on macOS. What differs:
 
-- **App IDs.** Nod names apps by their program name on Windows, such as `notepad.exe`, and by their desktop ID on Linux, such as `org.gnome.TextEditor`. On Linux it opens only installed desktop apps, never a command, a terminal, or a system, settings or file manager app. On Windows it starts only windowed programs, never a command-line tool.
+- **App IDs.** Nod names apps by their program name on Windows, such as `notepad.exe`, and by their desktop ID on Linux, such as `org.gnome.TextEditor`. On Linux it opens only installed desktop apps, never a command, a terminal, or a system, settings or file manager app; an app that's already open is checked only against Nod's list. On Windows it starts only windowed programs, never a command-line tool.
 - **Windows:** Nod can read but not operate an app that runs as administrator.
 - **Linux on Wayland:** Nod can't bring a window to the front, so steps that need it don't run, and it shows only the pill, without the glow. The Ctrl+Alt+Shift+Esc shortcut may not work there; select **Stop** on the pill instead.
 - **Linux Flatpak:** Nod can't open apps from inside its sandbox. Open the app yourself, then ask again. Reading other apps from inside the sandbox hasn't been tested yet and may not work.
@@ -98,7 +98,7 @@ Nod uses apps only in work you started: a message you sent, a task that started 
 
 - Text in app windows reaches Nod as data, not instructions. A window can still contain text written to mislead Nod, like any web page or email. The trust check limits what such text can make Nod do, but it can't recognize every trick, so keep apps with untrusted content out of Nod's reach when you don't need them.
 - The list of refused apps is by app. An app that isn't on it but can run commands or reach your secrets, such as a database tool, is not recognized; keep such apps out of Nod.
-- Window text and pictures go to your model provider like any other tool result, and are part of [conversation traces](/trust/conversation-traces/) when you share them. Pictures are replaced with `[image]` there.
+- Window text and pictures go to your model provider like any other tool result, and are part of [conversation traces](/trust/conversation-traces/) when you share them. Pictures are replaced with `[image]` there. Window pictures aren't redacted: whatever is visible in the window, private content included, reaches the model. Only Vault entry in Nod's own browser keeps secrets out.
 - Apps that draw their own controls, such as some games, show little to accessibility. Nod can't use them.
 
 ## Related resources

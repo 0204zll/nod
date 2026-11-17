@@ -84,7 +84,9 @@ async function windowsProgram(path) {
 }
 
 function launcher(exec = '') {
-  const words = exec.split(/\s+/).filter((word) => word && !/^[A-Z_]+=/.test(word));
+  const words = [...exec.matchAll(/"((?:\\.|[^"\\])*)"|(\S+)/g)]
+    .map((match) => (match[1] ?? match[2]).replace(/\\(.)/g, '$1'))
+    .filter((word) => word && !/^[A-Z_]+=/.test(word));
   if (words[0] && basename(words[0]) === 'env') words.shift();
   if (words[0] && basename(words[0]) === 'flatpak' && words[1] === 'run')
     return words.slice(2).find((word) => !word.startsWith('-')) ?? 'flatpak';
@@ -323,8 +325,10 @@ export function createComputerHelper({
     awake();
   }
 
-  async function giveBack(previous, pid) {
-    if (!previous || (await frontmost())?.pid !== pid) return;
+  async function giveBack(previous, pid, window) {
+    if (!previous) return;
+    const front = await frontmost();
+    if (front?.pid !== pid || (window && front.id !== window)) return;
     if (previous.pid === presence.ownPid) return presence.focusSelf();
     if (previous.window)
       await run(['focus-window', '--app', previous.app, '--window-id', previous.window]).catch(
@@ -339,7 +343,7 @@ export function createComputerHelper({
     clearTimeout(ending.timer);
     unframe();
     if (handover) return ending;
-    await giveBack(ending.previous, ending.pid);
+    await giveBack(ending.previous, ending.pid, ending.window);
   }
 
   async function focused(target, window, work) {
@@ -350,13 +354,17 @@ export function createComputerHelper({
         await waitForOwner(target, window.bounds);
         if (!handed) {
           const back = await frontmost();
-          previous = back && { pid: back.pid, app: back.app_name, window: back.id };
+          previous =
+            back && back.id !== target.window
+              ? { pid: back.pid, app: back.app_name, window: back.id }
+              : undefined;
         }
         frame(target, window.bounds);
         await run(['focus-window', ...scope(target)]);
       } catch (error) {
         unframe();
-        if (handed) await giveBack(handed.previous, handed.pid);
+        if (handed) await giveBack(handed.previous, handed.pid, handed.window);
+        else await giveBack(previous, window.pid, target.window);
         throw error;
       }
       session = { window: target.window, pid: window.pid, previous };
@@ -516,17 +524,21 @@ export function createComputerHelper({
         return { pid: (await run(['launch', check(request.bundle, appName, 'app')])).pid };
       const found = await locate(request);
       if (platform === 'win32') return { pid: (await run(['launch', found.path])).pid };
+      const before = new Set((await run(['list-apps'])).apps.map((app) => app.pid));
       await run(['launch', found.entry], undefined, launchEntry);
-      for (let attempt = 0; attempt < 8; attempt++) {
+      for (let attempt = 0; attempt < 40; attempt++) {
         await delay(250);
         for (const app of (await run(['list-apps'])).apps)
           if (
             app.bundle_id === found.bundle ||
-            (await readlink(`/proc/${app.pid}/exe`).then(basename, () => '')) === found.program
+            (!before.has(app.pid) &&
+              (await readlink(`/proc/${app.pid}/exe`).then(basename, () => '')) === found.program)
           )
             return { pid: app.pid };
       }
-      return {};
+      throw new Error(
+        `ACTION_FAILED: ${found.name} was started but its window didn't appear within 10 seconds. List apps to find it.`,
+      );
     },
     snapshot: (request) =>
       observe(request, async () => {

@@ -716,7 +716,7 @@ async function runningDesktop(
       }),
     }),
     createChatReadCursorStore,
-    createComputerHelper: () => ({ request: async () => ({}) }),
+    createComputerHelper: () => ({ request: async () => ({}), cancel: async () => {} }),
     createComputerOverlay: () => ({}),
     createArtifactFiles: createFiles,
     saveArtifactDownload,

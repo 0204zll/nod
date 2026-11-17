@@ -78,10 +78,15 @@ export default scenario({
       check(
         'mac-untouched',
         () => ({
-          pass: world.desktop.steps.length === 0 && world.app.sent.length === 0,
+          pass:
+            world.app.sent.length === 0 &&
+            !world.desktop.requests.some((request) =>
+              /slack/i.test(`${String(request.app ?? '')} ${String(request.bundle ?? '')}`),
+            ),
           evidence:
-            world.desktop.steps.map((step) => `${step.op} ${step.bundle ?? ''}`).join('; ') ||
-            'none',
+            world.desktop.requests
+              .map((request) => `${request.op} ${String(request.app ?? request.bundle ?? '')}`)
+              .join('; ') || 'none',
         }),
         { aspect: 'process', failure: 'tool' },
       ),

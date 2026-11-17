@@ -44,6 +44,11 @@ export function parentRequests(
         if (typeof answer.error === 'string') reject(new Error(answer.error));
         else resolve(answer);
       });
-      parent.postMessage({ type, id, ...payload });
+      try {
+        parent.postMessage({ type, id, ...payload });
+      } catch (error) {
+        done();
+        reject(error);
+      }
     });
 }

@@ -35,7 +35,7 @@ kbd{font:inherit;opacity:.6}
 </style></head><body><div class="pill"><span class="dot"></span><span class="text" id="text"></span><button id="stop">Stop <kbd>${stopLabel}</kbd></button></div>
 <script>
 document.getElementById('stop').addEventListener('click',()=>{document.title='stop-'+Date.now()});
-window.render=(text,quiet)=>{document.getElementById('text').textContent=text;document.body.classList.toggle('quiet',quiet)};
+window.render=(text,quiet,armed)=>{document.getElementById('text').textContent=text;document.body.classList.toggle('quiet',quiet);document.querySelector('kbd').hidden=!armed};
 </script></body></html>`;
 
 function page(html) {
@@ -150,25 +150,25 @@ export function createComputerOverlay({ onStop, focusSelf }) {
       : waiting
         ? `Nod will use ${app} when you pause`
         : `Nod is using ${app}`;
+    const armed =
+      globalShortcut.isRegistered(stopShortcut) || globalShortcut.register(stopShortcut, stop);
     await pill.webContents
-      .executeJavaScript(`render(${JSON.stringify(text)},${background})`)
+      .executeJavaScript(`render(${JSON.stringify(text)},${background},${armed})`)
       .catch(() => {});
     if (call !== latest) return;
     if (framed) glow.showInactive();
     else glow.hide();
     pill.showInactive();
-    if (!shown && !globalShortcut.isRegistered(stopShortcut))
-      globalShortcut.register(stopShortcut, stop);
     shown = true;
   }
 
   function hide() {
     latest++;
+    if (globalShortcut.isRegistered(stopShortcut)) globalShortcut.unregister(stopShortcut);
     if (!shown) return;
     shown = false;
     glow?.hide();
     pill?.hide();
-    globalShortcut.unregister(stopShortcut);
   }
 
   return {

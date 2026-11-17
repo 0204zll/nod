@@ -1787,7 +1787,7 @@ test('computer use on Windows keeps an opened app granted however the app list n
   assert.match(listed.apps.find((app) => app.pid === 31)?.blocked ?? '', /can’t identify/);
   assert.match(listed.apps.find((app) => app.pid === 32)?.blocked ?? '', /terminal/);
   assert.equal(listed.apps.find((app) => app.pid === 33)?.opened, true);
-  apps.push({ pid: 34, bundle: '', program: 'gedit', name: 'gedit', windows: [] });
+  apps.push({ pid: 34, bundle: '', program: 'gjs', name: 'gnome-maps', windows: [] });
   assert.equal(
     (
       (await computer.execute(
@@ -1801,5 +1801,74 @@ test('computer use on Windows keeps an opened app granted however the app list n
   await assert.rejects(
     computer.prepare(turn, 'COMPUTER_OPEN', { bundle: 'Command Prompt' }),
     /terminal/,
+  );
+});
+
+test('computer use on Linux grants only the opened process when the app list has no desktop ID', async () => {
+  const pool = {
+    query: async (sql: string) => {
+      if (sql.startsWith('SELECT computer_use'))
+        return { rows: [{ computer_use: true, computer_keep_out: [] }] };
+      if (sql.startsWith('WITH RECURSIVE'))
+        return {
+          rows: [
+            {
+              id: 'root-turn',
+              parent_turn_id: null,
+              source: 'user',
+              message_id: 'message',
+              proactive: false,
+            },
+          ],
+        };
+      assert.fail(`Unexpected query: ${sql}`);
+    },
+  } as unknown as Pool;
+  const apps: Array<Record<string, unknown>> = [
+    {
+      pid: 42,
+      bundle: '',
+      program: 'gjs',
+      name: 'gnome-maps',
+      windows: [{ id: 'w-42', title: 'Maps' }],
+    },
+  ];
+  const computer = createComputerUse(pool, 'owner', {
+    platform: 'linux',
+    desktop: {
+      request: async (request) => {
+        if (request.op === 'apps') return { apps };
+        if (request.op === 'locate')
+          return { bundle: 'org.gnome.Weather', name: 'Weather', program: 'gjs' };
+        if (request.op === 'open') {
+          apps.push({
+            pid: 41,
+            bundle: '',
+            program: 'gjs',
+            name: 'gnome-weather',
+            windows: [{ id: 'w-41', title: 'Weather' }],
+          });
+          return { pid: 41 };
+        }
+        if (request.op === 'snapshot')
+          return { tree: { role: 'window', name: 'Weather', children: [] } };
+        throw new Error(`Unexpected ${request.op}`);
+      },
+    },
+  });
+  const turn = { turnId: 'turn', threadId: 'thread' };
+  await computer.execute(
+    turn,
+    'COMPUTER_OPEN',
+    await computer.prepare(turn, 'COMPUTER_OPEN', { bundle: 'org.gnome.Weather' }),
+  );
+  await computer.execute(
+    turn,
+    'COMPUTER_SNAPSHOT',
+    await computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: 41 }),
+  );
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: 42 }),
+    /hasn't opened gnome-maps/,
   );
 });

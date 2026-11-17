@@ -25,10 +25,18 @@ const permissionText = {
 } as const;
 
 export function ComputerUseSettings() {
-  const { data, update } = usePageData<Status>(path);
+  const { data, error: loadError, update, refresh } = usePageData<Status>(path);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  if (!data) return null;
+  if (!data)
+    return loadError ? (
+      <section className="account-region">
+        <Notice>{loadError}</Notice>
+        <Button variant="secondary" size="sm" onClick={() => void refresh()}>
+          Try again
+        </Button>
+      </section>
+    ) : null;
   if (!data.available)
     return (
       <section className="account-region">
@@ -80,7 +88,8 @@ export function ComputerUseSettings() {
           {!mac && 'Experimental on this system: it hasn’t been tested on many computers yet. '}
           Nod opens an app only when your request names it or needs it, and asks before a step that
           sends, saves over, deletes or buys anything. Browsers and code editors stay view-only;
-          terminals, system settings, {fileManager} and password managers are never used.
+          known terminals, system settings, {fileManager} and password managers are never used. To
+          keep Nod out of any other app, tell Nod.
         </p>
       </section>
       {data.enabled && data.platform === 'linux' && !data.permissions.ready && (
