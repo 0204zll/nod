@@ -81,10 +81,10 @@ Afterwards Nod gives focus back to the window you were using, unless you've alre
 
 Computer use on Windows and Linux is experimental. The checks and refusals are the same as on macOS. What differs:
 
-- **App IDs.** Nod names apps by their program name on Windows, such as `notepad.exe`, and by their desktop ID on Linux, such as `org.gnome.TextEditor`. On Linux it opens only installed desktop apps, never a command or an app that runs in a terminal.
+- **App IDs.** Nod names apps by their program name on Windows, such as `notepad.exe`, and by their desktop ID on Linux, such as `org.gnome.TextEditor`. On Linux it opens only installed desktop apps, never a command, a terminal, or a system, settings or file manager app. On Windows it starts only windowed programs, never a command-line tool.
 - **Windows:** Nod can read but not operate an app that runs as administrator.
-- **Linux on Wayland:** Nod can't bring a window to the front, so steps that need it don't run, and it shows only the pill, without the glow.
-- **Linux Flatpak:** Nod can't open apps from inside its sandbox. Open the app yourself, then ask again.
+- **Linux on Wayland:** Nod can't bring a window to the front, so steps that need it don't run, and it shows only the pill, without the glow. The Ctrl+Alt+Shift+Esc shortcut may not work there; select **Stop** on the pill instead.
+- **Linux Flatpak:** Nod can't open apps from inside its sandbox. Open the app yourself, then ask again. Reading other apps from inside the sandbox hasn't been tested yet and may not work.
 
 ## Keep Nod out of an app
 

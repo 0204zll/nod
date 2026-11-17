@@ -1447,8 +1447,10 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     assert.equal(computerAppRule(bundle).kind, 'view', bundle);
   assert.equal(computerAppRule('notepad.exe').kind, 'use');
   assert.equal(computerAppRule('C:\\Apps\\Slack\\slack.exe', ['slack']).kind, 'blocked');
-  for (const keys of ['win+r', 'super+a', 'alt+tab', 'ctrl+alt+t', 'ctrl+alt+delete'])
-    assert.equal(systemShortcut(keys, 'win32') || systemShortcut(keys, 'linux'), true, keys);
+  for (const platform of ['win32', 'linux'])
+    for (const keys of ['win+r', 'super+a', 'alt+tab', 'ctrl+esc', 'ctrl+alt+t', 'ctrl+alt+delete'])
+      assert.equal(systemShortcut(keys, platform), true, `${platform} ${keys}`);
+  assert.equal(systemShortcut('alt+tab', 'darwin'), false);
   assert.equal(systemShortcut('ctrl+n', 'win32'), false);
   assert.equal(systemShortcut('cmd+n', 'darwin'), false);
   assert.equal(systemShortcut('cmd+n', 'linux'), true);
@@ -1714,5 +1716,76 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
   await assert.rejects(
     computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' }),
     /no snapshot with that ref/,
+  );
+});
+
+test('computer use on Windows keeps an opened app granted however the app list names it, and refuses apps it cannot identify', async () => {
+  const pool = {
+    query: async (sql: string) => {
+      if (sql.startsWith('SELECT computer_use'))
+        return { rows: [{ computer_use: true, computer_keep_out: [] }] };
+      if (sql.startsWith('WITH RECURSIVE'))
+        return {
+          rows: [{ id: 'root-turn', source: 'user', message_id: 'message', proactive: false }],
+        };
+      assert.fail(`Unexpected query: ${sql}`);
+    },
+  } as unknown as Pool;
+  const apps: Array<Record<string, unknown>> = [
+    { pid: 31, bundle: '', name: 'Terminal', windows: [{ id: 'w-31', title: 'Terminal' }] },
+    {
+      pid: 32,
+      bundle: 'Command Prompt',
+      program: 'cmd.exe',
+      name: 'Command Prompt',
+      windows: [{ id: 'w-32', title: 'Command Prompt' }],
+    },
+  ];
+  const computer = createComputerUse(pool, 'owner', {
+    platform: 'win32',
+    desktop: {
+      request: async (request) => {
+        if (request.op === 'apps') return { apps };
+        if (request.op === 'locate')
+          return { bundle: 'notepad.exe', name: 'notepad', program: 'notepad.exe' };
+        if (request.op === 'open') {
+          apps.push({
+            pid: 33,
+            bundle: 'Notepad.exe',
+            program: 'Notepad.exe',
+            name: 'Notepad.exe',
+            windows: [{ id: 'w-33', title: 'Untitled - Notepad' }],
+          });
+          return { pid: 33 };
+        }
+        if (request.op === 'snapshot')
+          return { tree: { role: 'window', name: 'Untitled - Notepad', children: [] } };
+        throw new Error(`Unexpected ${request.op}`);
+      },
+    },
+  });
+  const turn = { turnId: 'turn', threadId: 'thread' };
+  await computer.execute(
+    turn,
+    'COMPUTER_OPEN',
+    await computer.prepare(turn, 'COMPUTER_OPEN', { bundle: 'notepad' }),
+  );
+  const snapshot = (await computer.execute(
+    turn,
+    'COMPUTER_SNAPSHOT',
+    await computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: 33 }),
+  )) as { tree: string };
+  assert.match(snapshot.tree, /Untitled - Notepad/);
+  const listed = (await computer.execute(
+    turn,
+    'COMPUTER_APPS',
+    await computer.prepare(turn, 'COMPUTER_APPS', {}),
+  )) as { apps: Array<{ pid: number; blocked?: string; opened?: boolean }> };
+  assert.match(listed.apps.find((app) => app.pid === 31)?.blocked ?? '', /can’t identify/);
+  assert.match(listed.apps.find((app) => app.pid === 32)?.blocked ?? '', /terminal/);
+  assert.equal(listed.apps.find((app) => app.pid === 33)?.opened, true);
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_OPEN', { bundle: 'Command Prompt' }),
+    /terminal/,
   );
 });

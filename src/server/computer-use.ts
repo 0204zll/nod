@@ -100,6 +100,11 @@ const systemKeys = new Set([
 const otherSystemKeys = new Set([
   'opt+space',
   'opt+tab',
+  'opt+shift+tab',
+  'ctrl+opt+tab',
+  'ctrl+esc',
+  'opt+f1',
+  'ctrl+opt+backspace',
   'opt+f2',
   'opt+f4',
   'ctrl+opt+delete',
@@ -168,8 +173,12 @@ const blockedApps: Array<[RegExp, string]> = [
     'an app that runs scripts or commands',
   ],
   [
-    /^(com\.apple\.systempreferences|com\.apple\.settings|com\.apple\.keychainaccess|com\.apple\.activitymonitor|com\.apple\.diskutility|com\.apple\.securityagent|com\.apple\.migrateassistant|com\.apple\.installer|com\.apple\.loginwindow|systemsettings|control|mmc|regedit|regedt32|taskmgr|gpedit|msconfig|secpol|lusrmgr|compmgmt|services|eventvwr|devmgmt|diskmgmt|consent|credentialuibroker|logonui|lockapp|org\.gnome\.settings|gnome-control-center|org\.kde\.systemsettings|org\.gnome\.seahorse\.application|seahorse|org\.gnome\.diskutility|gnome-disks|org\.gnome\.systemmonitor|gnome-system-monitor|org\.kde\.plasma-systemmonitor|org\.kde\.kwalletmanager5?|kwalletmanager5?|polkit-.*|org\.gnome\.software|software-properties-.*|synaptic)$/,
+    /^(com\.apple\.systempreferences|com\.apple\.settings|com\.apple\.keychainaccess|com\.apple\.activitymonitor|com\.apple\.diskutility|com\.apple\.securityagent|com\.apple\.migrateassistant|com\.apple\.installer|com\.apple\.loginwindow|systemsettings|control|mmc|regedit|regedt32|taskmgr|gpedit|msconfig|secpol|lusrmgr|compmgmt|services|eventvwr|devmgmt|diskmgmt|consent|credentialuibroker|logonui|lockapp|org\.gnome\.settings|gnome-control-center|org\.kde\.systemsettings|org\.gnome\.seahorse\.application|seahorse|org\.gnome\.diskutility|gnome-disks|org\.gnome\.systemmonitor|gnome-system-monitor|org\.kde\.plasma-systemmonitor|org\.kde\.kwalletmanager5?|kwalletmanager5?|polkit-.*|org\.gnome\.software|software-properties-.*|synaptic|sechealthui|securityhealthsystray|gcr-prompter|pinentry.*|quickassist|msra|mstsc|logoff|tsdiscon|shutdown|schtasks|certutil|reg|sc|net1?|wmic|msiexec|systemreset|rstrui)$/,
     'system settings or security',
+  ],
+  [
+    /^(searchhost|searchapp|searchui|startmenuexperiencehost|shellexperiencehost|applicationframehost|gnome-shell|org\.gnome\.shell.*|plasmashell|krunner|org\.kde\.krunner)$/,
+    'the system shell or search, which can start any app',
   ],
   [
     /^(com\.apple\.finder|explorer|org\.gnome\.nautilus|nautilus|org\.kde\.dolphin|dolphin|nemo|thunar|pcmanfm|caja)$/,
@@ -193,7 +202,8 @@ const viewOnlyApps: Array<[RegExp, string]> = [
 ];
 
 type Window = { id: string; title: string };
-type App = { pid: number; bundle: string; name: string; windows?: Window[] };
+type App = { pid: number; bundle: string; program?: string; name: string; windows?: Window[] };
+type Identity = { bundle: string; program?: string; name: string };
 type Node = {
   role?: string;
   name?: string | null;
@@ -205,6 +215,7 @@ type Node = {
 };
 type Control = {
   bundle: string;
+  program?: string;
   app: string;
   window: string;
   windowId?: string;
@@ -214,7 +225,7 @@ type Control = {
   secure: boolean;
 };
 export type ComputerPrepared = Record<string, unknown> & {
-  app?: { bundle: string; name: string };
+  app?: Identity;
   control?: { role: string; name: string; window: string };
 };
 type Refusal = IntegrationError & { notRun?: boolean };
@@ -246,7 +257,7 @@ function renderComputerTree(tree: Node | undefined, menuBar = false, mac = true)
   const walk = (node: Node, depth: number, index: number) => {
     if (
       length > treeChars ||
-      (menuBar && depth === 1 && index < 2) ||
+      (mac && menuBar && depth === 1 && index < 2) ||
       (mac && /menu/i.test(node.role ?? '') && systemMenu.test(node.name?.trim() ?? ''))
     )
       return;
@@ -327,16 +338,28 @@ export function createComputerUse(
     return listing.apps;
   }
 
-  function allowed(app: { bundle: string; name: string }, keptOut: string[], acting: boolean) {
-    const rule = computerAppRule(app.bundle, keptOut);
+  function ruleFor(app: Identity, keptOut: string[]) {
+    if (!mac && !app.bundle && !app.program)
+      return { kind: 'blocked' as const, why: 'an app Nod can’t identify' };
+    const rules = [app.bundle, app.program]
+      .filter((id): id is string => Boolean(id))
+      .map((id) => computerAppRule(id, keptOut));
+    return (
+      rules.find((rule) => rule.kind === 'blocked') ??
+      rules.find((rule) => rule.kind === 'view') ?? { kind: 'use' as const }
+    );
+  }
+
+  function allowed(app: Identity, keptOut: string[], acting: boolean) {
+    const rule = ruleFor(app, keptOut);
     if (rule.kind === 'blocked')
       throw new IntegrationError(`${app.name} is ${rule.why}, so Nod never uses it.`, 403);
     if (acting && rule.kind === 'view')
       throw new IntegrationError(`${app.name} is ${rule.why}. Nod can only look at it.`, 403);
   }
 
-  function granted(root: string, app: { bundle: string; name: string }) {
-    if (!grants.get(root)?.has(app.bundle))
+  function granted(root: string, app: Identity) {
+    if (!grants.get(root)?.has(appKey(app.bundle)))
       throw new IntegrationError(
         `Nod hasn't opened ${app.name} in this request. Use open {bundle: "${app.bundle}"} first.`,
         403,
@@ -356,9 +379,10 @@ export function createComputerUse(
 
   function grant(root: string, bundleId: string) {
     const current = forRoot(grants, root, () => new Set<string>());
-    if (current.size >= grantLimit && !current.has(bundleId))
+    const key = appKey(bundleId);
+    if (current.size >= grantLimit && !current.has(key))
       throw new IntegrationError(`This request already opened ${grantLimit} apps.`, 409);
-    current.add(bundleId);
+    current.add(key);
   }
 
   function remember(root: string, entries: Array<[string, Control]>) {
@@ -383,7 +407,7 @@ export function createComputerUse(
   function targetOf(root: string, refId: string, keptOut: string[]) {
     const found = shown(root, refId);
     if (found.secure) throw new IntegrationError('Nod never uses password fields.', 403);
-    const app = { bundle: found.bundle, name: found.app };
+    const app = { bundle: found.bundle, program: found.program, name: found.app };
     allowed(app, keptOut, true);
     granted(root, app);
     return found;
@@ -451,14 +475,15 @@ export function createComputerUse(
     if (action === 'COMPUTER_OPEN') {
       const app =
         (await running(signal)).find((item) => sameApp(item.bundle, input.bundle!)) ??
-        ((await ask({ op: 'locate', bundle: input.bundle }, signal)) as {
-          bundle: string;
-          name: string;
-          path?: string;
-        });
+        ((await ask({ op: 'locate', bundle: input.bundle }, signal)) as Identity);
       allowed(app, keptOut, false);
-      if ('path' in app && app.path) allowed({ bundle: app.path, name: app.name }, keptOut, false);
-      return { app: { bundle: app.bundle, name: app.name } };
+      return {
+        app: {
+          bundle: app.bundle,
+          name: app.name,
+          ...(app.program ? { program: app.program } : {}),
+        },
+      };
     }
     if (targeted.has(action)) {
       const found = targetOf(root, input.ref!, keptOut);
@@ -554,6 +579,7 @@ export function createComputerUse(
   function control(app: App, prepared: ComputerPrepared, node: Node, menu = false): Control {
     return {
       bundle: app.bundle,
+      ...(app.program ? { program: app.program } : {}),
       app: app.name,
       window: String(prepared.windowTitle ?? ''),
       ...(prepared.window ? { windowId: String(prepared.window) } : {}),
@@ -607,7 +633,7 @@ export function createComputerUse(
       const apps = await running(signal);
       return async () => ({
         apps: apps.map((app) => {
-          const rule = computerAppRule(app.bundle, keptOut);
+          const rule = ruleFor(app, keptOut);
           return {
             pid: app.pid,
             bundle: app.bundle,
@@ -616,7 +642,7 @@ export function createComputerUse(
               ? { blocked: rule.why }
               : {
                   ...(rule.kind === 'view' ? { viewOnly: rule.why } : {}),
-                  ...(grants.get(root)?.has(app.bundle)
+                  ...(grants.get(root)?.has(appKey(app.bundle))
                     ? { opened: true, windows: app.windows }
                     : { opened: false }),
                 }),
@@ -786,7 +812,13 @@ export function createComputerUse(
         .strict()
         .safeParse(request.body);
       if (!input.success) return reply.code(400).send({ error: 'Name accessibility or screen.' });
-      await desktop.request({ op: 'request', which: input.data.which });
+      try {
+        await desktop.request({ op: 'request', which: input.data.which });
+      } catch (error) {
+        return reply.code(409).send({
+          error: `Nod couldn't ask for this permission: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
       return status();
     });
     app.delete('/api/computer-use/keep-out', async (request, reply) => {

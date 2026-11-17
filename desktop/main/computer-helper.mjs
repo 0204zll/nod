@@ -1,8 +1,18 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFile } from 'node:child_process';
-import { access, chmod, constants, mkdir, readdir, readFile, rm } from 'node:fs/promises';
+import {
+  access,
+  chmod,
+  constants,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  readlink,
+  rm,
+} from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const answerMs = 30_000;
@@ -31,6 +41,7 @@ const passedEnvironment = [
   'PATH',
   'LANG',
   'DBUS_SESSION_BUS_ADDRESS',
+  'AT_SPI_BUS_ADDRESS',
   'DISPLAY',
   'WAYLAND_DISPLAY',
   'XDG_RUNTIME_DIR',
@@ -51,6 +62,34 @@ const passedEnvironment = [
 ];
 const desktopId = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/;
 const programName = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,99}$/;
+const refusedCategories = /(^|;)(TerminalEmulator|Settings|System|FileManager|Security)(;|$)/;
+
+async function windowsProgram(path) {
+  const file = await open(path).catch(() => undefined);
+  if (!file) return false;
+  try {
+    const header = Buffer.alloc(1024);
+    await file.read(header, 0, header.length, 0);
+    const pe = header.readUInt32LE(0x3c);
+    return (
+      header.toString('latin1', 0, 2) === 'MZ' &&
+      pe + 0x5e <= header.length &&
+      header.toString('latin1', pe, pe + 4) === 'PE\0\0' &&
+      header.readUInt16LE(pe + 0x5c) === 2
+    );
+  } finally {
+    await file.close();
+  }
+}
+
+function launcher(exec = '') {
+  const words = exec.split(/\s+/).filter((word) => word && !/^[A-Z_]+=/.test(word));
+  if (words[0] && basename(words[0]) === 'env') words.shift();
+  while (words[0] && /^[A-Z_]+=/.test(words[0])) words.shift();
+  if (words[0] && basename(words[0]) === 'flatpak' && words[1] === 'run')
+    return words.slice(2).find((word) => !word.startsWith('-')) ?? 'flatpak';
+  return words[0] ? basename(words[0]) : '';
+}
 
 function output(file, args) {
   return new Promise((resolve) =>
@@ -412,32 +451,54 @@ export function createComputerHelper({
   const operations = {
     permissions,
     request: async (request) => {
-      await run(['permissions', request.which === 'screen' ? '--guide' : '--request']).catch(
-        () => {},
-      );
+      await run(['permissions', request.which === 'screen' ? '--guide' : '--request']);
       return permissions();
     },
     apps: async () => {
       const [{ apps }, windows] = await Promise.all([run(['list-apps']), run(['list-windows'])]);
       return {
-        apps: apps.map((app) => ({
-          pid: app.pid,
-          bundle: app.bundle_id ?? app.name,
-          name: app.name,
-          windows: windows
-            .filter((window) => window.pid === app.pid && window.visible !== false)
-            .map((window) => ({ id: window.id, title: window.title ?? '' })),
-        })),
+        apps: await Promise.all(
+          apps.map(async (app) => ({
+            pid: app.pid,
+            bundle: app.bundle_id ?? (platform === 'linux' ? '' : app.name),
+            ...(platform === 'linux'
+              ? { program: await readlink(`/proc/${app.pid}/exe`).then(basename, () => '') }
+              : platform === 'win32'
+                ? { program: app.name }
+                : {}),
+            name: app.name,
+            windows: windows
+              .filter((window) => window.pid === app.pid && window.visible !== false)
+              .map((window) => ({ id: window.id, title: window.title ?? '' })),
+          })),
+        ),
       };
     },
-    locate,
+    locate: async (request) => {
+      const { bundle, name, program } = await locate(request);
+      return { bundle, name, ...(program ? { program } : {}) };
+    },
     open: async (request) => {
-      const found = platform === 'darwin' ? undefined : await locate(request);
-      const opened = await run([
-        'launch',
-        found?.path ?? found?.bundle ?? check(request.bundle, appName, 'app'),
-      ]);
-      return { pid: opened.pid };
+      if (platform === 'darwin')
+        return { pid: (await run(['launch', check(request.bundle, appName, 'app')])).pid };
+      const found = await locate(request);
+      if (platform === 'win32') return { pid: (await run(['launch', found.path])).pid };
+      await new Promise((resolve, reject) =>
+        execFile('gio', ['launch', found.entry], { timeout: 10_000 }, (error) =>
+          error
+            ? reject(
+                new Error(`ACTION_NOT_SUPPORTED: gio could not start the app: ${error.message}`),
+              )
+            : resolve(),
+        ),
+      );
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const { apps } = await run(['list-apps']);
+        const started = apps.find((app) => app.bundle_id === found.bundle);
+        if (started) return { pid: started.pid };
+        await delay(250);
+      }
+      return {};
     },
     snapshot: (request) =>
       observe(request, async () => {
@@ -500,25 +561,30 @@ export function createComputerHelper({
     if (platform === 'win32') {
       const name = check(request.bundle, programName, 'program name').replace(/\.exe$/i, '');
       const root = process.env.SystemRoot ?? 'C:\\Windows';
-      for (const path of [join(root, 'System32', `${name}.exe`), join(root, `${name}.exe`)])
+      const candidates = [join(root, 'System32', `${name}.exe`), join(root, `${name}.exe`)];
+      for (const hive of ['HKCU', 'HKLM'])
+        candidates.push(
+          (
+            await output('reg', [
+              'query',
+              `${hive}\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${name}.exe`,
+              '/ve',
+            ])
+          )
+            .match(/REG_(?:EXPAND_)?SZ\s+"?([^"\r\n]+?)"?\s*$/m)?.[1]
+            ?.replace(/%([^%]+)%/g, (whole, variable) => process.env[variable] ?? whole) ?? '',
+        );
+      for (const path of candidates.filter(Boolean)) {
         if (
-          await access(path).then(
+          !(await access(path).then(
             () => true,
             () => false,
-          )
+          ))
         )
-          return { bundle: `${name}.exe`, name, path };
-      for (const hive of ['HKCU', 'HKLM']) {
-        const path = (
-          await output('reg', [
-            'query',
-            `${hive}\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${name}.exe`,
-            '/ve',
-          ])
-        )
-          .match(/REG_(?:EXPAND_)?SZ\s+"?([^"\r\n]+?)"?\s*$/m)?.[1]
-          ?.replace(/%([^%]+)%/g, (whole, variable) => process.env[variable] ?? whole);
-        if (path) return { bundle: `${name}.exe`, name, path };
+          continue;
+        if (!(await windowsProgram(path)))
+          throw new Error(`${name} is not a windowed app, so Nod never starts it.`);
+        return { bundle: `${name}.exe`, name, path, program: basename(path) };
       }
       throw new Error(`No program named ${name} is installed. Use the name of its .exe file.`);
     }
@@ -532,9 +598,8 @@ export function createComputerHelper({
       ...(process.env.XDG_DATA_DIRS ?? '/usr/local/share:/usr/share').split(':'),
     ];
     for (const directory of directories) {
-      const entry = await readFile(join(directory, 'applications', `${id}.desktop`), 'utf8').catch(
-        () => undefined,
-      );
+      const path = join(directory, 'applications', `${id}.desktop`);
+      const entry = await readFile(path, 'utf8').catch(() => undefined);
       if (entry === undefined) continue;
       const fields = Object.fromEntries(
         (entry.split(/^\[/m).find((section) => section.startsWith('Desktop Entry]')) ?? '')
@@ -545,9 +610,18 @@ export function createComputerHelper({
       );
       if (fields.Type !== 'Application' || fields.Hidden === 'true')
         throw new Error(`${id} is not an app Nod can open.`);
-      if (fields.Terminal === 'true')
+      if (fields.Terminal === 'true' || /(^|;)TerminalEmulator(;|$)/.test(fields.Categories ?? ''))
         throw new Error(`${fields.Name ?? id} runs in a terminal, so Nod never opens it.`);
-      return { bundle: id, name: fields.Name || id };
+      if (refusedCategories.test(fields.Categories ?? ''))
+        throw new Error(
+          `${fields.Name ?? id} is a system, settings or file manager app, so Nod never opens it.`,
+        );
+      return {
+        bundle: id,
+        name: fields.Name || id,
+        program: launcher(fields.Exec),
+        entry: path,
+      };
     }
     throw new Error(
       `No app with the desktop ID ${id} is installed. Use the ID from its .desktop file, such as org.gnome.TextEditor.`,

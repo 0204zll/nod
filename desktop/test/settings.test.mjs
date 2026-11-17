@@ -8733,6 +8733,14 @@ test('computer use on Linux opens only installed desktop apps that do not run in
     '[Desktop Entry]\nType=Application\nName=Text Editor\nExec=gnome-text-editor\n',
   );
   await writeFile(
+    join(data, 'applications', 'debian-xterm.desktop'),
+    '[Desktop Entry]\nType=Application\nName=XTerm\nExec=xterm\nCategories=System;TerminalEmulator;\n',
+  );
+  await writeFile(
+    join(data, 'applications', 'org.gnome.Settings.desktop'),
+    '[Desktop Entry]\nType=Application\nName=Settings\nExec=gnome-control-center\nCategories=GTK;Settings;\n',
+  );
+  await writeFile(
     join(data, 'applications', 'org.gnome.Terminal.desktop'),
     '[Desktop Entry]\nType=Application\nName=Terminal\nExec=gnome-terminal\nTerminal=true\n',
   );
@@ -8749,13 +8757,22 @@ test('computer use on Linux opens only installed desktop apps that do not run in
   });
   const desktop = await fakeDesktop(
     t,
-    { launch: { ok: true, data: { pid: 7 } } },
+    { status: { ok: true, data: { supported_surfaces: ['window', 'menu'] } } },
     { platform: 'linux' },
   );
   assert.deepEqual(await desktop.helper.request({ op: 'locate', bundle: 'org.gnome.TextEditor' }), {
     bundle: 'org.gnome.TextEditor',
     name: 'Text Editor',
+    program: 'gnome-text-editor',
   });
+  await assert.rejects(
+    desktop.helper.request({ op: 'open', bundle: 'debian-xterm' }),
+    /runs in a terminal/,
+  );
+  await assert.rejects(
+    desktop.helper.request({ op: 'open', bundle: 'org.gnome.Settings' }),
+    /system, settings or file manager/,
+  );
   await assert.rejects(
     desktop.helper.request({ op: 'open', bundle: 'org.gnome.Terminal' }),
     /runs in a terminal/,
@@ -8765,12 +8782,52 @@ test('computer use on Linux opens only installed desktop apps that do not run in
     /No app with the desktop ID/,
   );
   assert.deepEqual(await desktop.calls(), []);
-  await desktop.helper.request({ op: 'open', bundle: 'org.gnome.TextEditor' });
-  assert.deepEqual(await desktop.calls(), ['launch org.gnome.TextEditor']);
+  await assert.rejects(
+    desktop.helper.request({ op: 'snapshot', app: 'gedit', menu: true }),
+    /ACTION_NOT_SUPPORTED: This computer has no separate menu bar/,
+  );
 
   const flatpak = await fakeDesktop(t, {}, { platform: 'linux', sandboxed: true });
   await assert.rejects(
     flatpak.helper.request({ op: 'open', bundle: 'org.gnome.TextEditor' }),
     /Flatpak sandbox/,
   );
+});
+
+test('computer use on Windows starts only windowed programs', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'nod-windows-root-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'System32'));
+  const program = (subsystem) => {
+    const header = Buffer.alloc(256);
+    header.write('MZ', 0, 'latin1');
+    header.writeUInt32LE(0x80, 0x3c);
+    header.write('PE\0\0', 0x80, 'latin1');
+    header.writeUInt16LE(subsystem, 0x80 + 0x5c);
+    return header;
+  };
+  await writeFile(join(root, 'System32', 'notepad.exe'), program(2));
+  await writeFile(join(root, 'System32', 'logoff.exe'), program(3));
+  const saved = process.env.SystemRoot;
+  process.env.SystemRoot = root;
+  t.after(() => {
+    if (saved === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = saved;
+  });
+  const desktop = await fakeDesktop(
+    t,
+    { launch: { ok: true, data: { pid: 9 } } },
+    { platform: 'win32' },
+  );
+  assert.deepEqual(await desktop.helper.request({ op: 'locate', bundle: 'notepad' }), {
+    bundle: 'notepad.exe',
+    name: 'notepad',
+    program: 'notepad.exe',
+  });
+  await assert.rejects(
+    desktop.helper.request({ op: 'open', bundle: 'logoff' }),
+    /not a windowed app/,
+  );
+  assert.deepEqual(await desktop.helper.request({ op: 'open', bundle: 'notepad' }), { pid: 9 });
+  assert.deepEqual(await desktop.calls(), [`launch ${join(root, 'System32', 'notepad.exe')}`]);
 });

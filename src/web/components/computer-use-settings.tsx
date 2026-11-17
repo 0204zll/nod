@@ -85,7 +85,7 @@ export function ComputerUseSettings() {
           terminals, system settings, {fileManager} and password managers are never used.
         </p>
       </section>
-      {data.enabled && !data.permissions.ready && (
+      {data.enabled && data.platform === 'linux' && !data.permissions.ready && (
         <section className="account-region">
           <p className="field-hint">
             Nod can’t reach the accessibility service on this computer. On Linux, install
