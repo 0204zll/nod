@@ -40,6 +40,7 @@ import {
   clearChatContext,
   resumeAfterHandoff,
   stopSignal,
+  messageIntakeSignal,
   stopThread,
   submitUserMessage,
 } from './thread.ts';
@@ -563,13 +564,18 @@ export async function createApp(dependencies: AppDependencies = {}) {
     const clientMessageId = input.clientMessageId ?? randomUUID();
     if (
       input.text.trim().toLowerCase() === '/clear' &&
-      input.attachmentIds.length === 0 &&
       (!input.questionAnswer ||
         ('custom' in input.questionAnswer && input.questionAnswer.custom === true)) &&
       !input.approvalAnswer &&
       !input.verificationRequestId
-    )
+    ) {
+      if (input.attachmentIds.length)
+        throw Object.assign(new Error('Send /clear as a text message without attachments.'), {
+          statusCode: 400,
+        });
       return clearChatContext(input.threadId, clientMessageId);
+    }
+    const signal = await messageIntakeSignal(arrival, input);
     const verification =
       (input.questionAnswer && !('custom' in input.questionAnswer)) || input.approvalAnswer
         ? undefined
@@ -577,6 +583,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
             ...input,
             clientMessageId,
             channel: 'web',
+            signal,
           });
     if (verification) return verification;
     if (input.verificationRequestId)
@@ -606,6 +613,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
         replyQuote: input.replyQuote,
         seenMessageId: input.seenMessageId,
         threadId: input.threadId,
+        chatClearedAt: input.chatClearedAt,
         clientMessageId,
         questionAnswer: input.questionAnswer,
         approvalAnswer: input.approvalAnswer,

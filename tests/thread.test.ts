@@ -6457,6 +6457,74 @@ test(
             );
             release(nextPrompt);
             await waitFor(settled(next.turnId));
+            const attachment = await storeArtifact(
+              Buffer.from('Synthetic clear attachment'),
+              'clear.txt',
+              'text/plain',
+              threadId,
+            );
+            assert.equal(
+              (
+                await request('POST', '/api/messages', {
+                  threadId,
+                  text: '/clear',
+                  attachmentIds: [attachment.id],
+                  clientMessageId: randomUUID(),
+                })
+              ).statusCode,
+              400,
+            );
+            assert.equal(
+              (await sendAudio({ threadId, text: '/clear', clientMessageId: randomUUID() }))
+                .statusCode,
+              400,
+            );
+            assert.equal(
+              (
+                await request('POST', '/api/messages', {
+                  threadId,
+                  text: 'Synthetic stale client input',
+                  clientMessageId: randomUUID(),
+                  chatClearedAt: null,
+                })
+              ).statusCode,
+              409,
+            );
+            const arrival = thread.stopSignal();
+            await db.pool
+              .query(`CREATE FUNCTION reject_clear() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+              IF NEW.text='/clear' THEN RAISE EXCEPTION 'Synthetic clear failure'; END IF;
+              RETURN NEW; END $$;
+              CREATE TRIGGER reject_clear BEFORE INSERT ON messages FOR EACH ROW EXECUTE FUNCTION reject_clear()`);
+            try {
+              assert.equal(
+                (
+                  await request('POST', '/api/messages', {
+                    threadId,
+                    text: '/clear',
+                    clientMessageId: randomUUID(),
+                  })
+                ).statusCode,
+                500,
+              );
+            } finally {
+              await db.pool.query(
+                'DROP TRIGGER reject_clear ON messages; DROP FUNCTION reject_clear()',
+              );
+            }
+            assert.equal(
+              (await request('GET', '/api/state')).json().chatClearedAt,
+              state.chatClearedAt,
+            );
+            const afterRollback = await thread.submitUserMessage(
+              'Synthetic input after failed clear',
+              [],
+              {
+                stopSignal: arrival,
+              },
+            );
+            await waitFor(settled(afterRollback.turnId));
+            assert.equal(await turnStatus(afterRollback.turnId), 'succeeded');
           } finally {
             modelErrors.delete('/clear');
             release(backgroundPrompt);
@@ -6519,18 +6587,23 @@ test(
           const previousReady = chatReady;
           transcript = 'Synthetic audio input before clear';
           const audioCount = transcriptions.length;
+          const mainMessageId = randomUUID();
+          const audioMessageId = randomUUID();
+          const artifactCount = (await db.pool.query('SELECT count(*)::int AS n FROM artifacts'))
+            .rows[0].n;
           const main = request('POST', '/api/messages', {
             threadId,
             text: mainText,
-            clientMessageId: randomUUID(),
+            clientMessageId: mainMessageId,
           }).then((response) => response);
           const task = request('POST', '/api/messages', {
             threadId,
             text: taskText,
             clientMessageId: randomUUID(),
             replyToMessageId: statusMessage,
+            chatClearedAt: null,
           }).then((response) => response);
-          const audio = sendAudio({ threadId, clientMessageId: randomUUID() }).then(
+          const audio = sendAudio({ threadId, clientMessageId: audioMessageId }).then(
             (response) => response,
           );
           try {
@@ -6547,22 +6620,59 @@ test(
             releaseAudio();
             const [mainResult, taskResult, audioResult] = await Promise.all([main, task, audio]);
             for (const response of [mainResult, audioResult]) {
-              assert.equal(response.statusCode, 200, response.body);
-              const id = response.json().turnId as string;
-              assert.equal(await turnStatus(id), 'cancelled');
-              assert.equal(Boolean(ran(id)), false);
-              assert.equal(
-                (await db.pool.query('SELECT withdrawn FROM turns WHERE id=$1', [id])).rows[0]
-                  .withdrawn,
-                true,
-              );
+              assert.equal(response.statusCode, 409, response.body);
+              assert.equal(response.json().retryable, true);
             }
+            assert.equal(
+              (
+                await db.pool.query('SELECT id FROM messages WHERE id=ANY($1::uuid[])', [
+                  [mainMessageId, audioMessageId],
+                ])
+              ).rowCount,
+              0,
+            );
+            assert.equal(
+              (await db.pool.query('SELECT count(*)::int AS n FROM artifacts')).rows[0].n,
+              artifactCount,
+            );
+            assert.equal(
+              (
+                await db.pool.query('SELECT response FROM audio_messages WHERE message_id=$1', [
+                  audioMessageId,
+                ])
+              ).rows[0].response,
+              null,
+            );
+            const freshState = (await request('GET', '/api/state')).json();
+            assert.equal(
+              freshState.messages.some(
+                (message: Message) => message.id === mainMessageId || message.id === audioMessageId,
+              ),
+              false,
+            );
+            assert.equal(
+              (await request('GET', '/api/messages'))
+                .json()
+                .messages.some(
+                  (message: Message) =>
+                    message.id === mainMessageId || message.id === audioMessageId,
+                ),
+              false,
+            );
             assert.equal(taskResult.statusCode, 200, taskResult.body);
             const continued = taskResult.json().turnId as string;
             await waitFor(settled(continued));
             assert.equal(ran(continued)!.sessionId, taskId);
             assert.equal(ran(continued)!.prompt, taskText);
             assert.equal(await turnStatus(continued), 'succeeded');
+            transcriptionGate = undefined;
+            assert.equal(
+              (await sendAudio({ threadId, clientMessageId: audioMessageId })).statusCode,
+              409,
+            );
+            const resent = await sendAudio({ threadId, clientMessageId: randomUUID() });
+            assert.equal(resent.statusCode, 200, resent.body);
+            await waitFor(settled(resent.json().turnId));
           } finally {
             chatReady = previousReady;
             releaseReading();

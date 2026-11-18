@@ -305,7 +305,8 @@ export function createPersonalService(dependencies: PersonalDependencies) {
            AND m.created_at>COALESCE((SELECT chat_cleared_at FROM threads WHERE id=m.thread_id AND owner_id=$1),'-infinity')
            AND ($3::timestamptz IS NULL OR m.created_at<$3) AND to_tsvector('english',m.text) @@ terms.q),
        weights AS (
-         SELECT w,ln(1+((SELECT count(*) FROM messages m WHERE m.owner_id=$1 AND ${activeThreadSql('m')})-count(*)+0.5)/(count(*)+0.5)) AS idf
+         SELECT w,ln(1+((SELECT count(*) FROM messages m WHERE m.owner_id=$1 AND ${activeThreadSql('m')}
+           AND m.created_at>COALESCE((SELECT chat_cleared_at FROM threads WHERE id=m.thread_id AND owner_id=$1),'-infinity'))-count(*)+0.5)/(count(*)+0.5)) AS idf
          FROM (SELECT DISTINCT lexeme AS w FROM unnest(tsvector_to_array(to_tsvector('english',$2))) lexeme) words
          JOIN docs ON docs.v @@ quote_literal(w)::tsquery GROUP BY w),
        best AS (

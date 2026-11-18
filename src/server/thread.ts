@@ -121,6 +121,7 @@ interface EnqueueTurnOptions {
   client?: PoolClient;
 }
 interface SubmitUserMessageOptions {
+  chatClearedAt?: string | null;
   threadId?: string;
   sourceId?: string;
   channel?: string;
@@ -632,6 +633,32 @@ async function repliesOutsideChat(
   );
 }
 
+export async function messageIntakeSignal(
+  arrival: AbortSignal,
+  input: Pick<SubmitUserMessageOptions, 'threadId' | 'replyToMessageId' | 'chatClearedAt'>,
+  database: Pool | PoolClient = pool,
+) {
+  const chat = chatIntakes.get(arrival);
+  if (!chat && input.chatClearedAt === undefined) return undefined;
+  const threadId = input.threadId ?? (await activeThread(database)).id;
+  if (await repliesOutsideChat(database, threadId, input.replyToMessageId)) return undefined;
+  if (input.chatClearedAt !== undefined) {
+    const current = await database.query<{ current: boolean }>(
+      'SELECT chat_cleared_at IS NOT DISTINCT FROM $3::timestamptz AS current FROM threads WHERE id=$1 AND owner_id=$2',
+      [threadId, ownerId, input.chatClearedAt],
+    );
+    if (current.rows[0]?.current === false) throw clearedIntakeError();
+  }
+  chat?.throwIfAborted();
+  return chat;
+}
+
+const clearedIntakeError = () =>
+  Object.assign(httpError('This message was cancelled when the chat was cleared.', 409), {
+    code: 'chat_cleared',
+    retryable: true,
+  });
+
 async function readAnswer(
   text: string,
   hasAttachments: boolean,
@@ -641,12 +668,7 @@ async function readAnswer(
 ) {
   if (!confirmAction) return undefined;
   const threadId = options.threadId ?? (await activeThread(pool)).id;
-  if (
-    arrival &&
-    chatIntakes.get(arrival)?.aborted &&
-    !(await repliesOutsideChat(pool, threadId, options.replyToMessageId))
-  )
-    return undefined;
+  if (arrival) await messageIntakeSignal(arrival, { ...options, threadId });
   return confirmAction?.answer({
     text,
     channel: options.channel ?? 'web',
@@ -748,6 +770,7 @@ export async function submitUserMessage(
       ).rows[0];
       if (prior) return { threadId: thread.id, turnId: prior.id, messageId: prior.message_id };
     }
+    await messageIntakeSignal(stop, { ...options, threadId: thread.id }, client);
     await assertReplyTarget(client, thread.id, options.replyToMessageId);
     let choiceQuestion: { id: string; session_id: string; background: boolean } | undefined;
     if (options.questionAnswer !== undefined) {
@@ -789,10 +812,7 @@ export async function submitUserMessage(
       (!options.replyToMessageId || !options.replyQuote.trim() || options.replyQuote.length > 4000)
     )
       throw httpError('Select a passage of 4,000 characters or fewer.');
-    const live =
-      !stop.aborted &&
-      (!chatIntakes.get(stop)?.aborted ||
-        (await repliesOutsideChat(client, thread.id, options.replyToMessageId)));
+    const live = !stop.aborted;
     const confirmed =
       options.questionAnswer || !live
         ? undefined
@@ -1079,8 +1099,11 @@ export async function clearChatContext(
         throw httpError('This message ID was already used for another request.', 409);
       return { threadId: thread.id, turnId: previous.turn_id as string, messageId };
     }
-    chatStop.abort();
-    chatStop = new AbortController();
+    afterCommit(client, () => {
+      const previous = chatStop;
+      chatStop = new AbortController();
+      previous.abort(clearedIntakeError());
+    });
     await cancelTurns(client, thread.id, { sessionId: thread.id });
     const turnId = randomUUID();
     await client.query(

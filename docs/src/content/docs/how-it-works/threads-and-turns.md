@@ -175,6 +175,8 @@ The owner can send `/clear` through web, desktop, Telegram or WhatsApp. The serv
 
 Under the thread lock, it cancels only main-chat turns, saves the command, and records new context and view boundaries. The next main-chat turn starts a fresh Pi transcript. Recent chat and automatic related-chat recall exclude earlier messages. Chat search can still read them.
 
+The intake boundary changes only after commit. Main-chat input still in progress, including transcription, is cancelled before it can save a new message or file. Web requests carry the last view boundary, so a queued main-chat message is refused after another client clears the chat. Addressed task replies keep their task session.
+
 The thread, workspace, browser, independent tasks, schedules, memory, accounts and settings stay. A repeated web command with the same message ID returns its first result and does not clear newer work. A stale thread ID or a message ID from another request is refused. The chat apps use their saved inbox transaction to handle the command once.
 
 ### Restart chat context

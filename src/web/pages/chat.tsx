@@ -601,6 +601,11 @@ export function Chat({
     cancelFocusedMessage();
     setReplyTo(null);
     setOptimistic((current) => current.filter((item) => item.threadId !== threadId));
+    const previous = retry.current;
+    if (previous && !previous.replyId) {
+      if (previous.recording) recordingIds.current.delete(recordingSource(previous.recording));
+      retry.current = null;
+    }
   }, [threadId, state.chatClearedAt]);
   if (hiddenHistory.current.threadId !== threadId)
     hiddenHistory.current = { threadId, count: hiddenCount, epoch: 0, oldest: null };
@@ -1250,6 +1255,10 @@ export function Chat({
     approvalAnswer?: { approvalId: string; approved: boolean },
   ): Promise<ComposerSendResult & { error?: string; questionUnavailable?: true }> {
     if (welcoming) return { sent: false, restoreText: true };
+    if (value.trim().toLowerCase() === '/clear' && (attachments.length || recording)) {
+      setError('Send /clear as a text message without attachments or a recording.');
+      return { sent: false, restoreText: true, restoreRecording: true };
+    }
     unreadPositioned.current = currentUnreadVisit.current;
     const replyId = reply?.id;
     questionAnswer ??=
@@ -1264,6 +1273,7 @@ export function Chat({
     const directAnswer = source === 'answer_choice' || source === 'approval_card';
     const captureAnalytics = analyticsForCurrentSession();
     const sentThread = threadId;
+    const sentChatClearedAt = state.chatClearedAt ?? null;
     const activeReply = { retired: false };
     const replyRetired = () => activeReply.retired;
     const verificationRequests = (
@@ -1412,6 +1422,14 @@ export function Chat({
           restoreRecording: !privateVerification,
         };
       }
+      if (!replyId && (clearedHistory.current.at ?? null) !== sentChatClearedAt) {
+        failed = true;
+        retry.current = null;
+        if (recordingKey) recordingIds.current.delete(recordingKey);
+        setOptimistic((current) => current.filter((item) => item.message.id !== id));
+        setError('This message was cancelled when the chat was cleared.');
+        return { sent: false, restoreText: true, restoreRecording: true };
+      }
       if (replyId && (hiddenMessageIds.current.has(replyId) || replyRetired())) {
         failed = true;
         retry.current = previousAttempt
@@ -1465,6 +1483,7 @@ export function Chat({
         submittedBody ??
         JSON.stringify({
           threadId: sentThread,
+          chatClearedAt: sentChatClearedAt,
           clientMessageId: id,
           text: value,
           ...(displayText ? { displayText } : {}),

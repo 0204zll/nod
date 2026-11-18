@@ -195,7 +195,7 @@ Nod doesn't ask for passwords or card numbers in chat. It uses a saved login or 
 
 ## Start a fresh chat
 
-Send `/clear` to start fresh chat context and a clean view. This command works without a model connection, in Nod, Telegram and WhatsApp.
+Send `/clear` as a text message without attachments or a recording to start fresh chat context and a clean view. This command works without a model connection on the web, desktop, Telegram and WhatsApp.
 
 Nod stops work in the main chat. Independent tasks keep running. Files, apps, Vault, memory, schedules and settings stay. Previous messages remain available in chat search. The next message starts with fresh model context; automatic related-chat recall also starts at this point.
 
