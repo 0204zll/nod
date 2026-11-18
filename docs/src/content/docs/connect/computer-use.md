@@ -43,7 +43,7 @@ Nod opens an app only when your words name it or ask for work that needs it. Ope
 | Type             | Sets or types the text of a field, or picks an option.                                                             |
 | Key              | Sends a shortcut, such as Cmd+N, to that app only.                                                                 |
 
-Each step that could commit something goes through the same [trust check](/trust/approvals/) as an app action, with the app, the window and the control as the app labels it. Reading, moving around and typing into a document or field run without asking. Sending, saving over or deleting a file, submitting, ordering, paying, changing settings and quitting without saving need your words; otherwise Nod asks. Typing that ends a line, such as pressing Return in a chat app, counts as a step that can send. A step you approved runs only while the same control is still in the same window; otherwise Nod doesn't run it and looks again.
+Each step that could commit something goes through the same [trust check](/trust/approvals/) as an app action, with the app, the window, the control as the app labels it, and what Nod typed in that app during the request, such as a recipient and a message. Reading, moving around, typing into a document or field and filling an empty field run without asking. Replacing text already in a field needs your words, because it deletes that text. Sending, saving over or deleting a file, submitting, ordering, paying, changing settings and quitting without saving need your words; otherwise Nod asks. Typing that ends a line, such as pressing Return in a chat app, counts as a step that can send. A step you approved runs only while the same control is still in the same window and Nod hasn't typed anything more in that app; otherwise Nod doesn't run it and looks again.
 
 ## What Nod never does
 
@@ -60,7 +60,7 @@ Nod refuses these, without a judgment call. It recognizes apps by their ID and p
 
 Web browsers, such as Chrome and Safari, and code editors, such as VS Code, are view-only: Nod can read them but never presses, types or chooses anything there. For websites Nod uses [its own browser](/use/browser/), with your Vault and its safety checks.
 
-Nod never reads or types into password fields, and takes no picture of an app while a password field has focus. To sign in somewhere, Nod uses [Vault](/trust/vault/) in its own browser.
+Nod never reads or types into password fields: it checks the field again right before typing, and sends no shortcut and takes no picture of an app while a password field has focus. To sign in somewhere, Nod uses [Vault](/trust/vault/) in its own browser.
 
 ## See when Nod uses an app
 

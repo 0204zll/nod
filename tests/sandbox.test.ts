@@ -1523,7 +1523,7 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
       windows: [{ id: 'w-3', title: 'zsh' }],
     },
   ];
-  const window = {
+  const window: { role: string; name: string; children: Array<Record<string, unknown>> } = {
     role: 'window',
     name: 'Draft',
     children: [
@@ -1531,6 +1531,7 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
       { role: 'textfield', name: 'Subject', value: 'Hi', ref_id: '@sdraft01:e2' },
       { role: 'textfield', ref_id: '@sdraft01:e3', states: ['secure', 'focused'], value: null },
       { role: 'securetextfield', name: 'PIN', ref_id: '@sdraft01:e4' },
+      { role: 'textarea', name: 'Notes', ref_id: '@sdraft01:e5' },
     ],
   };
   const menuBar = {
@@ -1553,6 +1554,10 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
       },
     ],
   };
+  const findings: Array<Record<string, unknown>> = [
+    { role: 'textfield', name: 'Message to Ada', ref_id: '@sfind001:e1', value: '' },
+    { role: 'textfield', name: 'Password', ref_id: '@sfind001:e2', states: ['secure'] },
+  ];
   const computer = createComputerUse(pool, 'owner', {
     platform: 'darwin',
     desktop: {
@@ -1564,6 +1569,10 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
           if (!found) throw new Error('No app with that bundle ID is installed.');
           return { bundle: found.bundle, name: found.name };
         }
+        if (request.op === 'snapshot' && request.ref)
+          return {
+            tree: [...window.children, ...findings].find((node) => node.ref_id === request.ref),
+          };
         if (request.op === 'snapshot')
           return {
             tree: request.menu
@@ -1576,13 +1585,9 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
                 : window,
           };
         if (request.op === 'screenshot') return { image: 'synthetic' };
-        if (request.op === 'find')
-          return {
-            matches: [
-              { role: 'textfield', name: 'Message to Ada', ref_id: '@sfind001:e1', value: '' },
-              { role: 'textfield', name: 'Password', ref_id: '@sfind001:e2', states: ['secure'] },
-            ],
-          };
+        if (request.op === 'find') return { matches: findings };
+        if (request.text === 'cut off')
+          throw new Error('ACTION_FAILED: the app stopped answering after the text arrived');
         return { disposition: { delivery: 'delivered_verified' } };
       },
     },
@@ -1687,12 +1692,121 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     ref: '@sdraft01:e2',
     text: 'Hello',
   });
-  assert.equal(computer.needsCheck('COMPUTER_SET_VALUE', typed), false);
+  assert.equal(computer.needsCheck('COMPUTER_SET_VALUE', typed), true);
+  assert.equal(
+    (computer.checked('COMPUTER_SET_VALUE', typed) as Record<string, unknown>).replacesText,
+    true,
+  );
+  const filling = await computer.prepare(turn, 'COMPUTER_SET_VALUE', {
+    ref: '@sfind001:e1',
+    text: 'Hello',
+  });
+  assert.equal(computer.needsCheck('COMPUTER_SET_VALUE', filling), false);
+  findings[0]!.value = 'Ada wrote this';
+  await assert.rejects(
+    computer.execute(turn, 'COMPUTER_SET_VALUE', filling),
+    (error: Error & { notRun?: boolean }) =>
+      error.notRun === true && /field changed/.test(error.message),
+  );
+  findings[0]!.value = '';
   const line = await computer.prepare(turn, 'COMPUTER_TYPE', {
     ref: '@sdraft01:e2',
     text: 'Hello\n',
   });
   assert.equal(computer.needsCheck('COMPUTER_TYPE', line), true);
+
+  const subject = window.children[1]!;
+  const intoSubject = await computer.prepare(turn, 'COMPUTER_TYPE', {
+    ref: '@sdraft01:e2',
+    text: 'Hi',
+  });
+  subject.states = ['secure'];
+  await assert.rejects(
+    computer.execute(turn, 'COMPUTER_TYPE', intoSubject),
+    (error: Error & { notRun?: boolean }) =>
+      error.notRun === true && /password fields/.test(error.message),
+  );
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_SET_VALUE', { ref: '@sdraft01:e2', text: 'x' }),
+    /password fields/,
+  );
+  delete subject.states;
+  const before = calls.length;
+  await assert.rejects(
+    computer.execute(
+      turn,
+      'COMPUTER_KEY',
+      await computer.prepare(turn, 'COMPUTER_KEY', { pid: 11, keys: 'cmd+v' }),
+    ),
+    (error: Error & { notRun?: boolean }) =>
+      error.notRun === true && /sent no keys/.test(error.message),
+  );
+  assert.ok(!calls.slice(before).some((call) => call.op === 'key'));
+
+  await computer.execute(
+    turn,
+    'COMPUTER_TYPE',
+    await computer.prepare(turn, 'COMPUTER_TYPE', {
+      ref: '@sfind001:e1',
+      text: 'Ada, see you at 10',
+    }),
+  );
+  const send = await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' });
+  assert.deepEqual(
+    (computer.checked('COMPUTER_PRESS', send) as Record<string, unknown>).typedInApp,
+    [{ control: 'Message to Ada', text: 'Ada, see you at 10' }],
+  );
+  await computer.execute(
+    turn,
+    'COMPUTER_TYPE',
+    await computer.prepare(turn, 'COMPUTER_TYPE', { ref: '@sfind001:e1', text: ' and bring Bo' }),
+  );
+  await assert.rejects(
+    computer.execute(turn, 'COMPUTER_PRESS', send),
+    (error: Error & { notRun?: boolean }) =>
+      error.notRun === true && /typed more/.test(error.message),
+  );
+  await assert.rejects(
+    computer.execute(
+      turn,
+      'COMPUTER_TYPE',
+      await computer.prepare(turn, 'COMPUTER_TYPE', { ref: '@sdraft01:e2', text: 'cut off' }),
+    ),
+    /stopped answering/,
+  );
+  for (let line = 0; line < 12; line++)
+    await computer.execute(
+      turn,
+      'COMPUTER_SET_VALUE',
+      await computer.prepare(turn, 'COMPUTER_SET_VALUE', {
+        ref: '@sfind001:e1',
+        text: `v${line}`,
+      }),
+    );
+  const later = await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' });
+  assert.deepEqual(
+    (computer.checked('COMPUTER_PRESS', later) as Record<string, unknown>).typedInApp,
+    [
+      { control: 'Subject', text: 'cut off' },
+      { control: 'Message to Ada', text: 'v11' },
+    ],
+  );
+  const notes = await computer.prepare(turn, 'COMPUTER_SET_VALUE', {
+    ref: '@sdraft01:e5',
+    text: 'Replaced',
+  });
+  assert.equal(computer.needsCheck('COMPUTER_SET_VALUE', notes), true);
+  findings[0]!.role = 'group';
+  await assert.rejects(
+    computer.execute(
+      turn,
+      'COMPUTER_TYPE',
+      await computer.prepare(turn, 'COMPUTER_TYPE', { ref: '@sfind001:e1', text: 'Hi' }),
+    ),
+    (error: Error & { notRun?: boolean }) =>
+      error.notRun === true && /control changed/.test(error.message),
+  );
+  findings[0]!.role = 'textfield';
 
   await computer.execute(
     turn,

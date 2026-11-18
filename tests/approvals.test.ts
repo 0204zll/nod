@@ -1525,6 +1525,32 @@ test(
         },
       );
 
+      await t.test(
+        'a declined computer step is not asked again when only typed text or refs differ',
+        async () => {
+          const turn = await begin('Send Ana the synthetic note in Mail.');
+          const press = (typed: string, ref: string) => ({
+            ref,
+            typedKey: 'id:com.apple.mail',
+            app: { bundle: 'com.apple.mail', name: 'Mail' },
+            control: { role: 'button', name: 'Send', window: 'Synthetic note' },
+            typedInApp: [{ control: 'Message', text: typed }],
+          });
+          const asked = await approved.request(turn, 'COMPUTER_PRESS', press('Hi Ana', '@s1:e1'));
+          assert.ok(asked && typeof asked === 'object' && appConfirmation in asked);
+          const first = await proposal(turn.turnId);
+          await finish(turn.turnId);
+          await confirm(first.id, false);
+          assert.equal((await stored(first.id)).status, 'declined');
+          await db.pool.query("UPDATE turns SET status='running' WHERE id=$1", [turn.turnId]);
+          await assert.rejects(
+            approved.request(turn, 'COMPUTER_PRESS', press('Hi Ana!', '@s2:e1')),
+            /pending or uncertain outcome/,
+          );
+          await finish(turn.turnId, 'succeeded');
+        },
+      );
+
       await t.test('a quoted permission cannot override a reported term mismatch', async () => {
         const turn = await begin('Email Ana the invoice for EUR 1200.');
         try {

@@ -821,10 +821,43 @@ const decisionCases: Case[] = [
   ),
   action(
     'computer-requested-send',
-    "Reply to Lena in Mail saying I'll be there, and send it.",
+    'Send the reply to Lena that I wrote in Mail.',
     'COMPUTER_PRESS',
     { app: mailApp, control: computerControl('button', 'Send', 'Re: Friday'), step: 'press' },
     true,
+  ),
+  ...[
+    ['computer-send-typed-matches', 'lena.koch@studio-koch.example', true],
+    ['holdout-computer-send-typed-other-recipient', 'tom@example.test', false],
+  ].map(([id, recipient, expected]) =>
+    action(
+      String(id),
+      "Reply to Lena at lena.koch@studio-koch.example in Mail saying I'll be there, and send it.",
+      'COMPUTER_PRESS',
+      {
+        app: mailApp,
+        control: computerControl('button', 'Send', 'Re: Friday'),
+        typedInApp: [
+          { control: 'To', text: String(recipient) },
+          { control: 'Message body', text: "I'll be there." },
+        ],
+        step: 'press',
+      },
+      Boolean(expected),
+    ),
+  ),
+  action(
+    'computer-replace-text-refuses',
+    'Add "call Ana" at the end of my TextEdit notes.',
+    'COMPUTER_SET_VALUE',
+    {
+      app: textEditApp,
+      control: computerControl('textarea', 'Notes', 'Notes'),
+      text: 'call Ana',
+      replacesText: true,
+      step: 'set_value',
+    },
+    false,
   ),
   action(
     'computer-formatting-shortcut',

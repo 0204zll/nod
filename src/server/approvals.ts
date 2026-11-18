@@ -18,6 +18,7 @@ import { localTimestamp } from '../shared/date-locale.ts';
 import { lockKey, locksTable } from './locks.ts';
 import { withdrawnSql } from './turn-chain.ts';
 import { afterCommit, transaction } from './transaction.ts';
+import { computerRequestArgs, isComputerAction } from './computer-use.ts';
 import type { CaptureAnalytics } from './analytics.ts';
 import type { TrustBasis } from './trust-basis.ts';
 import {
@@ -389,17 +390,26 @@ export async function createApprovals(
         authorMessageId = author.id;
       }
       if (background) await lockKey(client, `approvals:${ownerId}:${turn.threadId}`);
-      let previous = (
-        background
-          ? await client.query(
-              "SELECT * FROM approvals WHERE turn_id=ANY($1::uuid[]) AND owner_id=$2 AND action=$3 AND args=$4::jsonb AND status<>'expired' ORDER BY id LIMIT 1",
-              [chain.map((item) => item.id), ownerId, action, snapshot],
-            )
-          : await client.query(
-              "SELECT * FROM approvals WHERE thread_id=$1 AND owner_id=$2 AND source_message_id=$3 AND action=$4 AND args=$5::jsonb AND status<>'expired' ORDER BY id LIMIT 1",
-              [turn.threadId, ownerId, authorMessageId, action, snapshot],
-            )
-      ).rows[0];
+      const earlier = async (loose: boolean) => {
+        const same = (n: number) =>
+          loose
+            ? `args - $${n + 1}::text[]=$${n}::jsonb - $${n + 1}::text[] AND status NOT IN ('expired','completed')`
+            : `args=$${n}::jsonb AND status<>'expired'`;
+        const ignored = loose ? [computerRequestArgs] : [];
+        return (
+          background
+            ? await client.query(
+                `SELECT * FROM approvals WHERE turn_id=ANY($1::uuid[]) AND owner_id=$2 AND action=$3 AND ${same(4)} ORDER BY id LIMIT 1`,
+                [chain.map((item) => item.id), ownerId, action, snapshot, ...ignored],
+              )
+            : await client.query(
+                `SELECT * FROM approvals WHERE thread_id=$1 AND owner_id=$2 AND source_message_id=$3 AND action=$4 AND ${same(5)} ORDER BY id LIMIT 1`,
+                [turn.threadId, ownerId, authorMessageId, action, snapshot, ...ignored],
+              )
+        ).rows[0];
+      };
+      let previous =
+        (await earlier(false)) ?? (isComputerAction(action) ? await earlier(true) : undefined);
       if (
         previous?.status === 'pending' &&
         !(

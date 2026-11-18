@@ -67,9 +67,11 @@ const targeted = new Set<Action>([
 ]);
 const beforeDelivery =
   /^(OWNER_ACTIVE|STALE_REF|ACTION_NOT_SUPPORTED|POLICY_DENIED|AMBIGUOUS_TARGET|PERM_DENIED|STOPPED|INVALID):/;
+const entersText = new Set<Action>(['COMPUTER_TYPE', 'COMPUTER_SET_VALUE', 'COMPUTER_FOCUS']);
 const textRoles = new Set(['textfield', 'textarea', 'searchfield', 'combobox']);
 const step = (action: Action) => action.slice('COMPUTER_'.length).toLowerCase();
-export const computerInternalArgs = ['pid', 'ref', 'window'];
+export const computerInternalArgs = ['pid', 'ref', 'window', 'typedKey'];
+export const computerRequestArgs = [...computerInternalArgs, 'typedInApp', 'replacesText'];
 const systemKeys = new Set([
   'cmd+shift+esc',
   'cmd+shift+q',
@@ -258,6 +260,17 @@ export function computerAppRule(bundleId: string, keptOut: string[] = []) {
   return { kind: 'use' as const };
 }
 
+function secureFocused(node: Node | undefined): boolean {
+  return Boolean(
+    node &&
+    ((secure(node) && node.states?.includes('focused')) || node.children?.some(secureFocused)),
+  );
+}
+
+function holdsText(node: Node) {
+  return node.value !== '';
+}
+
 function secure(node: Node) {
   return (node.states?.includes('secure') ?? false) || /secure|password/i.test(node.role ?? '');
 }
@@ -311,6 +324,7 @@ export function createComputerUse(
     [...(grants.get(root)?.values() ?? [])].some((ids) => ids.includes(identity(app)));
   const grants = new Map<string, Map<string, string[]>>();
   const controls = new Map<string, Map<string, Control>>();
+  const typing = new Map<string, Map<string, Array<{ control: string; text: string }>>>();
   let listing: { at: number; apps: Promise<App[]> } | undefined;
 
   function unavailable() {
@@ -415,6 +429,54 @@ export function createComputerUse(
     }
   }
 
+  function typedIn(root: string, key: string) {
+    return typing.get(root)?.get(key) ?? [];
+  }
+
+  function noteTyped(root: string, key: string, control: string, text: string, append: boolean) {
+    const current = forRoot(typing, root, () => new Map());
+    const entries = typedIn(root, key);
+    const before = entries.find((entry) => entry.control === control);
+    const entry = { control, text: ((append ? (before?.text ?? '') : '') + text).slice(0, 500) };
+    current.set(key, [...entries.filter((item) => item !== before), entry].slice(-10));
+  }
+
+  async function live(found: Control, ref: string, signal?: AbortSignal) {
+    const { tree } = (await ask(
+      {
+        op: 'snapshot',
+        app: found.app,
+        ref,
+        ...(found.windowId ? { window: found.windowId } : {}),
+      },
+      signal,
+    )) as { tree?: Node };
+    if (!tree) throw new IntegrationError('That control is gone. Take a new snapshot.', 409);
+    if (secure(tree)) throw new IntegrationError('Nod never uses password fields.', 403);
+    if (tree.role !== found.role)
+      throw new IntegrationError('That control changed. Take a new snapshot.', 409);
+    return tree;
+  }
+
+  function unchangedTyping(root: string, action: Action, prepared: ComputerPrepared) {
+    if (!needsCheck(action, prepared)) return;
+    const now = typedIn(root, String(prepared.typedKey));
+    if (JSON.stringify(now) !== JSON.stringify(prepared.typedInApp ?? []))
+      throw new IntegrationError(
+        'Nod typed more in this app since this step was checked, so it did not run.',
+        409,
+      );
+  }
+
+  async function noSecureFocus(
+    scope: { app: string; window?: unknown },
+    refusal: string,
+    signal?: AbortSignal,
+  ) {
+    const current = (await ask({ op: 'snapshot', ...scope }, signal)) as { tree?: Node };
+    if (secureFocused(current.tree)) throw new IntegrationError(refusal, 403);
+  }
+
   function shown(root: string, refId: string) {
     const found = controls.get(root)?.get(refId);
     if (!found)
@@ -508,10 +570,17 @@ export function createComputerUse(
     }
     if (targeted.has(action)) {
       const found = targetOf(root, input.ref!, keptOut);
+      const key = identity(found);
+      const typed = typedIn(root, key);
       return {
         ...input,
         app: { bundle: found.bundle, name: found.app },
         control: { role: found.role, name: found.name, window: found.window },
+        ...(action === 'COMPUTER_SET_VALUE'
+          ? { replacesText: holdsText(await live(found, input.ref!, signal)) }
+          : {}),
+        ...(typed.length && action !== 'COMPUTER_FOCUS' ? { typedInApp: typed } : {}),
+        typedKey: key,
       };
     }
     if (action === 'COMPUTER_KEY' && systemShortcut(input.keys!, platform))
@@ -543,13 +612,22 @@ export function createComputerUse(
           : `${app.name} has no open window.`,
         404,
       );
-    return { ...base, menu: false, window: chosen.id, windowTitle: chosen.title };
+    const key = identity(app);
+    const typed = action === 'COMPUTER_KEY' ? typedIn(root, key) : [];
+    return {
+      ...base,
+      menu: false,
+      window: chosen.id,
+      windowTitle: chosen.title,
+      ...(typed.length ? { typedInApp: typed } : {}),
+      typedKey: key,
+    };
   }
 
   function needsCheck(action: Action, prepared: ComputerPrepared) {
     if (observing.has(action) || action === 'COMPUTER_FOCUS') return false;
     const text = textRoles.has(prepared.control?.role ?? '');
-    if (action === 'COMPUTER_SET_VALUE') return !text;
+    if (action === 'COMPUTER_SET_VALUE') return !text || prepared.replacesText === true;
     if (action === 'COMPUTER_TYPE') return !text || /[\r\n]/.test(String(prepared.text ?? ''));
     return true;
   }
@@ -715,6 +793,23 @@ export function createComputerUse(
       )
         throw new IntegrationError('That control changed since this step was checked.', 409);
       unique(await running(signal), found.app);
+      unchangedTyping(root, action, prepared);
+      if (entersText.has(action)) {
+        const node = await live(found, String(prepared.ref), signal);
+        if (action === 'COMPUTER_SET_VALUE' && holdsText(node) !== prepared.replacesText)
+          throw new IntegrationError('That field changed since this step was checked.', 409);
+      }
+      const entered = prepared.text ?? prepared.option;
+      const note = () => {
+        if (action !== 'COMPUTER_FOCUS' && typeof entered === 'string' && entered)
+          noteTyped(
+            root,
+            String(prepared.typedKey),
+            found.name || found.role,
+            entered,
+            action === 'COMPUTER_TYPE',
+          );
+      };
       return async () => {
         const result = (await ask(
           {
@@ -727,7 +822,11 @@ export function createComputerUse(
             ...(prepared.option !== undefined ? { option: prepared.option } : {}),
           },
           signal,
-        )) as { disposition?: { delivery?: string } };
+        ).catch((error: Error) => {
+          if (!beforeDelivery.test(error.message)) note();
+          throw error;
+        })) as { disposition?: { delivery?: string } };
+        note();
         return {
           done: true,
           ...(result.disposition?.delivery ? { delivery: result.disposition.delivery } : {}),
@@ -742,20 +841,19 @@ export function createComputerUse(
     const scope = { app: app.name, window: prepared.window };
     if (action === 'COMPUTER_SCREENSHOT')
       return async () => {
-        const current = (await ask({ op: 'snapshot', ...scope }, signal)) as { tree?: Node };
-        const secureFocus = (node: Node | undefined): boolean =>
-          Boolean(
-            node &&
-            ((secure(node) && node.states?.includes('focused')) ||
-              node.children?.some(secureFocus)),
-          );
-        if (secureFocus(current.tree))
-          throw new IntegrationError(
-            'A password field has focus in this window, so Nod took no screenshot.',
-            403,
-          );
+        await noSecureFocus(
+          scope,
+          'A password field has focus in this window, so Nod took no screenshot.',
+          signal,
+        );
         return ask({ op: 'screenshot', ...scope }, signal);
       };
+    unchangedTyping(root, action, prepared);
+    await noSecureFocus(
+      scope,
+      'A password field has focus in this window, so Nod sent no keys.',
+      signal,
+    );
     return async () => {
       await ask({ op: 'key', keys: prepared.keys, ...scope }, signal);
       return { done: true };
