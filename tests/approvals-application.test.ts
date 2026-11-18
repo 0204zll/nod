@@ -157,6 +157,13 @@ test(
     let confirmationValid = true;
     let confirmationModel: ((input: Record<string, unknown>) => unknown) | undefined;
     let httpReview: ((input: Record<string, unknown>) => Promise<unknown>) | undefined;
+    let heldReview:
+      | {
+          purpose?: string;
+          entered(signal?: AbortSignal): void;
+          release: Promise<void>;
+        }
+      | undefined;
     const decisionInputs: Array<{ name: string; input: Record<string, any> }> = [];
     const fallbackChecks: object[] = [];
     const smallReplies: object[] = [];
@@ -229,6 +236,12 @@ test(
       id: 'fixture',
       configured: true,
       curate: async ({ task, input }, _signal, report) => {
+        if (task === 'review' && heldReview?.purpose === Object(input).purpose && heldReview) {
+          const held = heldReview;
+          held.entered(_signal);
+          await held.release;
+          _signal?.throwIfAborted();
+        }
         if (
           browserWording &&
           'purpose' in input &&
@@ -943,6 +956,56 @@ test(
       );
 
     try {
+      await t.test(
+        'Stop cancels schedule reviews before a confirmation or schedule is saved',
+        async () => {
+          for (const purpose of [undefined, 'confirmation_review']) {
+            let release!: () => void;
+            let entered!: (signal?: AbortSignal) => void;
+            const reviewing = new Promise<AbortSignal | undefined>(
+              (resolve) => (entered = resolve),
+            );
+            heldReview = {
+              purpose,
+              entered,
+              release: new Promise<void>((resolve) => (release = resolve)),
+            };
+            const text = `Create a synthetic stopped schedule ${randomUUID()}`;
+            const title = `Stopped review ${randomUUID()}`;
+            plans.set(text, {
+              action: 'schedule_create',
+              args: {
+                title,
+                prompt: 'Read the synthetic note.',
+                kind: 'once',
+                runAt: '2099-01-01T09:00:00Z',
+                timeZone: 'UTC',
+              },
+            });
+            try {
+              const response = await request('POST', '/api/messages', { text });
+              assert.equal(response.statusCode, 200, response.body);
+              const turnId = response.json().turnId as string;
+              const signal = await reviewing;
+              assert.equal((await request('POST', '/api/thread/stop')).statusCode, 200);
+              assert.ok(signal);
+              assert.equal(signal.aborted, true);
+              release();
+              await waitFor(turnId, 'cancelled');
+              assert.equal(
+                (await pool.query('SELECT 1 FROM schedules WHERE title=$1', [title])).rowCount,
+                0,
+              );
+              assert.deepEqual(await approvalsFor(turnId), []);
+            } finally {
+              heldReview = undefined;
+              plans.delete(text);
+              release();
+            }
+          }
+        },
+      );
+
       await t.test(
         'model settings use the trust check and save only the approved selection',
         async () => {
