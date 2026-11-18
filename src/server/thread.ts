@@ -1110,22 +1110,25 @@ export async function resumeTurn(
     await lockThread(client);
     const turn = (
       await client.query(
-        `SELECT u.channel,u.status,u.background,u.prompt,u.session_id,th.archived_at IS NULL AS active FROM turns u JOIN threads th ON th.id=u.thread_id
+        `SELECT u.channel,u.status,u.background,u.prompt,u.withdrawn,u.session_id,th.archived_at IS NULL AS active FROM turns u JOIN threads th ON th.id=u.thread_id
          WHERE u.id=$1 AND u.owner_id=$2`,
         [turnId, ownerId],
       )
     ).rows[0];
     if (pendingOnly && (!turn?.active || !['running', 'waiting'].includes(turn.status)))
       return false;
-    await enqueueTurn(turn?.background ? `${prompt}\nThe request was: ${turn.prompt}` : prompt, {
-      source: 'resume',
-      sourceId,
-      channel: turn?.channel ?? 'web',
-      background: turn?.background ?? false,
-      sessionId: turn?.session_id,
-      parentTurnId: turnId,
-      client,
-    });
+    await enqueueTurn(
+      turn?.background && !turn.withdrawn ? `${prompt}\nThe request was: ${turn.prompt}` : prompt,
+      {
+        source: 'resume',
+        sourceId,
+        channel: turn?.channel ?? 'web',
+        background: turn?.background ?? false,
+        sessionId: turn?.session_id,
+        parentTurnId: turnId,
+        client,
+      },
+    );
     return true;
   };
   const resumed = client ? await create(client) : await transaction(create, pool);

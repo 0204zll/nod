@@ -2605,6 +2605,76 @@ test(
         }
       });
 
+      await t.test('task checks exclude withdrawn requests from model input', async (t) => {
+        await waitFor(settledThread);
+        const previousChecks = dependencies.taskChecks;
+        dependencies.taskChecks = undefined;
+        t.after(() => {
+          dependencies.taskChecks = previousChecks;
+        });
+        for (const [status, withdrawn] of [
+          ['succeeded', false],
+          ['cancelled', false],
+          ['cancelled', true],
+          ['failed', true],
+        ] as const) {
+          await t.test(`${status}, withdrawn=${withdrawn}`, async () => {
+            const id = randomUUID();
+            const turnId = randomUUID();
+            const messageId = randomUUID();
+            const prompt = `Synthetic task request ${id}`;
+            await db.pool.query(
+              `INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background,started_at,finished_at,withdrawn,message_id)
+               VALUES($1,$2,$3,$4,'user',$5,$6,true,now(),now(),$7,$8)`,
+              [turnId, ownerId, threadId, id, prompt, status, withdrawn, messageId],
+            );
+            await db.pool.query(
+              "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'user',$5)",
+              [messageId, ownerId, threadId, turnId, prompt],
+            );
+            await db.pool.query(
+              `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,now_text,next_check)
+               VALUES($1,$2,$3,$1,'Synthetic tracked work','Synthetic reply arrived','Waiting',date_trunc('milliseconds',now())-interval '1 minute')`,
+              [id, ownerId, turnId],
+            );
+            t.after(async () => {
+              await request('POST', `/api/tasks/${id}/stop`);
+              await db.pool.query('UPDATE turns SET task_id=NULL WHERE session_id=$1', [id]);
+              await db.pool.query('DELETE FROM tasks WHERE id=$1', [id]);
+            });
+            await Promise.all([tasks.resumeDue(threadId), tasks.resumeDue(threadId)]);
+            const checks = (
+              await db.pool.query<{ id: string; prompt: string; parent_turn_id: string }>(
+                "SELECT id,prompt,parent_turn_id FROM turns WHERE session_id=$1 AND source_id LIKE 'task-check:%'",
+                [id],
+              )
+            ).rows;
+            assert.equal(checks.length, 1);
+            const check = checks[0]!;
+            assert.equal(check.parent_turn_id, turnId);
+            assert.equal(check.prompt.includes(prompt), !withdrawn);
+            await waitFor(settled(check.id));
+            const context = ran(check.id)!;
+            assert.equal(context.sessionId, id);
+            assert.equal(context.prompt.includes(prompt), !withdrawn);
+            assert.equal(
+              context.history.some(({ text }) => text === prompt),
+              !withdrawn,
+            );
+            if (withdrawn)
+              assert.equal(context.withdrawnRequest, status === 'failed' ? 'failed' : 'stopped');
+            const saved = (
+              await db.pool.query('SELECT next_check,state FROM tasks WHERE id=$1', [id])
+            ).rows[0];
+            assert.equal(saved.next_check, null);
+            assert.equal(saved.state, 'open');
+            const detail = await request('GET', '/api/tasks');
+            assert.equal(detail.statusCode, 200);
+            assert.equal(JSON.stringify(detail.json()).includes(prompt), false);
+          });
+        }
+      });
+
       await t.test('a failed task check enqueue keeps its planned time', async (t) => {
         await waitFor(settledThread);
         const previousChecks = dependencies.taskChecks;
