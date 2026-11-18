@@ -92,6 +92,7 @@ export function createWhatsAppLinkedTransport(options: {
   let attempt = 0;
   let linkedAt = 0;
   let allowedLid: string | undefined;
+  const revokedLids = new Set<string>();
   let state: ChannelLinkStatus = { state: 'connecting' };
   const lifetime = new AbortController();
   const pairingId = randomUUID();
@@ -197,6 +198,7 @@ export function createWhatsAppLinkedTransport(options: {
     if (!jid || message.key.participant || !/^\d+(?::\d+)?@(s\.whatsapp\.net|lid)$/.test(jid))
       return 'unsupported_chat';
     const normalizedJid = jidNormalizedUser(jid);
+    if (revokedLids.has(normalizedJid)) return 'sender_unmatched';
     let phone = numberOf(jid);
     if (!phone && jid.endsWith('@lid')) {
       phone =
@@ -344,6 +346,7 @@ export function createWhatsAppLinkedTransport(options: {
     const source = await sender(message, current);
     if (closed || halted || socket !== current) return;
     if (typeof source === 'string') return drop(source, message);
+    if (revokedLids.has(source.jid)) return drop('sender_unmatched', message);
     const content = normalizeMessageContent(message.message);
     if (!content)
       return drop(
@@ -437,8 +440,13 @@ export function createWhatsAppLinkedTransport(options: {
         const phone = numberOf(pn);
         if (!phone) return;
         const jid = jidNormalizedUser(lid);
-        if (phone === options.allowedNumber) allowedLid = jid;
-        else if (allowedLid === jid) allowedLid = undefined;
+        if (phone === options.allowedNumber) {
+          revokedLids.delete(jid);
+          allowedLid = jid;
+        } else {
+          revokedLids.add(jid);
+          if (allowedLid === jid) allowedLid = undefined;
+        }
       });
     current.ev.on('creds.update', (update) => {
       if (closed || halted || socket !== current) return;

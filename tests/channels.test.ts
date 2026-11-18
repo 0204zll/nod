@@ -1387,6 +1387,8 @@ test('WhatsApp bot mode accepts a confirmed private ID when mapping lookups miss
   type Factory = NonNullable<Parameters<typeof createWhatsAppLinkedTransport>[0]['createSocket']>;
   const events = new EventEmitter();
   const allowedNumber = '12025550101';
+  const allowedJid = `${allowedNumber}@s.whatsapp.net`;
+  const otherJid = '12025550103@s.whatsapp.net';
   const lid = '77777777@lid';
   const otherLid = '88888888@lid';
   const text = 'Fixture request';
@@ -1441,13 +1443,13 @@ test('WhatsApp bot mode accepts a confirmed private ID when mapping lookups miss
   assert.equal(accepted.length, 0);
   assert.deepEqual(dropped, ['sender_unmatched']);
   assert.deepEqual(getPNForLID.mock.calls[0]?.arguments, [lid]);
-  assert.deepEqual(getLIDForPN.mock.calls[0]?.arguments, [`${allowedNumber}@s.whatsapp.net`]);
+  assert.deepEqual(getLIDForPN.mock.calls[0]?.arguments, [allowedJid]);
 
   events.emit('lid-mapping.update', {
     lid: '77777777:3@lid',
     pn: `${allowedNumber}:2@s.whatsapp.net`,
   });
-  events.emit('lid-mapping.update', { lid: otherLid, pn: '12025550103@s.whatsapp.net' });
+  events.emit('lid-mapping.update', { lid: otherLid, pn: otherJid });
   upsert('from-owner', lid);
   upsert('from-other-number', otherLid);
   upsert('from-unverified-sender', '99999999@lid');
@@ -1463,7 +1465,7 @@ test('WhatsApp bot mode accepts a confirmed private ID when mapping lookups miss
   );
 
   for (const [phone, privateId] of [
-    ['12025550103@s.whatsapp.net', null],
+    [otherJid, null],
     [null, '99999999@lid'],
   ]) {
     lookupPhone = phone;
@@ -1472,10 +1474,35 @@ test('WhatsApp bot mode accepts a confirmed private ID when mapping lookups miss
     await transport.poll!(accept);
   }
   lookupPhone = lookupLid = null;
-  events.emit('lid-mapping.update', { lid, pn: '12025550103@s.whatsapp.net' });
-  upsert('after-reassignment', lid);
+  getPNForLID.mock.mockImplementationOnce(async () => {
+    events.emit('lid-mapping.update', { lid: '77777777:3@lid', pn: otherJid });
+    return allowedJid;
+  });
+  upsert('during-reassignment', lid);
   await transport.poll!(accept);
-  assert.equal(accepted.length, 1);
+  for (const [id, phone, privateId] of [
+    ['after-reassignment', null, null],
+    ['stale-reverse-mapping', allowedJid, null],
+    ['stale-forward-mapping', null, lid],
+  ] as const) {
+    lookupPhone = phone;
+    lookupLid = privateId;
+    upsert(id, lid);
+    await transport.poll!(accept);
+  }
+  assert.deepEqual(
+    accepted.map(({ messageId }) => messageId),
+    ['from-owner'],
+  );
+
+  lookupPhone = lookupLid = null;
+  events.emit('lid-mapping.update', { lid, pn: allowedJid });
+  upsert('after-reverification', lid);
+  await transport.poll!(accept);
+  assert.deepEqual(
+    accepted.map(({ messageId }) => messageId),
+    ['from-owner', 'after-reverification'],
+  );
 });
 
 test('Telegram media keeps native replies and checks the sender before any download', async () => {
