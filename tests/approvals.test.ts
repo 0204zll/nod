@@ -1536,18 +1536,34 @@ test(
             control: { role: 'button', name: 'Send', window: 'Synthetic note' },
             typedInApp: [{ control: 'Message', text: typed }],
           });
-          const asked = await approved.request(turn, 'COMPUTER_PRESS', press('Hi Ana', '@s1:e1'));
-          assert.ok(asked && typeof asked === 'object' && appConfirmation in asked);
-          const first = await proposal(turn.turnId);
-          await finish(turn.turnId);
-          await confirm(first.id, false);
-          assert.equal((await stored(first.id)).status, 'declined');
-          await db.pool.query("UPDATE turns SET status='running' WHERE id=$1", [turn.turnId]);
-          await assert.rejects(
-            approved.request(turn, 'COMPUTER_PRESS', press('Hi Ana!', '@s2:e1')),
-            /pending or uncertain outcome/,
-          );
-          await finish(turn.turnId, 'succeeded');
+          const ended = await begin('Synthetic earlier request that ended.');
+          try {
+            const asked = await approved.request(turn, 'COMPUTER_PRESS', press('Hi Ana', '@s1:e1'));
+            assert.ok(asked && typeof asked === 'object' && appConfirmation in asked);
+            const first = await proposal(turn.turnId);
+            await finish(turn.turnId);
+            await confirm(first.id, false);
+            assert.equal((await stored(first.id)).status, 'declined');
+            await finish(ended.turnId, 'succeeded');
+            await db.pool.query(
+              `INSERT INTO approvals(id,owner_id,thread_id,turn_id,action,args,status,source_message_id,title)
+               SELECT $1,owner_id,thread_id,$2,action,$3::jsonb,'pending',source_message_id,title
+               FROM approvals WHERE id=$4`,
+              [randomUUID(), ended.turnId, press('Hi Ana!', '@s2:e1'), first.id],
+            );
+            await db.pool.query("UPDATE turns SET status='running' WHERE id=$1", [turn.turnId]);
+            const ran = calls.length;
+            await assert.rejects(
+              approved.request(turn, 'COMPUTER_PRESS', press('Hi Ana!', '@s2:e1'), {
+                allowed: true,
+              }),
+              /pending or uncertain outcome/,
+            );
+            assert.equal(calls.length, ran);
+          } finally {
+            await finish(turn.turnId, 'cancelled');
+            await finish(ended.turnId, 'cancelled');
+          }
         },
       );
 

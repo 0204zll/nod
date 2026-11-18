@@ -58,6 +58,8 @@ const observing = new Set<Action>([
   'COMPUTER_SCREENSHOT',
 ]);
 const findLimit = 40;
+const typedFields = 10;
+const typedChars = 2000;
 const targeted = new Set<Action>([
   'COMPUTER_PRESS',
   'COMPUTER_FOCUS',
@@ -71,7 +73,12 @@ const entersText = new Set<Action>(['COMPUTER_TYPE', 'COMPUTER_SET_VALUE', 'COMP
 const textRoles = new Set(['textfield', 'textarea', 'searchfield', 'combobox']);
 const step = (action: Action) => action.slice('COMPUTER_'.length).toLowerCase();
 export const computerInternalArgs = ['pid', 'ref', 'window', 'typedKey'];
-export const computerRequestArgs = [...computerInternalArgs, 'typedInApp', 'replacesText'];
+export const computerRequestArgs = [
+  ...computerInternalArgs,
+  'typedInApp',
+  'typedInAppIncomplete',
+  'replacesText',
+];
 const systemKeys = new Set([
   'cmd+shift+esc',
   'cmd+shift+q',
@@ -243,6 +250,10 @@ export type ComputerPrepared = Record<string, unknown> & {
   control?: { role: string; name: string; window: string };
 };
 type Refusal = IntegrationError & { notRun?: boolean };
+type Typed = {
+  fields: Array<{ ref: string; control: string; text: string }>;
+  incomplete: boolean;
+};
 
 export function isComputerAction(action: string): action is Action {
   return Object.hasOwn(schemas, action);
@@ -324,7 +335,7 @@ export function createComputerUse(
     [...(grants.get(root)?.values() ?? [])].some((ids) => ids.includes(identity(app)));
   const grants = new Map<string, Map<string, string[]>>();
   const controls = new Map<string, Map<string, Control>>();
-  const typing = new Map<string, Map<string, Array<{ control: string; text: string }>>>();
+  const typing = new Map<string, Map<string, Typed>>();
   let listing: { at: number; apps: Promise<App[]> } | undefined;
 
   function unavailable() {
@@ -430,15 +441,34 @@ export function createComputerUse(
   }
 
   function typedIn(root: string, key: string) {
-    return typing.get(root)?.get(key) ?? [];
+    const state = typing.get(root)?.get(key);
+    return {
+      ...(state?.fields.length
+        ? { typedInApp: state.fields.map(({ control, text }) => ({ control, text })) }
+        : {}),
+      ...(state?.incomplete ? { typedInAppIncomplete: true } : {}),
+    };
   }
 
-  function noteTyped(root: string, key: string, control: string, text: string, append: boolean) {
-    const current = forRoot(typing, root, () => new Map());
-    const entries = typedIn(root, key);
-    const before = entries.find((entry) => entry.control === control);
-    const entry = { control, text: ((append ? (before?.text ?? '') : '') + text).slice(0, 500) };
-    current.set(key, [...entries.filter((item) => item !== before), entry].slice(-10));
+  function noteTyped(
+    root: string,
+    key: string,
+    field: { ref: string; control: string },
+    text: string,
+    append: boolean,
+  ) {
+    const current = forRoot(typing, root, () => new Map<string, Typed>());
+    const state: Typed = current.get(key) ?? { fields: [], incomplete: false };
+    const before = state.fields.find((entry) => entry.ref === field.ref);
+    const full = (append ? (before?.text ?? '') : '') + text;
+    const fields = [
+      ...state.fields.filter((entry) => entry !== before),
+      { ...field, text: full.slice(0, typedChars) },
+    ];
+    current.set(key, {
+      fields: fields.slice(-typedFields),
+      incomplete: state.incomplete || full.length > typedChars || fields.length > typedFields,
+    });
   }
 
   async function live(found: Control, ref: string, signal?: AbortSignal) {
@@ -461,7 +491,11 @@ export function createComputerUse(
   function unchangedTyping(root: string, action: Action, prepared: ComputerPrepared) {
     if (!needsCheck(action, prepared)) return;
     const now = typedIn(root, String(prepared.typedKey));
-    if (JSON.stringify(now) !== JSON.stringify(prepared.typedInApp ?? []))
+    const checkedTyping = {
+      ...(prepared.typedInApp ? { typedInApp: prepared.typedInApp } : {}),
+      ...(prepared.typedInAppIncomplete ? { typedInAppIncomplete: true } : {}),
+    };
+    if (JSON.stringify(now) !== JSON.stringify(checkedTyping))
       throw new IntegrationError(
         'Nod typed more in this app since this step was checked, so it did not run.',
         409,
@@ -579,7 +613,7 @@ export function createComputerUse(
         ...(action === 'COMPUTER_SET_VALUE'
           ? { replacesText: holdsText(await live(found, input.ref!, signal)) }
           : {}),
-        ...(typed.length && action !== 'COMPUTER_FOCUS' ? { typedInApp: typed } : {}),
+        ...(action !== 'COMPUTER_FOCUS' ? typed : {}),
         typedKey: key,
       };
     }
@@ -613,13 +647,13 @@ export function createComputerUse(
         404,
       );
     const key = identity(app);
-    const typed = action === 'COMPUTER_KEY' ? typedIn(root, key) : [];
+    const typed = action === 'COMPUTER_KEY' ? typedIn(root, key) : {};
     return {
       ...base,
       menu: false,
       window: chosen.id,
       windowTitle: chosen.title,
-      ...(typed.length ? { typedInApp: typed } : {}),
+      ...typed,
       typedKey: key,
     };
   }
@@ -805,7 +839,7 @@ export function createComputerUse(
           noteTyped(
             root,
             String(prepared.typedKey),
-            found.name || found.role,
+            { ref: String(prepared.ref), control: found.name || found.role },
             entered,
             action === 'COMPUTER_TYPE',
           );
@@ -933,6 +967,7 @@ export function createComputerUse(
       if (!input.data.enabled) {
         grants.clear();
         controls.clear();
+        typing.clear();
         await desktop.request({ op: 'cancel' }).catch(() => {});
       }
       return status();

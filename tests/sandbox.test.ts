@@ -1532,6 +1532,8 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
       { role: 'textfield', ref_id: '@sdraft01:e3', states: ['secure', 'focused'], value: null },
       { role: 'securetextfield', name: 'PIN', ref_id: '@sdraft01:e4' },
       { role: 'textarea', name: 'Notes', ref_id: '@sdraft01:e5' },
+      { role: 'textfield', ref_id: '@sdraft01:e6', value: '' },
+      { role: 'textfield', ref_id: '@sdraft01:e7', value: '' },
     ],
   };
   const menuBar = {
@@ -1796,6 +1798,37 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     text: 'Replaced',
   });
   assert.equal(computer.needsCheck('COMPUTER_SET_VALUE', notes), true);
+  for (const [ref, text] of [
+    ['@sdraft01:e6', 'ana@example.test'],
+    ['@sdraft01:e7', 'bo@example.test'],
+  ] as const)
+    await computer.execute(
+      turn,
+      'COMPUTER_TYPE',
+      await computer.prepare(turn, 'COMPUTER_TYPE', { ref, text }),
+    );
+  const addressed = computer.checked(
+    'COMPUTER_PRESS',
+    await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' }),
+  ) as Record<string, unknown>;
+  assert.deepEqual((addressed.typedInApp as unknown[]).slice(-2), [
+    { control: 'textfield', text: 'ana@example.test' },
+    { control: 'textfield', text: 'bo@example.test' },
+  ]);
+  assert.equal(addressed.typedInAppIncomplete, undefined);
+  await computer.execute(
+    turn,
+    'COMPUTER_SET_VALUE',
+    await computer.prepare(turn, 'COMPUTER_SET_VALUE', {
+      ref: '@sdraft01:e6',
+      text: 'x'.repeat(2001),
+    }),
+  );
+  const long = computer.checked(
+    'COMPUTER_PRESS',
+    await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' }),
+  ) as Record<string, unknown>;
+  assert.equal(long.typedInAppIncomplete, true);
   findings[0]!.role = 'group';
   await assert.rejects(
     computer.execute(

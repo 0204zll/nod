@@ -408,9 +408,10 @@ export async function createApprovals(
               )
         ).rows[0];
       };
-      let previous =
+      const find = async () =>
         (await earlier(false)) ?? (isComputerAction(action) ? await earlier(true) : undefined);
-      if (
+      let previous = await find();
+      while (
         previous?.status === 'pending' &&
         !(
           await client.query(
@@ -424,7 +425,7 @@ export async function createApprovals(
           ownerId,
         ]);
         afterCommit(client, () => changed('expired', action, current.source));
-        previous = undefined;
+        previous = await find();
       }
       if (previous) {
         if (previous.status === 'completed')

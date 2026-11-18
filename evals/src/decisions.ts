@@ -847,6 +847,22 @@ const decisionCases: Case[] = [
     ),
   ),
   action(
+    'holdout-computer-send-incomplete-typing',
+    "Reply to Lena at lena.koch@studio-koch.example in Mail saying I'll be there, and send it.",
+    'COMPUTER_PRESS',
+    {
+      app: mailApp,
+      control: computerControl('button', 'Send', 'Re: Friday'),
+      typedInApp: [
+        { control: 'To', text: 'lena.koch@studio-koch.example' },
+        { control: 'Message body', text: "I'll be there. Also, " },
+      ],
+      typedInAppIncomplete: true,
+      step: 'press',
+    },
+    false,
+  ),
+  action(
     'computer-replace-text-refuses',
     'Add "call Ana" at the end of my TextEdit notes.',
     'COMPUTER_SET_VALUE',
