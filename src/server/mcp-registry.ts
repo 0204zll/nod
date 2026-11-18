@@ -1,43 +1,39 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { publicAddress } from './app-catalog.ts';
 
-export type McpSuggestion = {
-  slug: string;
-  name: string;
-  description: string;
-  endpoint: string;
-};
+const suggestionSchema = z.object({
+  slug: z.string(),
+  name: z.string(),
+  description: z.string(),
+  endpoint: z.string(),
+});
+
+export type McpSuggestion = z.infer<typeof suggestionSchema>;
 
 const entrySchema = z.object({
-  slug: z.string().min(1).max(200),
-  title: z.string().trim().min(2).max(80),
-  tagline: z.string().nullish(),
-  description: z.string().nullish(),
-  authType: z.string(),
-  isPublished: z.boolean().optional(),
-  status: z.string().nullish(),
-  requiredCapabilities: z.unknown().optional(),
-  remotes: z.array(z.object({ type: z.string(), url: z.string() })).nullish(),
+  attributes: z.object({
+    slug: z.string().min(1).max(200),
+    title: z.string().trim().min(2).max(80),
+    tagline: z.string().nullish(),
+    description: z.string().nullish(),
+    authType: z.string(),
+    isPublished: z.boolean().optional(),
+    status: z.string().nullish(),
+    requiredCapabilities: z.unknown().optional(),
+    remotes: z.array(z.object({ type: z.string(), url: z.string() })).nullish(),
+  }),
 });
 
 const pageSchema = z.object({
   data: z.array(z.unknown()),
-  meta: z
-    .object({ pagination: z.object({ pageCount: z.number() }).partial() })
-    .partial()
-    .optional(),
+  meta: z.object({ pagination: z.object({ pageCount: z.number() }) }).optional(),
 });
 
-const cacheSchema = z.array(
-  z.object({
-    slug: z.string(),
-    name: z.string(),
-    description: z.string(),
-    endpoint: z.string(),
-  }),
-);
+const firstSyncWaitMs = 5000;
 
 function publicEndpoint(value: string) {
   try {
@@ -60,19 +56,15 @@ function brief(text: string) {
   return text.replace(/\s+/g, ' ').trim().slice(0, 120);
 }
 
-export function endpointKey(value: string) {
+function endpointKey(value: string) {
   const url = URL.parse(value);
   return url ? `${url.host.toLowerCase()}${url.pathname.replace(/\/+$/, '')}` : value;
 }
 
-export function suggestionFrom(raw: unknown): McpSuggestion | undefined {
-  const parsed = entrySchema.safeParse(
-    raw && typeof raw === 'object' && 'attributes' in raw
-      ? { ...raw, ...(raw as { attributes: object }).attributes }
-      : raw,
-  );
+function suggestionFrom(raw: unknown): McpSuggestion | undefined {
+  const parsed = entrySchema.safeParse(raw);
   if (!parsed.success) return undefined;
-  const entry = parsed.data;
+  const entry = parsed.data.attributes;
   const capabilities = entry.requiredCapabilities;
   if (
     entry.authType !== 'oauth2' ||
@@ -98,6 +90,7 @@ export function suggestionFrom(raw: unknown): McpSuggestion | undefined {
 export function createMcpRegistry(options: {
   file: string;
   url: string | undefined;
+  served: () => Promise<(string | undefined)[]>;
   fetch?: typeof fetch;
   onError?: (error: Error) => void;
 }) {
@@ -107,7 +100,9 @@ export function createMcpRegistry(options: {
 
   async function readCache() {
     try {
-      suggestions = cacheSchema.parse(JSON.parse(await readFile(options.file, 'utf8')));
+      suggestions = z
+        .array(suggestionSchema)
+        .parse(JSON.parse(await readFile(options.file, 'utf8')));
     } catch (cause) {
       if (Object(cause).code !== 'ENOENT')
         options.onError?.(
@@ -138,18 +133,15 @@ export function createMcpRegistry(options: {
       const parsed = pageSchema.safeParse(await response.json().catch(() => undefined));
       if (!parsed.success)
         throw new Error(`The MCP catalog at ${url.origin} answered with an unexpected format.`);
-      const body = parsed.data;
-      entries.push(...body.data);
-      if (page >= (body.meta?.pagination?.pageCount ?? 1)) break;
+      entries.push(...parsed.data.data);
+      if (page >= (parsed.data.meta?.pagination.pageCount ?? 1)) return entries;
     }
-    return entries;
   }
 
   async function refresh() {
     if (!options.url) return;
-    const base = options.url;
     const next = new Map<string, McpSuggestion>();
-    for (const entry of await fetchAll(base)) {
+    for (const entry of await fetchAll(options.url)) {
       const suggestion = suggestionFrom(entry);
       if (suggestion && !next.has(suggestion.slug)) next.set(suggestion.slug, suggestion);
     }
@@ -160,15 +152,37 @@ export function createMcpRegistry(options: {
     await rename(temporary, options.file);
   }
 
+  function start() {
+    loaded ??= readCache().then(() =>
+      refresh().catch((cause) => {
+        options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
+      }),
+    );
+    return loaded;
+  }
+
+  async function available() {
+    const served = new Set(
+      (await options.served()).flatMap((endpoint) => (endpoint ? [endpointKey(endpoint)] : [])),
+    );
+    return suggestions.filter((server) => !served.has(endpointKey(server.endpoint)));
+  }
+
   return {
-    start() {
-      loaded ??= readCache().then(() =>
-        refresh().catch((cause) => {
-          options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
-        }),
-      );
-      return loaded;
+    start,
+    available,
+    registerRoutes(app: FastifyInstance) {
+      app.get('/api/apps/mcp/registry', async () => {
+        const stop = new AbortController();
+        await Promise.race([
+          loaded,
+          delay(firstSyncWaitMs, undefined, { ref: false, signal: stop.signal }).catch(
+            () => undefined,
+          ),
+        ]);
+        stop.abort();
+        return { servers: await available() };
+      });
     },
-    list: () => suggestions,
   };
 }

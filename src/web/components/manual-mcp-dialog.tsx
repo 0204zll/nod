@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link2 } from './icons';
 import { api, errorMessage } from '../lib/api';
+import { searchApps } from '../lib/app-search';
 import {
   Button,
   Checkbox,
@@ -13,6 +14,14 @@ import {
   Notice,
   SearchField,
 } from './ui';
+
+type Suggestion = {
+  slug: string;
+  name: string;
+  description: string;
+  endpoint: string;
+  category: string;
+};
 
 const listedKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -33,35 +42,31 @@ export function ManualMcpDialog({
   const [clientIdRequired, setClientIdRequired] = useState(false);
   const [name, setName] = useState('');
   const [endpoint, setEndpoint] = useState('');
-  const [suggestions, setSuggestions] = useState<
-    { slug: string; name: string; description: string; endpoint: string }[]
-  >([]);
+  const [offered, setOffered] = useState<Suggestion[]>([]);
   const [query, setQuery] = useState('');
   const request = useRef<AbortController | null>(null);
   const continuing = useRef(false);
   useEffect(() => () => request.current?.abort(), []);
   useEffect(() => {
     const controller = new AbortController();
-    api<{ servers: typeof suggestions }>('/api/apps/mcp/registry', { signal: controller.signal })
-      .then((result) => setSuggestions(result.servers))
+    const taken = new Set(listed.flatMap((app) => [listedKey(app.name), listedKey(app.slug)]));
+    api<{ servers: Omit<Suggestion, 'category'>[] }>('/api/apps/mcp/registry', {
+      signal: controller.signal,
+    })
+      .then((result) =>
+        setOffered(
+          result.servers
+            .filter((item) => !taken.has(listedKey(item.name)) && !taken.has(listedKey(item.slug)))
+            .map((item) => ({ ...item, category: '' })),
+        ),
+      )
       .catch(() => undefined);
     return () => controller.abort();
   }, []);
 
-  const taken = new Set(listed.flatMap((app) => [listedKey(app.name), listedKey(app.slug)]));
-  const offered = suggestions.filter(
-    (item) => !taken.has(listedKey(item.name)) && !taken.has(listedKey(item.slug)),
-  );
-  const needle = query.trim().toLowerCase();
-  const matches = needle
-    ? offered
-        .filter((item) =>
-          `${item.name} ${item.slug} ${item.description}`.toLowerCase().includes(needle),
-        )
-        .slice(0, 20)
-    : [];
+  const matches = query.trim() ? searchApps(offered, query).slice(0, 20) : [];
 
-  function choose(pick: (typeof suggestions)[number]) {
+  function choose(pick: Suggestion) {
     setName(pick.name);
     setEndpoint(pick.endpoint);
     setAuth('oauth');
