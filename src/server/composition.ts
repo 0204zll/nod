@@ -1577,6 +1577,13 @@ async function initializeApplication(
                         const savedBinding = provenance.details?.verifiedBinding;
                         const verifiedBinding =
                           typeof savedBinding === 'string' ? savedBinding : undefined;
+                        if (action === 'CONNECTED_MCP_CALL' && !verifiedBinding)
+                          throw Object.assign(
+                            new Error(
+                              'The MCP confirmation has no saved account binding. Ask for this action again.',
+                            ),
+                            { notRun: true },
+                          );
                         if (action === 'GMAIL_DELETE_MESSAGE' || action === 'GMAIL_DELETE_DRAFT') {
                           const currentBinding = await integrations
                             .binding(String(args.connectionId ?? ''))
@@ -1700,7 +1707,9 @@ async function initializeApplication(
                           ready,
                           turn,
                           provenance.signal,
-                          action === 'GMAIL_DELETE_MESSAGE' || action === 'GMAIL_DELETE_DRAFT'
+                          action === 'GMAIL_DELETE_MESSAGE' ||
+                            action === 'GMAIL_DELETE_DRAFT' ||
+                            action === 'CONNECTED_MCP_CALL'
                             ? verifiedBinding
                             : undefined,
                         );
@@ -2777,8 +2786,12 @@ async function initializeApplication(
         const verdict = await trust.check(turn, action, resolved ?? args, options.signal);
         await options.admit?.(verdict.confirm);
         const prepared = resolved ?? (await prepare());
+        const mcp =
+          verdict.confirm && action === 'CONNECTED_MCP_CALL'
+            ? await discovered.approvalDetails(prepared, options.signal)
+            : undefined;
         const account =
-          verdict.confirm && typeof prepared.connectionId === 'string'
+          !mcp && verdict.confirm && typeof prepared.connectionId === 'string'
             ? (await integrations.list(ownerId, { refresh: false })).find(
                 (item) => item.connectionId === prepared.connectionId,
               )
@@ -2866,6 +2879,18 @@ async function initializeApplication(
           expectedChatRevision:
             verdict.confirm || verdict.basis.kind !== 'read' ? verdict.chatRevision : undefined,
           signal: options.signal,
+          validate: mcp
+            ? async (client) => {
+                if (
+                  (await discovered.binding(String(prepared.connectionId), client)) !==
+                  mcp.verifiedBinding
+                )
+                  throw Object.assign(
+                    new Error('This connected account changed before confirmation.'),
+                    { notRun: true },
+                  );
+              }
+            : undefined,
           run: async () => {
             const result = await integrations.execute(
               ownerId,
@@ -2895,6 +2920,7 @@ async function initializeApplication(
                   },
                 }
               : {}),
+            ...(mcp ?? {}),
             ...(target ? { target } : {}),
             ...(deleteBinding ? { verifiedBinding: deleteBinding } : {}),
             ...(verifiedDraftMessageId ? { verifiedDraftMessageId } : {}),
