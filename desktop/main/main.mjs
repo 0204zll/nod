@@ -1988,13 +1988,15 @@ function publishUpdateStatus() {
 function refreshUpdateMenu() {
   if (quitting) return;
   const label =
-    updatePhase === 'downloading' && updateProgress !== undefined
-      ? `Downloading update… ${updateProgress}%`
-      : {
-          checking: 'Checking for updates…',
-          preparing: 'Preparing update…',
-          downloading: 'Downloading update…',
-        }[updatePhase] || (updateFailed ? 'Update Failed. Try Again…' : 'Check for Updates…');
+    macInstallerBusy && checkingUpdates
+      ? 'Waiting for update installer…'
+      : updatePhase === 'downloading' && updateProgress !== undefined
+        ? `Downloading update… ${updateProgress}%`
+        : {
+            checking: 'Checking for updates…',
+            preparing: 'Preparing update…',
+            downloading: 'Downloading update…',
+          }[updatePhase] || (updateFailed ? 'Update Failed. Try Again…' : 'Check for Updates…');
   const item = Menu.getApplicationMenu?.()?.getMenuItemById('desktop-update');
   if (item) {
     item.label = label;
@@ -2042,6 +2044,31 @@ async function checkForUpdates(manual = true, restartReady = false, confirmed = 
     if (manual) updateRequestedManually = true;
     if (confirmed) updateRestartConfirmed = true;
     return checkingUpdates;
+  }
+  if (macInstallerBusy) {
+    updateRequestedManually = manual;
+    updateRestartConfirmed = confirmed;
+    let waiting;
+    waiting = (async () => {
+      while (!quitting && macInstallerBusy) {
+        const running = await macInstallerRunning('dev.nod.desktop.ShipIt').catch(() => true);
+        if (!running) {
+          macInstallerBusy = false;
+          if (checkingUpdates === waiting) checkingUpdates = undefined;
+          return checkForUpdates(updateRequestedManually, restartReady, updateRestartConfirmed);
+        }
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, 5_000);
+          timer.unref?.();
+        });
+      }
+    })().finally(() => {
+      if (checkingUpdates === waiting) checkingUpdates = undefined;
+      refreshUpdateMenu();
+    });
+    checkingUpdates = waiting;
+    refreshUpdateMenu();
+    return waiting;
   }
   updateRequestedManually = manual;
   updateRestartConfirmed = confirmed;
