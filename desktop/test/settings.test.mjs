@@ -991,6 +991,7 @@ async function runningDesktop(
       notifyReady: updateReadinessNotice,
       checkUpdates: (updater, manual = true, restartReady = false) => { updates = updater; return checkForUpdates(manual, restartReady); },
       setMacInstallerBusy: (busy) => { macInstallerBusy = busy; refreshUpdateMenu(); },
+      monitorMacInstaller: () => waitForMacInstaller(),
       registerFiles: () => { ${source.slice(source.indexOf('      disposeArtifactFiles = registerArtifactFileHandlers('), source.indexOf("      ipcMain.handle('nod:renderer-ready'"))} },
       quit,
       quitApp: (install = true) => { installUpdateOnQuit = install; return quitApp(); },
@@ -7393,7 +7394,7 @@ test('retrying a failed manual refresh checks again instead of restarting an old
   assert.equal(prompts, 2);
 });
 
-test('manual update checks wait for ShipIt to finish and re-enable the update menu', async (t) => {
+test('the startup installer monitor disables update actions until ShipIt exits', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let installerRunning = true;
   let checks = 0;
@@ -7407,18 +7408,27 @@ test('manual update checks wait for ShipIt to finish and re-enable the update me
   };
   const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
     installerRunning: async () => installerRunning,
+    prompt: () => ({ response: 1 }),
   });
-  f.setMacInstallerBusy(true);
-  const checking = f.checkUpdates(updater);
-  await new Promise(setImmediate);
-  assert.equal(checks, 0);
-  assert.equal(f.updateMenu.enabled, false);
-  assert.equal(f.updateMenu.label, 'Waiting for update installer…');
-  installerRunning = false;
-  t.mock.timers.tick(5_000);
-  await checking;
+  await f.checkUpdates(updater, false);
   assert.equal(checks, 1);
   assert.equal(f.updateMenu.enabled, true);
+  assert.equal(f.restartMenu.enabled, true);
+  f.setMacInstallerBusy(true);
+  const monitoring = f.monitorMacInstaller();
+  await new Promise(setImmediate);
+  assert.equal(f.updateMenu.enabled, false);
+  assert.equal(f.restartMenu.enabled, false);
+  assert.equal(f.updateMenu.label, 'Waiting for update installer…');
+  const checking = f.checkUpdates(updater);
+  await new Promise(setImmediate);
+  assert.equal(checks, 1);
+  installerRunning = false;
+  t.mock.timers.tick(5_000);
+  await Promise.all([monitoring, checking]);
+  assert.equal(checks, 2);
+  assert.equal(f.updateMenu.enabled, true);
+  assert.equal(f.restartMenu.enabled, true);
   assert.equal(f.updateMenu.label, 'Check for Updates…');
 });
 
