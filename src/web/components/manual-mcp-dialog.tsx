@@ -11,6 +11,7 @@ import {
   Field,
   Input,
   Notice,
+  SearchField,
 } from './ui';
 
 export function ManualMcpDialog({
@@ -31,6 +32,7 @@ export function ManualMcpDialog({
   const [suggestions, setSuggestions] = useState<
     { slug: string; name: string; description: string; endpoint: string }[]
   >([]);
+  const [query, setQuery] = useState('');
   const request = useRef<AbortController | null>(null);
   const continuing = useRef(false);
   useEffect(() => () => request.current?.abort(), []);
@@ -41,6 +43,23 @@ export function ManualMcpDialog({
       .catch(() => undefined);
     return () => controller.abort();
   }, []);
+
+  const needle = query.trim().toLowerCase();
+  const matches = needle
+    ? suggestions
+        .filter((item) =>
+          `${item.name} ${item.slug} ${item.description}`.toLowerCase().includes(needle),
+        )
+        .slice(0, 20)
+    : [];
+
+  function choose(pick: (typeof suggestions)[number]) {
+    setName(pick.name);
+    setEndpoint(pick.endpoint);
+    setAuth('oauth');
+    setClientIdRequired(false);
+    setQuery('');
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -90,27 +109,43 @@ export function ManualMcpDialog({
           </div>
         </div>
         {suggestions.length > 0 && (
-          <Field label="Suggested servers">
-            <select
-              className="input"
-              value=""
-              onChange={(event) => {
-                const pick = suggestions.find((item) => item.slug === event.target.value);
-                if (!pick) return;
-                setName(pick.name);
-                setEndpoint(pick.endpoint);
-                setAuth('oauth');
+          <div className="mcp-suggestions">
+            <SearchField
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && matches[0]) {
+                  event.preventDefault();
+                  choose(matches[0]);
+                }
               }}
+              onClear={() => setQuery('')}
+              placeholder={`Search ${suggestions.length} servers from the n8n catalog`}
+              aria-label="Search suggested servers"
               disabled={saving}
-            >
-              <option value="">Choose a server from the n8n catalog</option>
-              {suggestions.map((item) => (
-                <option key={item.slug} value={item.slug}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
-          </Field>
+              autoComplete="off"
+              spellCheck={false}
+            />
+            {query.trim() && (
+              <div className="mcp-suggestion-list" role="listbox" aria-label="Suggested servers">
+                {matches.length === 0 && <p>No server matches “{query.trim()}”.</p>}
+                {matches.map((item) => (
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected="false"
+                    key={item.slug}
+                    onClick={() => choose(item)}
+                    disabled={saving}
+                  >
+                    <strong>{item.name}</strong>
+                    {item.description && <span>{item.description}</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
         <form onSubmit={(event) => void submit(event)} autoComplete="off">
           <Field label="Name">

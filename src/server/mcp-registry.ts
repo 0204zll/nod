@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { z } from 'zod';
+import { publicAddress } from './app-catalog.ts';
 
 export type McpSuggestion = {
   slug: string;
@@ -38,17 +39,25 @@ const cacheSchema = z.array(
   }),
 );
 
-function publicHttps(value: string) {
-  const url = URL.parse(value);
-  return url &&
-    url.protocol === 'https:' &&
-    !url.username &&
-    !url.password &&
-    !url.search &&
-    !url.hash &&
-    (url.port === '' || url.port === '443')
-    ? url.href
-    : undefined;
+function publicEndpoint(value: string) {
+  try {
+    return publicAddress(value, 'catalog');
+  } catch {
+    return undefined;
+  }
+}
+
+function displayName(title: string) {
+  return title
+    .replace(/[^A-Za-z0-9 .&'_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[^A-Za-z0-9]+/, '')
+    .trim()
+    .slice(0, 80);
+}
+
+function brief(text: string) {
+  return text.replace(/\s+/g, ' ').trim().slice(0, 120);
 }
 
 export function suggestionFrom(raw: unknown): McpSuggestion | undefined {
@@ -62,19 +71,20 @@ export function suggestionFrom(raw: unknown): McpSuggestion | undefined {
   const capabilities = entry.requiredCapabilities;
   if (
     entry.authType !== 'oauth2' ||
-    entry.isPublished === false ||
+    entry.isPublished !== true ||
     (entry.status ?? 'active') !== 'active' ||
     (Array.isArray(capabilities) ? capabilities.length > 0 : capabilities != null)
   )
     return undefined;
   const endpoint = entry.remotes
     ?.filter((remote) => remote.type === 'streamable-http')
-    .map((remote) => publicHttps(remote.url))
+    .map((remote) => publicEndpoint(remote.url))
     .find((url) => url !== undefined);
-  if (!endpoint) return undefined;
+  const name = displayName(entry.title);
+  if (!endpoint || name.length < 2) return undefined;
   return {
     slug: entry.slug,
-    name: entry.title,
+    name,
     description: (entry.tagline || entry.description || '').trim().slice(0, 300),
     endpoint,
   };
@@ -97,7 +107,7 @@ export function createMcpRegistry(options: {
       if (Object(cause).code !== 'ENOENT')
         options.onError?.(
           new Error(
-            `The saved MCP catalog could not be read: ${cause instanceof Error ? cause.message : String(cause)}`,
+            `The saved MCP catalog could not be read (${Object(cause).code ?? 'invalid content'}).`,
           ),
         );
     }
@@ -105,7 +115,9 @@ export function createMcpRegistry(options: {
 
   async function fetchAll(base: string) {
     const entries: unknown[] = [];
-    for (let page = 1; page <= 20; page++) {
+    for (let page = 1; ; page++) {
+      if (page > 20)
+        throw new Error('The MCP catalog has more than 2,000 entries, so it was not saved.');
       const url = new URL('/api/mcp-servers', base);
       url.searchParams.set('version', '4');
       url.searchParams.set('pagination[page]', String(page));
@@ -116,9 +128,12 @@ export function createMcpRegistry(options: {
       });
       if (!response.ok)
         throw new Error(
-          `The MCP catalog at ${url.origin} answered ${response.status}: ${(await response.text()).slice(0, 200)}`,
+          `The MCP catalog at ${url.origin} answered ${response.status}: ${brief(await response.text())}`,
         );
-      const body = pageSchema.parse(await response.json());
+      const parsed = pageSchema.safeParse(await response.json().catch(() => undefined));
+      if (!parsed.success)
+        throw new Error(`The MCP catalog at ${url.origin} answered with an unexpected format.`);
+      const body = parsed.data;
       entries.push(...body.data);
       if (page >= (body.meta?.pagination?.pageCount ?? 1)) break;
     }

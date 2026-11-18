@@ -14282,19 +14282,25 @@ test('the MCP catalog sync keeps only connectable servers and survives an outage
     authType: 'oauth2',
     isPublished: true,
     status: 'active',
-    remotes: [{ type: 'streamable-http', url: `https://${slug}.example.org/mcp` }],
+    remotes: [{ type: 'streamable-http', url: `https://${slug}.fixtures.io/mcp` }],
     ...extra,
   });
   const entries = [
     entry('good'),
+    entry('unpublished', { isPublished: false }),
     entry('credentials', { authType: 'usesCredentials' }),
     entry('deprecated', { status: 'deprecated' }),
     entry('capable', { requiredCapabilities: ['sampling'] }),
-    entry('plain', { remotes: [{ type: 'streamable-http', url: 'http://plain.example.org/mcp' }] }),
+    entry('plain', { remotes: [{ type: 'streamable-http', url: 'http://plain.fixtures.io/mcp' }] }),
     entry('private', {
-      remotes: [{ type: 'streamable-http', url: 'https://user:key@private.example.org/mcp?x=1' }],
+      remotes: [{ type: 'streamable-http', url: 'https://user:key@private.fixtures.io/mcp?x=1' }],
     }),
-    entry('sse', { remotes: [{ type: 'sse', url: 'https://sse.example.org/sse' }] }),
+    entry('loopback', { remotes: [{ type: 'streamable-http', url: 'https://127.0.0.1/mcp' }] }),
+    entry('empty-query', {
+      remotes: [{ type: 'streamable-http', url: 'https://empty-query.fixtures.io/mcp?' }],
+    }),
+    entry('named', { title: 'Roboflow (Official)' }),
+    entry('sse', { remotes: [{ type: 'sse', url: 'https://sse.fixtures.io/sse' }] }),
   ];
   let online = true;
   const errors: string[] = [];
@@ -14312,8 +14318,12 @@ test('the MCP catalog sync keeps only connectable servers and survives an outage
     await first.start();
     assert.deepEqual(
       first.list().map((server) => [server.slug, server.endpoint]),
-      [['good', 'https://good.example.org/mcp']],
+      [
+        ['named', 'https://named.fixtures.io/mcp'],
+        ['good', 'https://good.fixtures.io/mcp'],
+      ],
     );
+    assert.equal(first.list().find((server) => server.slug === 'named')?.name, 'Roboflow Official');
     online = false;
     const second = createMcpRegistry({
       file,
@@ -14324,7 +14334,7 @@ test('the MCP catalog sync keeps only connectable servers and survives an outage
     await second.start();
     assert.deepEqual(
       second.list().map((server) => server.slug),
-      ['good'],
+      ['named', 'good'],
     );
     assert.match(errors.join(), /answered 503: down/);
   } finally {

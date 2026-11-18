@@ -2,6 +2,7 @@ import { transaction } from './transaction.ts';
 import { mkdir } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
@@ -2957,10 +2958,13 @@ async function initializeApplication(
   const mcpRegistry = createMcpRegistry({
     file: join(dataRoot, 'mcp-registry.json'),
     url: process.env.NOD_MCP_REGISTRY_URL ?? 'https://api.n8n.io',
-    onError: (cause) => console.error(`MCP catalog sync failed: ${cause.message}`),
+    onError: (cause) => console.error(`MCP catalog sync failed: ${cause.message.slice(0, 300)}`),
   });
-  if (options.workers !== false) void mcpRegistry.start();
-  app.get('/api/apps/mcp/registry', async () => ({ servers: mcpRegistry.list() }));
+  const mcpRegistryStarted = options.workers !== false ? mcpRegistry.start() : Promise.resolve();
+  app.get('/api/apps/mcp/registry', async () => {
+    await Promise.race([mcpRegistryStarted, delay(5000, undefined, { ref: false })]);
+    return { servers: mcpRegistry.list() };
+  });
   personal.registerRoutes(app);
   onboardingSuggestions.registerRoutes(app);
   onboardingProfile.registerRoutes(app);
