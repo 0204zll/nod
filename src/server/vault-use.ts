@@ -100,9 +100,14 @@ export async function createVaultUses(pool: Pool, ownerId: string, analytics?: C
     if (use.ownerId !== ownerId)
       throw new VaultUseError('This private operation belongs to another owner.', 409);
     const id = use.id ?? randomUUID();
-    const uncertain = () =>
+    const uncertain = (cause?: unknown) =>
       new VaultUseError(
-        'The private operation did not finish. It may have reached the website. Check its result before another attempt.',
+        [
+          'The private operation did not finish. It may have reached the website. Check its result before another attempt.',
+          cause instanceof BrowserActionError ? browserErrorMessage(cause.code) : undefined,
+        ]
+          .filter(Boolean)
+          .join(' '),
         502,
       );
     const report = (stage: 'claim' | 'entry' | 'completion', error: unknown) =>
@@ -173,7 +178,7 @@ export async function createVaultUses(pool: Pool, ownerId: string, analytics?: C
           use.ownerId,
         ])
         .catch((error: unknown) => logFailure('vault_use_uncertain', error));
-      throw uncertain();
+      throw uncertain(error);
     }
   }
 
