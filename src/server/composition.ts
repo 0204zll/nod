@@ -91,6 +91,7 @@ import {
 import { createDiscoveredOAuth } from '../providers/discovered/oauth.ts';
 import { createDiscoveredConnections } from './discovered-connections.ts';
 import { bundledApps } from './app-catalog.ts';
+import { createMcpRegistry } from './mcp-registry.ts';
 import { createLocalFiles, isLocalFilesAction } from './local-files.ts';
 import { createAppGrantVault } from './vault-app-grants.ts';
 import { createDockerWorkspace } from '../providers/docker/index.ts';
@@ -2953,6 +2954,13 @@ async function initializeApplication(
   adapters.integrationBrowser?.registerRoutes(app);
   integrations.registerRoutes(app);
   localFiles.registerRoutes(app);
+  const mcpRegistry = createMcpRegistry({
+    file: join(dataRoot, 'mcp-registry.json'),
+    url: process.env.NOD_MCP_REGISTRY_URL ?? 'https://api.n8n.io',
+    onError: (cause) => console.error(`MCP catalog sync failed: ${cause.message}`),
+  });
+  if (options.workers !== false) void mcpRegistry.start();
+  app.get('/api/apps/mcp/registry', async () => ({ servers: mcpRegistry.list() }));
   personal.registerRoutes(app);
   onboardingSuggestions.registerRoutes(app);
   onboardingProfile.registerRoutes(app);

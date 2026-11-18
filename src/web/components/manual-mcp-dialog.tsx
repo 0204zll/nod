@@ -26,9 +26,21 @@ export function ManualMcpDialog({
   const [error, setError] = useState('');
   const [auth, setAuth] = useState('oauth');
   const [clientIdRequired, setClientIdRequired] = useState(false);
+  const [name, setName] = useState('');
+  const [endpoint, setEndpoint] = useState('');
+  const [suggestions, setSuggestions] = useState<
+    { slug: string; name: string; description: string; endpoint: string }[]
+  >([]);
   const request = useRef<AbortController | null>(null);
   const continuing = useRef(false);
   useEffect(() => () => request.current?.abort(), []);
+  useEffect(() => {
+    const controller = new AbortController();
+    api<{ servers: typeof suggestions }>('/api/apps/mcp/registry', { signal: controller.signal })
+      .then((result) => setSuggestions(result.servers))
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -77,10 +89,35 @@ export function ManualMcpDialog({
             <DialogDescription>Add a server to use its tools in Nod.</DialogDescription>
           </div>
         </div>
+        {suggestions.length > 0 && (
+          <Field label="Suggested servers">
+            <select
+              className="input"
+              value=""
+              onChange={(event) => {
+                const pick = suggestions.find((item) => item.slug === event.target.value);
+                if (!pick) return;
+                setName(pick.name);
+                setEndpoint(pick.endpoint);
+                setAuth('oauth');
+              }}
+              disabled={saving}
+            >
+              <option value="">Choose a server from the n8n catalog</option>
+              {suggestions.map((item) => (
+                <option key={item.slug} value={item.slug}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
         <form onSubmit={(event) => void submit(event)} autoComplete="off">
           <Field label="Name">
             <Input
               name="name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
               placeholder="My workspace"
               required
               minLength={2}
@@ -92,6 +129,8 @@ export function ManualMcpDialog({
           <Field label="Server URL">
             <Input
               name="endpoint"
+              value={endpoint}
+              onChange={(event) => setEndpoint(event.target.value)}
               placeholder="https://example.com/mcp"
               required
               maxLength={2048}

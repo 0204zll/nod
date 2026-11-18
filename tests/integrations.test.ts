@@ -87,6 +87,7 @@ import { fileBytes } from '../src/shared/files.ts';
 import { connectionGroups } from '../src/web/lib/secondary-pages.ts';
 import { fakeComputer, fakeExecution, fakeWorkspace } from './runtime-fixtures.ts';
 import { appAccessPath, bundledApps, loadAppCatalog } from '../src/server/app-catalog.ts';
+import { createMcpRegistry } from '../src/server/mcp-registry.ts';
 import { appAccessSchema } from '../src/server/app-access.ts';
 import { checkAppContract } from '../scripts/check-apps.ts';
 import { createApp, type CreateAppOptions } from '../scripts/create-app.ts';
@@ -14271,3 +14272,62 @@ test(
     assert.equal((await f.service.activitySources()).length, 0);
   },
 );
+
+test('the MCP catalog sync keeps only connectable servers and survives an outage from its saved file', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-mcp-registry-'));
+  const file = join(directory, 'mcp-registry.json');
+  const entry = (slug: string, extra: Record<string, unknown> = {}) => ({
+    slug,
+    title: `Server ${slug}`,
+    authType: 'oauth2',
+    isPublished: true,
+    status: 'active',
+    remotes: [{ type: 'streamable-http', url: `https://${slug}.example.org/mcp` }],
+    ...extra,
+  });
+  const entries = [
+    entry('good'),
+    entry('credentials', { authType: 'usesCredentials' }),
+    entry('deprecated', { status: 'deprecated' }),
+    entry('capable', { requiredCapabilities: ['sampling'] }),
+    entry('plain', { remotes: [{ type: 'streamable-http', url: 'http://plain.example.org/mcp' }] }),
+    entry('private', {
+      remotes: [{ type: 'streamable-http', url: 'https://user:key@private.example.org/mcp?x=1' }],
+    }),
+    entry('sse', { remotes: [{ type: 'sse', url: 'https://sse.example.org/sse' }] }),
+  ];
+  let online = true;
+  const errors: string[] = [];
+  const fetcher = (async () =>
+    online
+      ? Response.json({ data: entries, meta: { pagination: { pageCount: 1 } } })
+      : new Response('down', { status: 503 })) as typeof fetch;
+  try {
+    const first = createMcpRegistry({
+      file,
+      url: 'https://registry.example.org',
+      fetch: fetcher,
+      onError: (error) => errors.push(error.message),
+    });
+    await first.start();
+    assert.deepEqual(
+      first.list().map((server) => [server.slug, server.endpoint]),
+      [['good', 'https://good.example.org/mcp']],
+    );
+    online = false;
+    const second = createMcpRegistry({
+      file,
+      url: 'https://registry.example.org',
+      fetch: fetcher,
+      onError: (error) => errors.push(error.message),
+    });
+    await second.start();
+    assert.deepEqual(
+      second.list().map((server) => server.slug),
+      ['good'],
+    );
+    assert.match(errors.join(), /answered 503: down/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
