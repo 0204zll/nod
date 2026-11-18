@@ -62,7 +62,9 @@ test(
     });
     const { createApp } = await import('../src/server/app.ts');
     const { dataRoot, ownerId, port, configuration } = await import('../src/server/config.ts');
+    const { createTasks } = await import('../src/server/tasks.ts');
     await db.initializeDatabase();
+    await createTasks({ pool: db.pool, ownerId }).initialize();
     await thread.initializeThreads();
     await db.pool.query(`CREATE TABLE credential_requests (
     id text PRIMARY KEY,thread_id uuid REFERENCES threads(id),turn_id uuid REFERENCES turns(id),
