@@ -3851,7 +3851,10 @@ test(
         assert.deepEqual(wwwCard.args, { origin: destination, kind: 'sign_in', itemId: login });
         assert.equal((await approvalsFor(held))[0].status, 'completed');
         assert.equal(injected.length, before);
-        assert.ok((await confirmationFor(wwwCard)).includes(destination));
+        const destinations = [
+          ...(await confirmationFor(wwwCard)).matchAll(/https?:\/\/[^\s`]+/g),
+        ].map(([url]) => new URL(url).origin);
+        assert.deepEqual(destinations, [destination]);
         repeatAfterConfirm = { tool: 'sign_in', action: 'Enter saved login', args: wwwInput };
         const answer = {
           text: 'Sign in',
