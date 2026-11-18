@@ -8,12 +8,14 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
   rename,
   rm,
   symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -1086,6 +1088,43 @@ test('local files require owner evidence for a schedule, including approval-only
   await assert.rejects(files.assertStartedByOwner(turn), /changes without source records/);
 });
 
+test('local file reads refuse a write that occurs before the read completes', async (t) => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'nod-read-race-')));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const path = join(home, 'note.txt');
+  await writeFile(path, 'old');
+  const pool = {
+    query: async () => ({ rows: [{ local_files_enabled: true, local_keep_out: [] }] }),
+  } as unknown as Pool;
+  const files = createLocalFiles(pool, 'owner', {
+    home,
+    dataRoot: join(home, 'data'),
+    available: true,
+  });
+  const checked = await files.prepare('LOCAL_FILES_READ', { path });
+  const handle = await open(path, 'r');
+  const prototype = Object.getPrototypeOf(handle) as typeof handle;
+  const read = prototype.read;
+  await handle.close();
+  const intercepted = t.mock.method(
+    prototype,
+    'read',
+    async function (this: typeof handle, ...args: Parameters<typeof handle.read>) {
+      const result = await Reflect.apply(read, this, args);
+      await writeFile(path, 'new');
+      return result;
+    },
+  );
+  try {
+    await assert.rejects(
+      files.execute('LOCAL_FILES_READ', checked),
+      /changed after this file read/,
+    );
+  } finally {
+    intercepted.mock.restore();
+  }
+});
+
 test('local files stay in home, skip secrets and kept-out folders, and never overwrite', async () => {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'nod-local-files-')));
   const home = join(base, 'home');
@@ -1159,13 +1198,43 @@ test('local files stay in home, skip secrets and kept-out folders, and never ove
       }),
       /outside your home/,
     );
-    assert.deepEqual(
-      await files.prepare('LOCAL_FILES_READ', { path: `${shared}/sorted/../a.txt` }),
-      { path: join(shared, 'a.txt') },
-    );
-    assert.deepEqual(await files.prepare('LOCAL_FILES_READ', { path: '~/Downloads/a.txt' }), {
-      path: join(shared, 'a.txt'),
+    const observation = await files.prepare('LOCAL_FILES_READ', {
+      path: `${shared}/sorted/../a.txt`,
     });
+    assert.ok('path' in observation);
+    assert.equal(observation.path, join(shared, 'a.txt'));
+    assert.deepEqual(
+      await files.prepare('LOCAL_FILES_READ', { path: '~/Downloads/a.txt' }),
+      observation,
+    );
+    for (const action of ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT'] as const) {
+      const path = join(shared, 'versioned.txt');
+      await writeFile(path, 'old');
+      const original = await lstat(path);
+      const checked = await files.prepare(action, { path });
+      assert.ok('version' in checked);
+      await writeFile(path, 'new');
+      await utimes(path, original.atime, original.mtime);
+      await assert.rejects(files.prepare(action, checked), /changed after this file read/);
+      await assert.rejects(files.execute(action, checked), /changed after this file read/);
+      const current = await files.prepare(action, { path });
+      assert.ok('version' in current);
+      assert.notEqual(current.version, checked.version);
+      const read = (await files.execute(action, current)) as {
+        text?: string;
+        file?: { bytes: Uint8Array };
+      };
+      assert.equal(read.text ?? Buffer.from(read.file!.bytes).toString(), 'new');
+      await rename(path, join(shared, 'versioned-old.txt'));
+      await writeFile(path, 'replacement');
+      await assert.rejects(files.execute(action, current), /changed after this file read/);
+      const controller = new AbortController();
+      const pending = await files.prepare(action, { path });
+      controller.abort();
+      await assert.rejects(files.execute(action, pending, { signal: controller.signal }), {
+        name: 'AbortError',
+      });
+    }
     assert.deepEqual(
       await files.prepare('LOCAL_FILES_MOVE', {
         moves: [{ from: '~/Downloads/a.txt', to: '~/Downloads/b.txt' }],

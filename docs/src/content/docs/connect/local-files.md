@@ -66,6 +66,8 @@ Each action goes through the same [trust check](/trust/approvals/) as an app act
 
 Nod never deletes a file outright. When it replaces or edits a file, the previous version goes to the Trash from its own place, so **Put Back** returns it there; if the Trash step fails, nothing changes. Nod marks files it writes, edits or copies from its workspace as downloaded when the system allows it, so macOS and Windows check them before they open.
 
+When Nod reads a file again after an edit, it checks the current file version. It asks again if your words do not cover the new read. If the file changes while an approved read waits or runs, that read fails. A previous refusal or uncertain read still prevents a repeat in the same request.
+
 ## Limits
 
 - On Windows, `desktop.ini`, `Thumbs.db` and the Recycle Bin count as hidden; Nod doesn't read Windows' hidden attribute. To change an item, Nod needs its full name, not a short name such as `DOCUME~1`.

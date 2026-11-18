@@ -4754,6 +4754,79 @@ test(
         },
       );
 
+      await t.test('local file observations keep refusal fences across file versions', async () => {
+        for (const source of ['user', 'schedule'] as const)
+          for (const action of ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT'])
+            for (const status of [
+              'pending',
+              'confirmed',
+              'executing',
+              'declined',
+              'uncertain',
+              'completed',
+            ]) {
+              const turn =
+                source === 'user'
+                  ? await begin('Read the synthetic note.')
+                  : await attachSchedule(await begin('Read the synthetic note.', { source }));
+              const path = `/synthetic/${randomUUID()}.md`;
+              const args = { path, version: 'a'.repeat(64) };
+              const id = await propose(turn, action, args);
+              const result = { text: 'Original synthetic observation' };
+              await db.pool.query('UPDATE approvals SET status=$2,result=$3::jsonb WHERE id=$1', [
+                id,
+                status,
+                result,
+              ]);
+              let reads = 0;
+              const read = () =>
+                approvals.request(
+                  turn,
+                  action,
+                  { path, version: 'b'.repeat(64) },
+                  {
+                    allowed: true,
+                    run: async () => {
+                      reads++;
+                      return { text: 'Current synthetic observation' };
+                    },
+                  },
+                );
+              if (status === 'completed') {
+                assert.deepEqual(
+                  await approvals.request(turn, action, args, { allowed: true }),
+                  result,
+                );
+                assert.deepEqual(await read(), { text: 'Current synthetic observation' });
+                assert.equal(reads, 1);
+                rejectPreflight = true;
+                try {
+                  await assert.rejects(
+                    approvals.request(turn, action, args, { allowed: true }),
+                    /Fixture account disconnected/,
+                  );
+                } finally {
+                  rejectPreflight = false;
+                }
+              } else {
+                await assert.rejects(read(), /pending or uncertain outcome/);
+                assert.equal(reads, 0);
+                await db.pool.query("UPDATE approvals SET args=args-'version' WHERE id=$1", [id]);
+                await assert.rejects(read(), /pending or uncertain outcome/);
+                assert.equal(reads, 0);
+              }
+              assert.equal((await stored(id)).status, status);
+              assert.equal(
+                (
+                  await db.pool.query('SELECT count(*)::int AS n FROM approvals WHERE turn_id=$1', [
+                    turn.turnId,
+                  ])
+                ).rows[0].n,
+                1,
+              );
+              await finish(turn.turnId, 'succeeded');
+            }
+      });
       await t.test(
         'approval clicks bind the card, action, and client retry to the same approval',
         async () => {

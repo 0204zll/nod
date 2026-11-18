@@ -354,6 +354,7 @@ export async function createApprovals(
     const encoded = JSON.stringify(args);
     if (!encoded) throw new Error('The action has no arguments to save.');
     const snapshot = JSON.parse(encoded) as Record<string, unknown>;
+    const fileObservation = action === 'LOCAL_FILES_READ' || action === 'LOCAL_FILES_IMPORT';
     const details = options.details ? JSON.stringify(options.details) : undefined;
     turn = { ...turn };
     const allowed = options.allowed === true;
@@ -410,12 +411,12 @@ export async function createApprovals(
       let previous = (
         background
           ? await client.query(
-              "SELECT * FROM approvals WHERE turn_id=ANY($1::uuid[]) AND owner_id=$2 AND action=$3 AND args=$4::jsonb AND status<>'expired' ORDER BY id LIMIT 1",
-              [chain.map((item) => item.id), ownerId, action, snapshot],
+              "SELECT * FROM approvals WHERE turn_id=ANY($1::uuid[]) AND owner_id=$2 AND action=$3 AND (args=$4::jsonb OR ($5::boolean AND status<>'completed' AND args-'version'=$4::jsonb-'version')) AND status<>'expired' ORDER BY (status='completed'),id LIMIT 1",
+              [chain.map((item) => item.id), ownerId, action, snapshot, fileObservation],
             )
           : await client.query(
-              "SELECT * FROM approvals WHERE thread_id=$1 AND owner_id=$2 AND source_message_id=$3 AND action=$4 AND args=$5::jsonb AND status<>'expired' ORDER BY id LIMIT 1",
-              [turn.threadId, ownerId, authorMessageId, action, snapshot],
+              "SELECT * FROM approvals WHERE thread_id=$1 AND owner_id=$2 AND source_message_id=$3 AND action=$4 AND (args=$5::jsonb OR ($6::boolean AND status<>'completed' AND args-'version'=$5::jsonb-'version')) AND status<>'expired' ORDER BY (status='completed'),id LIMIT 1",
+              [turn.threadId, ownerId, authorMessageId, action, snapshot, fileObservation],
             )
       ).rows[0];
       if (
@@ -435,8 +436,10 @@ export async function createApprovals(
         previous = undefined;
       }
       if (previous) {
-        if (previous.status === 'completed')
+        if (previous.status === 'completed') {
+          if (fileObservation) await preflight?.(action, snapshot, expectedRevision, client);
           return { cached: true as const, result: previous.result };
+        }
         throw conflict('This exact action already has a pending or uncertain outcome.');
       }
       await preflight?.(action, snapshot, expectedRevision, client);
@@ -456,11 +459,19 @@ export async function createApprovals(
             `SELECT a.*,m.text AS question FROM approvals a
              JOIN turns u ON u.id=a.turn_id AND u.owner_id=a.owner_id AND u.thread_id=a.thread_id
              JOIN messages m ON m.id=a.confirmation_message_id AND m.owner_id=a.owner_id AND m.thread_id=a.thread_id AND m.role='assistant'
-             WHERE a.owner_id=$1 AND a.thread_id=$2 AND a.action=$3 AND a.args=$4::jsonb
+             WHERE a.owner_id=$1 AND a.thread_id=$2 AND a.action=$3 AND (a.args=$4::jsonb OR ($7::boolean AND a.args-'version'=$4::jsonb-'version'))
                AND a.status='pending' AND u.status IN ('running','waiting') AND u.channel=$5
                AND a.expected_revision IS NOT DISTINCT FROM $6::integer
              ORDER BY a.id LIMIT 1`,
-            [ownerId, turn.threadId, action, snapshot, current.channel, expectedRevision ?? null],
+            [
+              ownerId,
+              turn.threadId,
+              action,
+              snapshot,
+              current.channel,
+              expectedRevision ?? null,
+              fileObservation,
+            ],
           )
         ).rows[0];
         if (pending)

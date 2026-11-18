@@ -205,8 +205,7 @@ test(
     let appResult: unknown;
     let changeRulesOnDraftRead = false;
     let changedRulesDuringDraftRead = 0;
-    let repeatAfterConfirm:
-      { tool?: string; action: string; args: Record<string, unknown> } | undefined;
+    let repeatAfterConfirm: FixtureCall | FixtureCall[] | undefined;
     const prompts = new Map<string, string>();
     const runtimeCommands = new Map<string, AgentSessionOptions['runTool']>();
     const advertisedMcp = new Map<string, string>();
@@ -401,16 +400,17 @@ test(
                 prompts.set(options.turnId, text);
                 const tool = (name: string) => options.tools.find((item) => item.name === name)!;
                 if (repeatAfterConfirm && text.includes('executed once by the trusted worker')) {
-                  const call = repeatAfterConfirm;
+                  const calls = repeatAfterConfirm;
                   repeatAfterConfirm = undefined;
-                  results.set(
-                    options.turnId,
-                    await tool(call.tool ?? 'apps').execute(
-                      call.tool === 'files' || call.tool === 'sign_in'
-                        ? { action: call.action, ...call.args }
-                        : call,
-                    ),
-                  );
+                  for (const call of Array.isArray(calls) ? calls : [calls])
+                    results.set(
+                      options.turnId,
+                      await tool(call.tool ?? 'apps').execute(
+                        call.tool === 'files' || call.tool === 'sign_in'
+                          ? { action: call.action, ...call.args }
+                          : call,
+                      ),
+                    );
                   return;
                 }
                 const part = parts.get(
@@ -5254,7 +5254,7 @@ test(
           const [held] = await approvalsFor(unnamed);
           assert.equal(held.status, 'pending');
           assert.equal(held.action, 'LOCAL_FILES_READ');
-          assert.deepEqual(held.args, { path: join(folder, 'contract.txt') });
+          assert.equal(held.args.path, join(folder, 'contract.txt'));
           const schedule = await reminder();
           const scheduledPrompt = `Synthetic scheduled listing ${randomUUID()}`;
           plans.set(scheduledPrompt, { tool: 'files', action: 'list', args: { path: folder } });
@@ -5325,6 +5325,45 @@ test(
           assert.ok(!letIn.json().paths.includes(join(folder, 'sorted')));
         },
       );
+      await t.test('confirmed local reads observe edits in the same request', async () => {
+        await request('PATCH', '/api/preferences', { localFilesEnabled: true });
+        const folder = await mkdtemp(join(localHome, 'reread-'));
+        for (const replacement of ['b'.repeat(859), 'a'.repeat(280)]) {
+          const path = join(folder, `${randomUUID()}.md`);
+          const original = 'a'.repeat(280) + '\nRemove this synthetic line after the table.\n';
+          await writeFile(path, original);
+          const text = `Check the synthetic note ${randomUUID()}`;
+          const opening = await propose('read', { path }, 'files', text);
+          const [approval] = await approvalsFor(opening);
+          assert.equal(approval.action, 'LOCAL_FILES_READ');
+          asked.add(text);
+          repeatAfterConfirm = [
+            {
+              tool: 'files',
+              action: 'edit',
+              args: { path, edits: [{ oldText: original, newText: replacement }] },
+            },
+            { tool: 'files', action: 'read', args: { path } },
+          ];
+          const accepted = await request('POST', '/api/messages', {
+            text: 'Yes',
+            replyToMessageId: approval.confirmation_message_id,
+            approvalAnswer: { approvalId: approval.id, approved: true },
+          });
+          assert.equal(accepted.statusCode, 200, accepted.body);
+          const resumed = accepted.json().turnId;
+          await waitFor(resumed, 'succeeded');
+          assert.equal(await readFile(path, 'utf8'), replacement);
+          const result = JSON.stringify(results.get(resumed));
+          assert.ok(result.includes(replacement), result);
+          assert.ok(!result.includes('Remove this synthetic line'), result);
+          const [saved] = await approvalsFor(opening);
+          assert.equal(saved.id, approval.id);
+          assert.equal(saved.status, 'completed');
+          assert.equal(saved.result.text, original);
+          assert.deepEqual(await approvalsFor(resumed), []);
+        }
+      });
       await t.test(
         'local Markdown approvals preserve the reviewed path through execution',
         async () => {

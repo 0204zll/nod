@@ -4,8 +4,8 @@ import {
   type OwnerInstructions,
 } from './owner-instructions.ts';
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { constants, type Stats } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { constants, type BigIntStats, type Stats } from 'node:fs';
 import {
   chmod,
   copyFile,
@@ -61,10 +61,16 @@ function absolutePath(home: string) {
 }
 function localFileSchemas(absolute: ReturnType<typeof absolutePath>) {
   const onePath = z.object({ path: absolute }).strict();
+  const observation = onePath.extend({
+    version: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+  });
   return {
     LOCAL_FILES_LIST: onePath,
-    LOCAL_FILES_READ: onePath,
-    LOCAL_FILES_IMPORT: onePath,
+    LOCAL_FILES_READ: observation,
+    LOCAL_FILES_IMPORT: observation,
     LOCAL_FILES_CREATE_FOLDER: onePath,
     LOCAL_FILES_MOVE: z
       .object({
@@ -124,6 +130,10 @@ const programs: Partial<Record<NodeJS.Platform, RegExp>> = {
 };
 const run = promisify(execFile);
 const maybeLstat = (path: string) => lstat(path).catch(() => undefined);
+const fileVersion = (info: BigIntStats) =>
+  createHash('sha256')
+    .update([info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs].join(':'))
+    .digest('hex');
 const keepOutLimit = 100;
 
 type Turn = { turnId: string; threadId: string };
@@ -594,7 +604,7 @@ export function createLocalFiles(
     );
   }
 
-  async function readFile(path: string, limit: number) {
+  async function readFile(path: string, limit: number, version?: string) {
     const checked = await maybeLstat(path);
     if (!checked?.isFile()) throw new IntegrationError(`${path} is not a file.`);
     const file = await open(path, constants.O_RDONLY | noFollow | noBlock);
@@ -602,9 +612,15 @@ export function createLocalFiles(
       const opened = await file.stat();
       if (opened.dev !== checked.dev || opened.ino !== checked.ino)
         throw new IntegrationError(`${path} changed while Nod was opening it.`);
+      const checkVersion = async () => {
+        if (version && fileVersion(await file.stat({ bigint: true })) !== version)
+          throw new IntegrationError(`${path} changed after this file read was checked.`, 409);
+      };
+      await checkVersion();
       const size = opened.size;
       const length = Math.min(size, limit);
       const { buffer, bytesRead } = await file.read(Buffer.alloc(length), 0, length, 0);
+      await checkVersion();
       return { size, bytes: buffer.subarray(0, bytesRead) };
     } finally {
       await file.close();
@@ -627,6 +643,7 @@ export function createLocalFiles(
 
   type Input = {
     path: string;
+    version?: string;
     moves: Array<{ from: string; to: string }>;
     paths: string[];
     text: string;
@@ -655,7 +672,14 @@ export function createLocalFiles(
         ),
       };
     if (input.paths) return { paths: await Promise.all(input.paths.map(real)) };
-    return { ...input, path: await real(input.path!) };
+    const path = await real(input.path!);
+    if (action === 'LOCAL_FILES_READ' || action === 'LOCAL_FILES_IMPORT') {
+      const version = fileVersion(await lstat(path, { bigint: true }));
+      if (input.version && input.version !== version)
+        throw new IntegrationError(`${path} changed after this file read was checked.`, 409);
+      return { ...input, path, version };
+    }
+    return { ...input, path };
   }
 
   async function execute(
@@ -732,7 +756,7 @@ export function createLocalFiles(
     }
     if (action === 'LOCAL_FILES_READ') {
       const path = await target(input.path);
-      const { size, bytes } = await readFile(path, readBytes);
+      const { size, bytes } = await readFile(path, readBytes, input.version);
       const truncated = size > readBytes;
       if (bytes.includes(0)) return { path, size, binary: true };
       return {
@@ -746,7 +770,7 @@ export function createLocalFiles(
       const path = await target(input.path);
       if (((await maybeLstat(path))?.size ?? 0) > fileBytes)
         throw new IntegrationError(`Files up to ${fileBytes / 1024 / 1024} MB can be copied.`);
-      const { size, bytes } = await readFile(path, fileBytes);
+      const { size, bytes } = await readFile(path, fileBytes, input.version);
       const name = nodePath.basename(path);
       const file: IntegrationFile = { name, mimeType: fileMimeType(name), bytes };
       return { path, size, file };
