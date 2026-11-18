@@ -883,7 +883,6 @@ test(
           ['https://first.github.io', 'https://www.second.github.io'],
           ['https://fixture.invalid', 'https://www.fixture.invalid'],
           ['https://localhost', 'https://www.localhost'],
-          ['https://127.0.0.1', 'https://example.net:9449'],
         ] as const) {
           const saved = await save(
             'Synthetic excluded login',
@@ -909,6 +908,39 @@ test(
             true,
           );
           assert.equal(injections.at(-1)?.origin, savedOrigin);
+        }
+        for (const [origin, alternate] of [
+          ['https://127.0.0.1:9449', 'https://www.127.0.0.1:9449'],
+          ['https://[::1]:9449', 'https://www.[::1]:9449'],
+        ] as const) {
+          const saved = await save('Synthetic IP login', origin, 'ip-account', 'ip-password');
+          const name = `ip-${saved.id}`;
+          await addTask(name, 'password');
+          observedOrigin = alternate;
+          const before = injections.length;
+          await assert.rejects(
+            vault.request(task(name), 'local-development', input('password', alternate)),
+            /website address is not valid/,
+          );
+          await assert.rejects(
+            vault.fillSaved(
+              task(name),
+              'local-development',
+              saved.id,
+              input('password', alternate),
+            ),
+            /website address is not valid/,
+          );
+          assert.equal(injections.length, before);
+          observedOrigin = origin;
+          assert.equal(
+            await vault.fillSaved(task(name), 'local-development', saved.id, {
+              ...input('password', origin),
+              usernameSelector: '#account',
+            }),
+            true,
+          );
+          assert.equal(injections.at(-1)?.origin, origin);
         }
       });
 
