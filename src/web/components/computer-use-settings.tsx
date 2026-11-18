@@ -85,11 +85,10 @@ export function ComputerUseSettings() {
           />
         </div>
         <p className="field-hint">
-          Experimental: it hasn’t been tested on many computers yet. Nod opens an app only when your
-          request names it or needs it, and asks before a step that sends, saves over, deletes or
-          buys anything. Browsers and code editors stay view-only; known terminals, system settings,{' '}
-          {fileManager} and password managers are never used. To keep Nod out of any other app, tell
-          Nod.
+          Experimental. Nod opens an app only when your request names it or needs it, and asks
+          before a step that sends, saves over, deletes or buys anything. Browsers and code editors
+          stay view-only; known terminals, system settings, {fileManager} and password managers are
+          never used. To keep Nod out of any other app, tell Nod.
         </p>
       </section>
       {data.enabled && data.platform === 'linux' && !data.permissions.ready && (
