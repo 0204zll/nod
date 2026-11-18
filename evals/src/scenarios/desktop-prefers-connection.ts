@@ -80,6 +80,7 @@ export default scenario({
         () => ({
           pass:
             world.app.sent.length === 0 &&
+            world.desktop.steps.length === 0 &&
             !world.desktop.requests.some((request) =>
               /slack/i.test(`${String(request.app ?? '')} ${String(request.bundle ?? '')}`),
             ),
