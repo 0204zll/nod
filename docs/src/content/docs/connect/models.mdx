@@ -27,6 +27,7 @@ Select **Add connection** (or **Add** when you already have a connection), then 
 | Cloudflare Workers AI / AI Gateway | Token, account ID, and gateway ID for AI Gateway          | Kimi K2.7 Code / GPT-6.1 Sol             |
 | Other named providers              | Service-specific API key                                  | A capable model from that connection     |
 | OpenAI-compatible                  | Server address and optional key                           | A model offered by the server            |
+| n8n Gateway                        | A connected n8n account with Gateway credits              | A model listed by the gateway            |
 
 Other providers include Ant Ling, Baseten, Cerebras, DeepSeek, Fireworks AI, Groq, Hugging Face, Kimi Coding China, Meta, MiniMax, Mistral, Moonshot AI, NVIDIA, OpenCode Zen and Go, Qwen Token Plan, Radius, Together AI, Vercel AI Gateway, xAI, Xiaomi MiMo and token plans, and Z.AI. The picker includes their supported regional variants.
 
@@ -209,6 +210,19 @@ Each deployment is one connection with one model. Add another connection for eac
 </Steps>
 
 Use this for Ollama, LM Studio, vLLM, llama.cpp and hosted services with an OpenAI-compatible API. See [Local models](/connect/local-models/) for server setup and what changes.
+
+</TabItem>
+<TabItem label="n8n Gateway">
+
+<Steps>
+
+1. Connect your n8n account in **Apps**. The instance needs Gateway credits.
+2. Choose **n8n Gateway** from the provider list.
+3. Choose the **n8n account** and select **Connect**.
+
+</Steps>
+
+Nod asks your n8n instance for a short-lived gateway token and calls the gateway directly. Model use is billed to that instance's Gateway credits. The token never reaches the model. The same n8n account also gives Nod the gateway's tools, such as Firecrawl, Browserbase, pdf.co and LlamaParse.
 
 </TabItem>
 </Tabs>

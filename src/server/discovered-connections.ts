@@ -77,6 +77,17 @@ type ProposalRow = {
 type ReturnTarget = 'apps' | 'onboarding' | 'window' | 'desktop';
 
 const catalogMs = 10 * 60_000;
+const gatewayAccessTool = 'get_n8n_gateway_access';
+const gatewayPathId = '6b1f7c2e-4d3a-4f8e-9c51-2a7e0d9b8f13';
+
+const gatewayAccessSchema = z.object({
+  available: z.literal(true),
+  gatewayUrl: z.url(),
+  token: z.string().min(1),
+  expiresAt: z.iso.datetime(),
+});
+
+export type GatewayAccess = { gatewayUrl: string; token: string; expiresAt: number };
 
 const oauthErrors = [
   'access_denied',
@@ -1145,6 +1156,81 @@ export async function createDiscoveredConnections(
     string,
     { at: number; value: Promise<DiscoveredCatalog>; ready?: DiscoveredCatalog }
   >();
+  const gatewayGrants = new Map<string, Promise<GatewayAccess>>();
+  function instancePath(row: AccountRow) {
+    if (row.service !== 'n8n') return undefined;
+    return row.paths.find(
+      (path): path is Extract<AccessPath, { kind: 'mcp' }> => path.kind === 'mcp',
+    );
+  }
+  async function mintGatewayAccess(
+    row: AccountRow,
+    instance: Extract<AccessPath, { kind: 'mcp' }>,
+    signal?: AbortSignal,
+  ): Promise<GatewayAccess> {
+    const token = await tokenFor(row, instance, signal);
+    const result = (await via(instance).transport.callTool(
+      instance.endpoint,
+      headers(instance, token),
+      gatewayAccessTool,
+      {},
+      signal,
+    )) as { structuredContent?: unknown; content?: Array<{ type?: string; text?: string }> };
+    const text = result.content?.find((block) => block.type === 'text')?.text;
+    const parsed = gatewayAccessSchema.safeParse(
+      result.structuredContent ?? (text ? JSON.parse(text) : undefined),
+    );
+    if (!parsed.success)
+      throw error('Gateway credits are not available on this n8n instance.', 409);
+    return {
+      gatewayUrl: parsed.data.gatewayUrl,
+      token: parsed.data.token,
+      expiresAt: Date.parse(parsed.data.expiresAt),
+    };
+  }
+  async function gatewayAccessFor(row: AccountRow, signal?: AbortSignal) {
+    const instance = instancePath(row);
+    if (!instance) throw error('Connect an n8n account to use the n8n Gateway.', 404);
+    const cached = gatewayGrants.get(row.id);
+    if (cached) {
+      const access = await cached.catch(() => undefined);
+      if (access && access.expiresAt > Date.now() + 60_000) return access;
+    }
+    const pending = mintGatewayAccess(row, instance, signal);
+    gatewayGrants.set(row.id, pending);
+    pending.catch(() => {
+      if (gatewayGrants.get(row.id) === pending) gatewayGrants.delete(row.id);
+    });
+    return await pending;
+  }
+  async function gatewayAccess(connectionId: string, signal?: AbortSignal) {
+    const row = (
+      await pool.query<AccountRow>(
+        "SELECT * FROM discovered_connections WHERE owner_id=$1 AND id=$2 AND service='n8n' AND NOT reconnect_required",
+        [owner, z.uuid().parse(connectionId)],
+      )
+    ).rows[0];
+    if (!row) throw error('This n8n account is unavailable. Connect it again in Apps.', 404);
+    return await gatewayAccessFor(row, signal);
+  }
+  async function gatewayPath(
+    row: AccountRow,
+    signal?: AbortSignal,
+  ): Promise<Extract<AccessPath, { kind: 'mcp' }>> {
+    const { gatewayUrl } = await gatewayAccessFor(row, signal);
+    const endpoint = new URL('/v1/gateway/mcp', gatewayUrl).href;
+    const local = await options.transport.validateEndpoint(endpoint).then(
+      () => false,
+      () => Boolean(options.local),
+    );
+    return {
+      id: gatewayPathId,
+      kind: 'mcp',
+      endpoint,
+      auth: 'bearer',
+      ...(local ? { local: true } : {}),
+    };
+  }
   async function catalog(
     row: AccountRow,
     path: Extract<AccessPath, { kind: 'mcp' }>,
@@ -1164,7 +1250,9 @@ export async function createDiscoveredConnections(
         signal,
       );
       return {
-        tools: tools.map((tool) => redact(tool, token) as DiscoveredTool),
+        tools: tools
+          .filter((tool) => row.service !== 'n8n' || tool.name !== gatewayAccessTool)
+          .map((tool) => redact(tool, token) as DiscoveredTool),
         ...(instructions
           ? { instructions: String(redact(instructions, token)).slice(0, 20_000) }
           : {}),
@@ -1191,6 +1279,7 @@ export async function createDiscoveredConnections(
     signal?: AbortSignal,
   ): Promise<string> {
     signal?.throwIfAborted();
+    if (path.id === gatewayPathId) return (await gatewayAccessFor(row, signal)).token;
     const grant = await options.grantVault.read(row.id);
     signal?.throwIfAborted();
     const secret = grant.value;
@@ -1375,8 +1464,14 @@ export async function createDiscoveredConnections(
     ).rows;
     const accounts = await Promise.all(
       rows.map(async (row) => {
+        const gateway = instancePath(row)
+          ? await gatewayPath(row, signal).then(
+              (path) => [path],
+              () => [],
+            )
+          : [];
         const paths = await Promise.all(
-          row.paths.map(async (path) => {
+          [...row.paths, ...gateway].map(async (path) => {
             if (path.kind !== 'mcp')
               return {
                 id: path.id,
@@ -1446,9 +1541,19 @@ export async function createDiscoveredConnections(
         [owner],
       )
     ).rows;
+    const gatewayPaths = await Promise.all(
+      rows.map((row) =>
+        instancePath(row)
+          ? gatewayPath(row, AbortSignal.timeout(20_000)).then(
+              (path) => [path],
+              () => [],
+            )
+          : [],
+      ),
+    );
     const loaded = await Promise.all(
-      rows.flatMap((row) =>
-        row.paths.flatMap((path) =>
+      rows.flatMap((row, index) =>
+        [...row.paths, ...gatewayPaths[index]!].flatMap((path) =>
           path.kind === 'mcp'
             ? [
                 catalog(row, path, AbortSignal.timeout(20_000), true).then(
@@ -1481,7 +1586,10 @@ export async function createDiscoveredConnections(
           )
         ).rows[0]
       : undefined;
-    const path = row?.paths.find((item) => pathId.success && item.id === pathId.data);
+    const path =
+      row && pathId.success && pathId.data === gatewayPathId && instancePath(row)
+        ? await gatewayPath(row)
+        : row?.paths.find((item) => pathId.success && item.id === pathId.data);
     if (!row || !path)
       throw error(
         "This access path is unavailable. Use a connectionId and pathId listed under discovered by apps SEARCH_TOOLS, or the app's own action.",
@@ -1504,6 +1612,8 @@ export async function createDiscoveredConnections(
     if (action !== 'CONNECTED_MCP_CALL' || path.kind !== 'mcp')
       throw error('Choose an MCP access path.');
     const tool = z.string().min(1).max(150).parse(args.tool);
+    if (row.service === 'n8n' && tool === gatewayAccessTool)
+      throw error('This n8n tool is reserved for Nod.', 403);
     const input = z.record(z.string(), z.unknown()).parse(args.input ?? {});
     return { row, call: { kind: 'mcp' as const, path, tool, input } };
   }
@@ -1788,6 +1898,7 @@ export async function createDiscoveredConnections(
     reconnect,
     search,
     servers,
+    gatewayAccess,
     validate: async (action: string, args: Record<string, unknown>, client?: PoolClient) => {
       await selected(action, args, client);
     },

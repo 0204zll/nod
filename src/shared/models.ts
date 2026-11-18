@@ -41,8 +41,9 @@ export const apiKeyModelProviders = [
 ] as const;
 
 export const apiKeyConnectionProviders = [...apiKeyModelProviders, 'elevenlabs'] as const;
-export const modelProviders = [...apiKeyModelProviders, 'compatible'] as const;
-export type ModelProvider = (typeof apiKeyConnectionProviders)[number] | 'compatible';
+export const modelProviders = [...apiKeyModelProviders, 'compatible', 'n8n-gateway'] as const;
+export type ModelProvider =
+  (typeof apiKeyConnectionProviders)[number] | 'compatible' | 'n8n-gateway';
 export type ModelMethod = 'api_key' | 'subscription' | 'oauth';
 export type ModelEffort = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
@@ -232,6 +233,7 @@ export const modelProviderNames = {
   zai: 'Z.AI',
   'zai-coding-cn': 'Z.AI Coding China',
   compatible: 'OpenAI-compatible',
+  'n8n-gateway': 'n8n Gateway',
 } as const satisfies Record<ModelProvider, string>;
 
 export const modelProviderInfo: Record<
@@ -378,6 +380,7 @@ export const modelProviderInfo: Record<
   zai: { keyUrl: 'z.ai/manage-apikey/apikey-list', env: 'ZAI_API_KEY', catalog: 'bundled' },
   'zai-coding-cn': { keyUrl: 'open.bigmodel.cn', env: 'ZAI_CODING_CN_API_KEY', catalog: 'bundled' },
   compatible: { keyUrl: '', env: 'OPENAI_COMPATIBLE_API_KEY', catalog: 'account' },
+  'n8n-gateway': { keyUrl: '', env: 'N8N_GATEWAY_CONNECTION_ID', catalog: 'account' },
 };
 
 export const bedrockRegionPattern = /^[a-z]{2}(?:-[a-z]+)+-\d{1,2}$/;

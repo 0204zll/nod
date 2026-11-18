@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
+import type { GatewayAccess } from './discovered-connections.ts';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type {
@@ -223,6 +224,7 @@ function connectionLabel(provider: ModelProvider, method: ModelMethod, value: Mo
     return value.workspaceId;
   if (value.type === 'oauth') return value.email ?? 'ChatGPT account';
   if (value.type === 'endpoint') return new URL(value.url).host;
+  if (value.type === 'n8n-gateway') return modelProviderNames['n8n-gateway'];
   if (value.type === 'bedrock') return value.region;
   if (value.type === 'azure') return value.deployment;
   if (value.type === 'cloudflare') return value.gatewayId ?? value.accountId;
@@ -323,6 +325,7 @@ export function createModelService(options: {
     keyStore: options.keyStore,
   });
   let analytics: CaptureAnalytics | undefined;
+  let gatewayAccess: ((connectionId: string) => Promise<GatewayAccess>) | undefined;
   let requestBudget: ModelAccess['reserve'];
   const reserve: NonNullable<ModelAccess['reserve']> = async (maximumUsd) => {
     if (!requestBudget) throw new Error('The model request budget is not configured.');
@@ -415,6 +418,19 @@ export function createModelService(options: {
     )
       throw new ConnectionError('This sign-in request has expired. Start a new connection.');
   }
+  async function gatewayEndpoint(
+    connectionId: string,
+  ): Promise<Extract<ModelCredential, { type: 'endpoint' }>> {
+    if (!gatewayAccess) throw new ConnectionError('The n8n Gateway is unavailable.');
+    const access = await gatewayAccess(connectionId);
+    return { type: 'endpoint', url: access.gatewayUrl, key: access.token };
+  }
+  async function requestCredential(value: ModelCredential | undefined) {
+    if (value?.type !== 'n8n-gateway') return value;
+    const endpoint = await gatewayEndpoint(value.connectionId);
+    remember(endpoint);
+    return { type: 'api_key' as const, key: endpoint.key ?? '' };
+  }
   function remember(value: ModelCredential) {
     const values = (
       value.type === 'oauth'
@@ -490,7 +506,7 @@ export function createModelService(options: {
     row: ModelRecord,
   ): Pick<ModelAccess, 'read' | 'prepareRequest' | 'reserve'> {
     return {
-      read: () => read(row.id),
+      read: async () => requestCredential(await read(row.id)),
       reserve,
       async prepareRequest(modelId, automatic) {
         const tag = credentialTag(await read(row.id));
@@ -782,7 +798,10 @@ export function createModelService(options: {
   ) {
     if (value) remember(value);
     try {
-      return await backend.catalog(provider, method, value);
+      const listed =
+        value?.type === 'n8n-gateway' ? await gatewayEndpoint(value.connectionId) : value;
+      if (listed) remember(listed);
+      return await backend.catalog(provider, method, listed);
     } catch (error) {
       if (error instanceof ModelAuthError && error.requiresReconnect) await rejected?.();
       throw new ConnectionError(
@@ -1361,6 +1380,19 @@ export function createModelService(options: {
         return save(provider, 'api_key', value, await catalog(provider, 'api_key', value));
       });
     },
+    async addGateway(connectionId: string) {
+      const value: ModelCredential = { type: 'n8n-gateway', connectionId };
+      return tracked('n8n-gateway', 'api_key', async () => {
+        await checkStorage();
+        const definitions = await catalog('n8n-gateway', 'api_key', value);
+        if (!definitions.length)
+          throw new ConnectionError('The n8n Gateway has no models Nod can use.');
+        return save('n8n-gateway', 'api_key', value, definitions);
+      });
+    },
+    setGatewayAccess(access: (connectionId: string) => Promise<GatewayAccess>) {
+      gatewayAccess = access;
+    },
     async addEndpoint(address: string, key?: string) {
       const url = endpointAddress(address);
       if (!url)
@@ -1599,6 +1631,12 @@ export function createModelService(options: {
             .strict()
             .parse(request.body);
           await service.addEndpoint(input.url, input.key || undefined);
+          await service.checkSettled();
+          return service.view();
+        });
+        routes.post('/api/models/gateway', async (request) => {
+          const input = z.object({ connectionId: z.uuid() }).strict().parse(request.body);
+          await service.addGateway(input.connectionId);
           await service.checkSettled();
           return service.view();
         });

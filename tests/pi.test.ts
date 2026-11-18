@@ -10957,3 +10957,56 @@ test('preparation reserves model cost before dispatch and blocks a request witho
     if (!priced) assert.match(result.errorMessage!, /Synthetic preparation price is unknown/);
   }
 });
+
+test('n8n Gateway catalog builds priced models on the gateway paths', async (t) => {
+  const { createServer } = await import('node:http');
+  const seen: string[] = [];
+  const server = createServer((request, response) => {
+    seen.push(`${request.method} ${request.url}`);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(
+      JSON.stringify({
+        models: [
+          {
+            id: 'claude-sonnet-4-6',
+            provider: 'anthropic',
+            api: 'anthropic-messages',
+            path: '/v1/gateway/anthropic',
+            cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+          },
+          {
+            id: 'qwen3.7-plus',
+            provider: 'alibaba',
+            api: 'openai-completions',
+            path: '/v1/gateway/alibaba/compatible-mode/v1',
+            cost: { input: 1.2, output: 4.8, cacheRead: 1.2, cacheWrite: 1.2 },
+          },
+          { id: 'broken', provider: 'alibaba', api: 'unknown-api', path: '/x', cost: {} },
+        ],
+      }),
+    );
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const address = server.address() as import('node:net').AddressInfo;
+  const root = `http://127.0.0.1:${address.port}`;
+
+  const models = await createPiModelBackend().catalog('n8n-gateway', 'api_key', {
+    type: 'endpoint',
+    url: root,
+    key: 'synthetic-gateway-token',
+  });
+
+  assert.deepEqual(seen, ['GET /v1/gateway/models']);
+  assert.deepEqual(
+    models.map((model) => model.choice.id),
+    ['claude-sonnet-4-6', 'qwen3.7-plus'],
+  );
+  const [claude, qwen] = models;
+  assert.equal(claude!.spec.provider, 'n8n-gateway');
+  assert.equal(claude!.spec.api, 'anthropic-messages');
+  assert.equal(claude!.spec.baseUrl, `${root}/v1/gateway/anthropic`);
+  assert.deepEqual(claude!.spec.cost, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 });
+  assert.equal(qwen!.spec.api, 'openai-completions');
+  assert.equal(qwen!.spec.baseUrl, `${root}/v1/gateway/alibaba/compatible-mode/v1`);
+});

@@ -112,6 +112,33 @@ function chatgptCredential(value: unknown) {
   return parsed.data;
 }
 
+const gatewayVendors: Partial<Record<string, ModelProvider>> = {
+  openai: 'openai',
+  anthropic: 'anthropic',
+  google: 'google',
+  moonshot: 'moonshotai',
+  minimax: 'minimax',
+  xai: 'xai',
+};
+
+const gatewayModelSchema = z.object({
+  id: z.string().min(1).max(200),
+  provider: z.string().min(1).max(100),
+  api: z.enum([
+    'openai-responses',
+    'openai-completions',
+    'anthropic-messages',
+    'google-generative-ai',
+  ]),
+  path: z.string().regex(/^\/[\w./-]*$/),
+  cost: z.object({
+    input: z.number().nonnegative(),
+    output: z.number().nonnegative(),
+    cacheRead: z.number().nonnegative(),
+    cacheWrite: z.number().nonnegative(),
+  }),
+});
+
 function entries<T>(value: unknown, schema: z.ZodType<T>) {
   return z
     .array(z.unknown())
@@ -364,6 +391,52 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
       models.push(...batch.flat());
     }
     return models;
+  }
+  async function gatewayCatalog(credential?: ModelCredential) {
+    if (credential?.type !== 'endpoint' || !credential.key)
+      throw new Error('Connect an n8n account to use the n8n Gateway.');
+    const root = credential.url.replace(/\/+$/, '');
+    const response = await request(`${root}/v1/gateway/models`, {
+      redirect: 'error',
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok)
+      throw new Error(`The n8n Gateway model list failed with status ${response.status}.`);
+    const listed = entries(
+      z.object({ models: z.array(z.unknown()) }).parse(await response.json()).models,
+      gatewayModelSchema,
+    );
+    const pi = await runtime();
+    return listed.map((entry) => {
+      const vendor = gatewayVendors[entry.provider];
+      const known = vendor
+        ? pi.getModels(vendor).find((model) => model.id === entry.id)
+        : undefined;
+      const contextWindow = known?.contextWindow ?? 128_000;
+      return definition({
+        id: entry.id,
+        name: known?.name ?? entry.id,
+        api: entry.api,
+        provider: 'n8n-gateway',
+        baseUrl: `${root}${entry.path}`,
+        reasoning: known?.reasoning ?? false,
+        thinkingLevelMap: known?.thinkingLevelMap,
+        input: known?.input ?? ['text'],
+        contextWindow,
+        maxTokens: known?.maxTokens ?? Math.min(32_768, Math.floor(contextWindow / 2)),
+        cost: entry.cost,
+        ...(known?.api === entry.api && known.compat ? { compat: known.compat } : {}),
+        ...(entry.api === 'openai-completions' && known?.api !== entry.api
+          ? {
+              compat: {
+                supportsStore: false,
+                supportsDeveloperRole: false,
+                maxTokensField: 'max_tokens',
+              },
+            }
+          : {}),
+      } as Model<Api>);
+    });
   }
   async function cloudResponse(url: string, init: RequestInit, rejected: string) {
     const response = await request(url, {
@@ -724,6 +797,7 @@ export function createPiModelBackend(options: { fetch?: typeof fetch } = {}): Mo
       if (!modelProviders.includes(provider))
         throw new Error('This model provider is unavailable.');
       if (provider === 'compatible') return endpointCatalog(credential);
+      if (provider === 'n8n-gateway') return gatewayCatalog(credential);
       let local = assistantModels(
         provider === 'ant-ling' ? [antLingModel] : (await runtime()).getModels(provider),
       );
@@ -1188,6 +1262,7 @@ export async function createPiModelRuntime(
     const heard = () => clearTimeout(silenceTimer);
     const guardedFetch =
       access.provider === 'compatible' ||
+      access.provider === 'n8n-gateway' ||
       access.provider === 'radius' ||
       access.provider === 'cloudflare-workers-ai' ||
       access.provider === 'cloudflare-ai-gateway' ||

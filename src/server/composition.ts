@@ -1269,6 +1269,7 @@ async function initializeApplication(
     resumeConnection: resumeAfterConnection,
     refresh,
   });
+  adapters.models?.setGatewayAccess((connectionId) => discovered.gatewayAccess(connectionId));
   let vault!: Awaited<ReturnType<typeof createVault>>;
   let vaultAccess!: Awaited<ReturnType<typeof createVaultAccess>>;
   let payments!: Awaited<ReturnType<typeof createPayments>>;

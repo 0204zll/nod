@@ -47,6 +47,7 @@ import {
   type KeySettings,
 } from '../hooks/use-models';
 import { usePageData } from '../hooks/use-page-data';
+import type { Connection } from '../../shared/contracts';
 import { SearchPicker } from './search-picker';
 import { Tooltip } from './tooltip';
 import { useSettingsDraft } from './settings-drafts';
@@ -103,6 +104,7 @@ const modelProviderLogos: Partial<Record<ModelProvider, string>> = {
   zai: 'models/zai',
   'zai-coding-cn': 'models/zai',
   compatible: 'server',
+  'n8n-gateway': 'n8n',
 };
 
 const modelPrice = new Intl.NumberFormat('en-US', {
@@ -208,6 +210,8 @@ function providerDescription(provider: ModelProvider) {
       return 'Models through your Cloudflare gateway';
     case 'compatible':
       return 'Ollama, LM Studio, vLLM or any other server';
+    case 'n8n-gateway':
+      return 'Models billed to Gateway credits on your n8n instance';
     default:
       return `Models with a ${modelProviderNames[provider]} API key`;
   }
@@ -848,6 +852,21 @@ export function ModelSettings({ onDirtyChange }: { onDirtyChange?(dirty: boolean
                     Use an API key
                   </Button>
                 </div>
+              ) : panel.provider === 'n8n-gateway' ? (
+                <GatewayForm
+                  busy={busy}
+                  error={models.errorPath === '/api/models/gateway' ? models.error : ''}
+                  onCancel={closePanel}
+                  onConnect={async (connectionId) => {
+                    const saved = await models.change('/api/models/gateway', 'POST', {
+                      connectionId,
+                    });
+                    if (saved) {
+                      resetForm();
+                      setPanel(null);
+                    }
+                  }}
+                />
               ) : (
                 <form
                   className="model-key-form"
@@ -1581,5 +1600,75 @@ export function ModelPicker({
         </DialogContent>
       </Dialog>
     </Wrapper>
+  );
+}
+
+function GatewayForm({
+  busy,
+  error,
+  onCancel,
+  onConnect,
+}: {
+  busy: boolean;
+  error: string;
+  onCancel: () => void;
+  onConnect: (connectionId: string) => Promise<void>;
+}) {
+  const apps = usePageData<Connection[]>('/api/apps');
+  const accounts = (apps.data ?? []).filter(
+    (app) => app.slug === 'n8n' && app.status === 'connected' && app.connectionId,
+  );
+  const [chosen, setChosen] = useState('');
+  const connectionId = chosen || accounts[0]?.connectionId || '';
+  if (apps.loading && !apps.data) return <Loading />;
+  if (!accounts.length)
+    return (
+      <div className="model-key-form">
+        <p className="model-key-note">
+          Connect your n8n account in {appPages['/apps']} first. Nod then uses its Gateway credits
+          for models.
+        </p>
+        <div className="model-dialog-actions">
+          <Button type="button" variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={() => (window.location.href = '/apps')}>
+            Open Apps
+          </Button>
+        </div>
+      </div>
+    );
+  return (
+    <form
+      className="model-key-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (connectionId) void onConnect(connectionId);
+      }}
+    >
+      <Field label="n8n account">
+        <select
+          value={connectionId}
+          disabled={busy}
+          onChange={(event) => setChosen(event.target.value)}
+        >
+          {accounts.map((account) => (
+            <option key={account.connectionId} value={account.connectionId}>
+              {account.accountName ?? account.name}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {error && <Notice>{error}</Notice>}
+      <p className="model-key-note">Model use is billed to this instance's Gateway credits.</p>
+      <div className="model-dialog-actions">
+        <Button type="button" variant="ghost" disabled={busy} onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={busy || !connectionId}>
+          {busy ? 'Connecting…' : 'Connect'}
+        </Button>
+      </div>
+    </form>
   );
 }
