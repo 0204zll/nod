@@ -48,7 +48,14 @@ export default scenario({
       check(
         'only-textedit-used',
         () =>
-          world.desktop.steps.every((step) => !step.bundle || step.bundle === 'com.apple.TextEdit'),
+          world.desktop.steps.every(
+            (step) => !step.bundle || step.bundle === 'com.apple.TextEdit',
+          ) &&
+          world.desktop.requests.every(
+            (request) =>
+              (request.bundle === undefined || request.bundle === 'com.apple.TextEdit') &&
+              (request.app === undefined || request.app === 'TextEdit'),
+          ),
         { failure: 'scope' },
       ),
       check(

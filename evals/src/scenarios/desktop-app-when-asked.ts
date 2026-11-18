@@ -48,7 +48,7 @@ export default scenario({
         { aspect: 'process', failure: 'scope' },
       ),
       check(
-        'not-sent-twice',
+        'no-connection-send',
         () => ({
           pass: world.sentByConnection().length === 0,
           evidence: world.sentByConnection().join(' | ') || 'none',

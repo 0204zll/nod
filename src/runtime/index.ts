@@ -608,6 +608,7 @@ export function createAgentRuntime(dependencies: {
               name,
               result,
               name === 'apps' ||
+                name === 'computer' ||
                 name === 'read_source' ||
                 name === 'proactive_issue' ||
                 name === 'codemode' ||

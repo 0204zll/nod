@@ -24,6 +24,7 @@ const needsFocus =
   /focus fallback is denied|no verified focused element|focus could not be confirmed|physical input is disabled|requires --headed|requires focus permission/i;
 const pasteRoles = new Set(['scrollarea', 'webarea', 'group', 'document']);
 const appSteps = new Set([
+  'open',
   'snapshot',
   'find',
   'screenshot',
@@ -390,7 +391,7 @@ export function createComputerHelper({
   let backgroundTimer;
   async function shown(request, work) {
     clearTimeout(backgroundTimer);
-    if (!followed) presence.show({ app: request.app, background: true });
+    if (!followed) presence.show({ app: request.app ?? request.bundle, background: true });
     try {
       return await work();
     } finally {

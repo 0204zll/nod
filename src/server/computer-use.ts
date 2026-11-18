@@ -683,8 +683,11 @@ export function createComputerUse(
         let pid = already?.pid;
         if (pid === undefined)
           try {
-            pid = ((await ask({ op: 'open', bundle: target.bundle }, signal)) as { pid?: number })
-              .pid;
+            pid = (
+              (await ask({ op: 'open', bundle: target.bundle, app: target.name }, signal)) as {
+                pid?: number;
+              }
+            ).pid;
           } catch (error) {
             pid = (await running(signal)).find((item) => sameApp(item, target))?.pid;
             if (pid === undefined) throw error;

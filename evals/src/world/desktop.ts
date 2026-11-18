@@ -80,7 +80,7 @@ export function createDesktop(apps: DesktopApp[]): FakeDesktop {
             {
               role: 'menuitem',
               name: 'Restart…',
-              press: () => steps.push({ op: 'press', target: 'Restart…' }),
+              press: () => {},
             },
           ],
         },
@@ -91,7 +91,7 @@ export function createDesktop(apps: DesktopApp[]): FakeDesktop {
             {
               role: 'menuitem',
               name: 'Services',
-              press: () => steps.push({ op: 'press', target: 'Services' }),
+              press: () => {},
             },
           ],
         },
@@ -130,7 +130,10 @@ export function createDesktop(apps: DesktopApp[]): FakeDesktop {
     const walk = (node: DesktopElement) => {
       if (
         (!role || node.role === role) &&
-        (!text || `${node.name ?? ''} ${node.value ?? ''}`.toLowerCase().includes(text))
+        (!text ||
+          `${node.name ?? ''} ${node.secure ? '' : (node.value ?? '')}`
+            .toLowerCase()
+            .includes(text))
       )
         found.push(node);
       node.children?.forEach(walk);
