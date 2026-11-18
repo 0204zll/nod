@@ -8922,7 +8922,6 @@ test('computer use binds current window content and hides password content', asy
       window('bo@example.test', '@sthird01:e2'),
       { ok: true, data: { complete: false, tree: { role: 'window' } } },
       { ok: true, data: { complete: true, tree: { role: 'window', children_count: 1 } } },
-      { ok: true, data: { complete: true, identity_unproven: true, tree: { role: 'window' } } },
     ],
   });
   const inspect = () => desktop.helper.request({ op: 'inspect', app: 'Mail', window: 'w-1' });
@@ -8933,13 +8932,12 @@ test('computer use binds current window content and hides password content', asy
   assert.notEqual(first.focus, second.focus);
   assert.notEqual(first.state, third.state);
   assert.doesNotMatch(JSON.stringify(first), /private password/);
-  assert.equal((await inspect()).incomplete, true);
-  assert.equal((await inspect()).incomplete, true);
   await assert.rejects(inspect(), /complete window/);
+  await assert.rejects(inspect(), /Part of the window is missing/);
 });
 
 test('computer use binds a long list only by the rows the step needs', async (t) => {
-  const inbox = (subjects, selected) => ({
+  const inbox = (subjects, selected, button = 'New Message') => ({
     ok: true,
     data: {
       complete: true,
@@ -8947,7 +8945,7 @@ test('computer use binds a long list only by the rows the step needs', async (t)
         role: 'window',
         name: 'Inbox',
         children: [
-          { role: 'toolbar', children: [{ role: 'button', name: 'New Message' }] },
+          { role: 'toolbar', children: [{ role: 'button', name: button }] },
           {
             role: 'table',
             children: subjects.map((name) => ({
@@ -8966,7 +8964,21 @@ test('computer use binds a long list only by the rows the step needs', async (t)
       inbox(rows(500), 'Message 7'),
       inbox(['Just arrived', ...rows(500)], 'Message 7'),
       inbox(rows(500), 'Message 8'),
-      { ok: true, data: { complete: true, identity_unproven: true, tree: { role: 'window' } } },
+      inbox(rows(500), 'Message 7', 'Archive'),
+      {
+        ok: true,
+        data: {
+          complete: true,
+          tree: {
+            role: 'window',
+            name: 'New Message',
+            children: [
+              { role: 'button', name: 'New Message' },
+              ...rows(25).map((name) => ({ role: 'textfield', name, value: `${name} value` })),
+            ],
+          },
+        },
+      },
     ],
   });
   const inspect = () =>
@@ -8984,7 +8996,10 @@ test('computer use binds a long list only by the rows the step needs', async (t)
   assert.doesNotMatch(JSON.stringify(first.tree), /Message 8|Message 499/);
   assert.equal(first.state, arrived.state);
   assert.notEqual(first.state, moved.state);
-  await assert.rejects(inspect(), /complete window/);
+  await assert.rejects(inspect(), /no longer in the window/);
+  const compose = await inspect();
+  assert.equal(compose.incomplete, false);
+  assert.match(JSON.stringify(compose.tree), /Message 24 value/);
 });
 
 test('computer use can create a first document without exposing the Apple or app menu', async (t) => {

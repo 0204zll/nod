@@ -79,21 +79,74 @@ function secureFocus(node) {
   );
 }
 
-const inspectBudget = 20_000;
-const inspectLimits = [20, 10, 5, 2];
+const listRoles = new Set([
+  'list',
+  'listbox',
+  'table',
+  'outline',
+  'grid',
+  'tree',
+  'treegrid',
+  'menu',
+]);
+const listLimit = 20;
 
 function inspectResult(data, menu = false, target) {
-  if (!data.tree || data.identity_unproven)
+  if (data.complete !== true || !data.tree || data.truncated || data.identity_unproven)
     throw new Error(
       'POLICY_DENIED: Nod could not read the complete window, so this step did not run.',
     );
-  const relevant = (node) =>
-    Boolean(
-      node.states?.includes('focused') ||
-      node.states?.includes('selected') ||
-      (target && node.role === target.role && (node.name ?? '') === target.name) ||
-      node.children?.some(relevant),
-    );
+  const isTarget = (node) =>
+    Boolean(target) && node.role === target.role && (node.name ?? '') === target.name;
+  const relevance = new WeakMap();
+  const relevant = (node) => {
+    if (!relevance.has(node))
+      relevance.set(
+        node,
+        Boolean(
+          node.states?.includes('selected') || isTarget(node) || node.children?.some(relevant),
+        ),
+      );
+    return relevance.get(node);
+  };
+  let trimmed = false;
+  let found = false;
+  const focused = [];
+  const focus = (node, path = []) => {
+    if (node.states?.includes('focused') && !['window', 'dialog'].includes(node.role))
+      focused.push({ path, role: node.role ?? '', name: secure(node) ? '' : (node.name ?? '') });
+    node.children?.forEach((child, index) => focus(child, [...path, index]));
+  };
+  const walk = (node) => {
+    if (node.subtree_truncated || (node.children_count ?? 0) > (node.children?.length ?? 0))
+      throw new Error('POLICY_DENIED: Part of the window is missing, so this step did not run.');
+    if (secure(node)) return { role: node.role ?? '', secure: true };
+    if (isTarget(node)) found = true;
+    const all = node.children ?? [];
+    const kept = listRoles.has(node.role) && all.length > listLimit ? all.filter(relevant) : all;
+    if (kept.length < all.length) trimmed = true;
+    return {
+      role: node.role ?? '',
+      name: node.name ?? '',
+      value: node.value ?? null,
+      ...Object.fromEntries(
+        [
+          'description',
+          'hint',
+          'subrole',
+          'role_description',
+          'placeholder',
+          'native_id',
+          'available_actions',
+        ]
+          .filter((key) => node[key] != null)
+          .map((key) => [key, node[key]]),
+      ),
+      states: (node.states ?? []).filter((state) => !['focused', 'hovered'].includes(state)).sort(),
+      ...(kept.length < all.length ? { more: true } : {}),
+      children: kept.map(walk),
+    };
+  };
   const source = menu
     ? {
         ...data.tree,
@@ -102,53 +155,24 @@ function inspectResult(data, menu = false, target) {
           data.tree.children_count == null ? undefined : Math.max(0, data.tree.children_count - 2),
       }
     : data.tree;
-  const build = (limit) => {
-    let incomplete = data.complete !== true || Boolean(data.truncated);
-    const focused = [];
-    const walk = (node, path = []) => {
-      if (node.subtree_truncated || (node.children_count ?? 0) > (node.children?.length ?? 0))
-        incomplete = true;
-      const hidden = secure(node);
-      if (node.states?.includes('focused') && !['window', 'dialog'].includes(node.role))
-        focused.push({ path, role: node.role ?? '', name: hidden ? '' : (node.name ?? '') });
-      if (hidden) return { role: node.role ?? '', secure: true };
-      const all = node.children ?? [];
-      const kept = all.length > limit ? all.filter(relevant) : all;
-      if (kept.length < all.length) incomplete = true;
-      return {
-        role: node.role ?? '',
-        name: node.name ?? '',
-        value: node.value ?? null,
-        ...Object.fromEntries(
-          [
-            'description',
-            'hint',
-            'subrole',
-            'role_description',
-            'placeholder',
-            'native_id',
-            'available_actions',
-          ]
-            .filter((key) => node[key] != null)
-            .map((key) => [key, node[key]]),
-        ),
-        states: (node.states ?? [])
-          .filter((state) => !['focused', 'hovered'].includes(state))
-          .sort(),
-        ...(kept.length < all.length ? { more: true } : {}),
-        children: kept.map((child, index) => walk(child, [...path, index])),
-      };
-    };
-    return { tree: walk(source), focused, incomplete };
-  };
-  let built;
-  for (const limit of inspectLimits) {
-    built = build(limit);
-    if (JSON.stringify(built.tree).length <= inspectBudget) break;
-  }
-  const { tree, focused, incomplete } = built;
+  const tree = walk(source);
+  focus(source);
+  if (target && !found)
+    throw new Error(
+      'STALE_REF: That control is no longer in the window, so this step did not run.',
+    );
   const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-  return { tree, state: hash([tree, incomplete]), focus: hash(focused), focused, incomplete };
+  return {
+    tree: JSON.parse(
+      JSON.stringify(tree, (key, value) =>
+        ['native_id', 'available_actions'].includes(key) ? undefined : value,
+      ),
+    ),
+    state: hash(tree),
+    focus: hash(focused),
+    focused,
+    incomplete: trimmed,
+  };
 }
 
 async function windowsProgram(path) {

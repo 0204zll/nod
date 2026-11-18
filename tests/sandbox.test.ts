@@ -1702,6 +1702,12 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     /password field has focus/,
   );
 
+  findings.push({ role: 'statictext', name: 'x'.repeat(25_000) });
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' }),
+    /size limit/,
+  );
+  findings.pop();
   const press = await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' });
   assert.equal(computer.needsCheck('COMPUTER_PRESS', press), true);
   assert.deepEqual(computer.checked('COMPUTER_PRESS', press), {
