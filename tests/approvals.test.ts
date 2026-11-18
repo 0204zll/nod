@@ -36,6 +36,7 @@ import {
 import { appConfirmation } from '../src/ports/agent.ts';
 import type { ApprovalDescription, ApprovalExecutionContext } from '../src/server/approvals.ts';
 import { serverNetwork } from '../src/server/network.ts';
+import { createErrorRedactor } from '../src/server/redaction.ts';
 import {
   approvalContent,
   approvalTitle,
@@ -100,6 +101,41 @@ test('cancellation approval shows distinct approval and refusal controls', () =>
       assert.equal(new Set(buttons).size, 2);
       assert.ok(buttons.includes('No'));
     }
+  }
+});
+
+test('failed approval cards show the reason and distinguish an action that did not run', () => {
+  for (const Component of [ApprovalChoiceCard, ApprovalCard]) {
+    const approval = {
+      id: 'synthetic-failed-approval',
+      state: 'expired' as const,
+      title: 'Save file',
+      app: '',
+      slug: '',
+      failure: 'The file upload failed (HTTP 503): synthetic service unavailable.',
+    };
+    const html = renderToStaticMarkup(
+      createElement(Component, { approval, children: 'Synthetic approval' }),
+    );
+    assert.match(html, /Not run/);
+    assert.match(html, /HTTP 503/);
+    assert.doesNotMatch(html, />Expired</);
+    const expired = renderToStaticMarkup(
+      createElement(Component, {
+        approval: { ...approval, failure: undefined },
+        children: 'Synthetic approval',
+      }),
+    );
+    assert.match(expired, /Expired/);
+    const uncertain = renderToStaticMarkup(
+      createElement(Component, {
+        approval: { ...approval, state: 'uncertain' as const },
+        children: 'Synthetic approval',
+      }),
+    );
+    assert.match(uncertain, /May have run/);
+    assert.match(uncertain, /HTTP 503/);
+    assert.doesNotMatch(uncertain, /Not run/);
   }
 });
 
@@ -1198,6 +1234,17 @@ test(
     };
     const stored = async (id: string) =>
       (await db.pool.query('SELECT * FROM approvals WHERE id=$1', [id])).rows[0];
+    const shownApproval = async (id: string) => {
+      const record = await stored(id);
+      const response = await request(
+        'GET',
+        `/api/messages/around/${record.confirmation_message_id}`,
+      );
+      assert.equal(response.statusCode, 200, response.body);
+      return response
+        .json()
+        .find((message: { id: string }) => message.id === record.confirmation_message_id).approval;
+    };
     async function propose(
       turn: { threadId: string; turnId: string },
       action: string,
@@ -1261,6 +1308,8 @@ test(
           if (descriptionFailure) throw new Error('Synthetic confirmation model failure.');
           return describe(proposal, signal);
         },
+        undefined,
+        createErrorRedactor(['PRIVATE_APPROVAL_KEY_CANARY']),
       );
       const checked = (base: typeof approved): typeof approved => ({
         ...base,
@@ -1487,12 +1536,156 @@ test(
             const result = await execute(approvalId);
             assert.equal((await stored(approvalId)).status, 'expired');
             assert.match(result?.prompt ?? '', /did not run/);
+            const shown = await shownApproval(approvalId);
+            assert.match(shown.failure ?? '', new RegExp(`HTTP ${status}`));
+            assert.match(shown.failure, new RegExp(code));
+            assert.equal((await stored(approvalId)).result.error, shown.failure);
             assert.equal(sessions, 1);
             assert.equal(fixture.writes.length, 0);
             await finish(confirmed.turnId, 'succeeded');
           },
         );
       }
+
+      await t.test(
+        'failed app preparation and uncertain execution keep safe reasons without repeating the action',
+        async (t) => {
+          t.after(() => {
+            executionResult = undefined;
+          });
+          for (const notRun of [true, false]) {
+            const turn = await begin('Save the synthetic file.');
+            const args = email('approval-failure@example.test');
+            const id = await propose(turn, 'GMAIL_SEND_EMAIL', args);
+            const record = await stored(id);
+            await finish(turn.turnId);
+            const input = {
+              text: 'Send',
+              threadId: turn.threadId,
+              replyToMessageId: record.confirmation_message_id,
+              clientMessageId: randomUUID(),
+              approvalAnswer: { approvalId: id, approved: true },
+            };
+            const answered = await request('POST', '/api/messages', input);
+            assert.equal(answered.statusCode, 200, answered.body);
+            assert.deepEqual(
+              (await request('POST', '/api/messages', input)).json(),
+              answered.json(),
+            );
+            executionResult = () => {
+              throw Object.assign(
+                new Error(
+                  'The file upload failed (HTTP 503): synthetic service unavailable. PRIVATE_APPROVAL_KEY_CANARY',
+                ),
+                { notRun },
+              );
+            };
+            const before = calls.length;
+            const result = await execute(id);
+            const shown = await shownApproval(id);
+            assert.match(shown.failure ?? '', /HTTP 503/);
+            assert.match(shown.failure, /synthetic service unavailable/);
+            assert.equal(shown.state, notRun ? 'expired' : 'uncertain');
+            assert.doesNotMatch(
+              JSON.stringify({ shown, result, saved: await stored(id) }),
+              /PRIVATE_APPROVAL_KEY_CANARY/,
+            );
+            assert.match(result?.prompt ?? '', notRun ? /did not run/ : /outcome is uncertain/);
+            assert.equal(await execute(id), undefined);
+            assert.equal(calls.length, before + 1);
+            if (!notRun)
+              await assert.rejects(
+                approvals.request(
+                  { threadId: turn.threadId, turnId: answered.json().turnId },
+                  'GMAIL_SEND_EMAIL',
+                  args,
+                ),
+                /pending or uncertain/,
+              );
+            await finish(answered.json().turnId, 'failed');
+            const next = await begin('Explain the failed synthetic action.');
+            const retained = await approvals.stoppedOutcomes(next.turnId);
+            assert.match(retained.join('\n'), /HTTP 503/);
+            assert.doesNotMatch(retained.join('\n'), /PRIVATE_APPROVAL_KEY_CANARY/);
+            await finish(next.turnId, 'succeeded');
+            executionResult = undefined;
+          }
+        },
+      );
+
+      await t.test('a long Unicode failure keeps a valid saved reason', async (t) => {
+        t.after(() => {
+          executionResult = undefined;
+        });
+        const turn = await begin('Save the synthetic Unicode report.');
+        const id = await propose(turn, 'GMAIL_SEND_EMAIL', email('unicode@example.test'));
+        await finish(turn.turnId);
+        const confirmed = await confirm(id, true);
+        assert.ok(confirmed && 'turnId' in confirmed);
+        const prefix = 'The synthetic upload failed: ';
+        executionResult = () => {
+          throw Object.assign(new Error(prefix + 'x'.repeat(3999 - prefix.length) + '😀tail'), {
+            notRun: true,
+          });
+        };
+        await execute(id);
+        const shown = await shownApproval(id);
+        assert.equal(shown.state, 'expired');
+        assert.equal(Array.from(shown.failure ?? '').length, 4000);
+        assert.ok(shown.failure.endsWith('😀'));
+        assert.equal((await stored(id)).result.error, shown.failure);
+        await finish(confirmed.turnId, 'failed');
+      });
+
+      await t.test('a failure with a NUL keeps its reason and repeat fence', async (t) => {
+        t.after(() => {
+          executionResult = undefined;
+        });
+        for (const notRun of [true, false]) {
+          const turn = await begin('Save the synthetic report with a service error.');
+          const id = await propose(turn, 'GMAIL_SEND_EMAIL', email('nul@example.test'));
+          await finish(turn.turnId);
+          const confirmed = await confirm(id, true);
+          assert.ok(confirmed && 'turnId' in confirmed);
+          executionResult = () => {
+            throw Object.assign(new Error('HTTP 503: synthetic\0upload unavailable.'), { notRun });
+          };
+          const before = calls.length;
+          await execute(id);
+          const shown = await shownApproval(id);
+          assert.equal(shown.state, notRun ? 'expired' : 'uncertain');
+          assert.match(shown.failure ?? '', /HTTP 503: synthetic.*upload unavailable\./);
+          assert.ok(!shown.failure.includes('\0'));
+          assert.equal((await stored(id)).result.error, shown.failure);
+          assert.equal(await execute(id), undefined);
+          assert.equal(calls.length, before + 1);
+          await finish(confirmed.turnId, 'failed');
+        }
+      });
+
+      await t.test(
+        'a failed confirmation preflight keeps its reason without dispatch',
+        async (t) => {
+          t.after(() => {
+            rejectPreflight = false;
+          });
+          const turn = await begin('Send the synthetic message.');
+          const id = await propose(turn, 'GMAIL_SEND_EMAIL', email('preflight@example.test'));
+          await finish(turn.turnId);
+          const confirmed = await confirm(id, true);
+          assert.ok(confirmed && 'turnId' in confirmed);
+          rejectPreflight = true;
+          const before = calls.length;
+          await execute(id);
+          const shown = await shownApproval(id);
+          assert.match(shown.failure ?? '', /Fixture account disconnected/);
+          assert.equal(shown.state, 'expired');
+          assert.equal(calls.length, before);
+          assert.equal(await execute(id), undefined);
+          assert.equal(calls.length, before);
+          await finish(confirmed.turnId, 'failed');
+        },
+      );
       await t.test(
         'one authorization review preserves the original instructions and executed arguments',
         async () => {
