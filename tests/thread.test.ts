@@ -2612,13 +2612,14 @@ test(
         t.after(() => {
           dependencies.taskChecks = previousChecks;
         });
-        for (const [status, withdrawn] of [
-          ['succeeded', false],
-          ['cancelled', false],
-          ['cancelled', true],
-          ['failed', true],
+        for (const [status, withdrawn, copied] of [
+          ['succeeded', false, false],
+          ['cancelled', false, false],
+          ['cancelled', true, false],
+          ['failed', true, false],
+          ['succeeded', false, true],
         ] as const) {
-          await t.test(`${status}, withdrawn=${withdrawn}`, async () => {
+          await t.test(`${status}, withdrawn=${withdrawn}, copied=${copied}`, async () => {
             const id = randomUUID();
             const turnId = randomUUID();
             const messageId = randomUUID();
@@ -2632,6 +2633,22 @@ test(
               "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'user',$5)",
               [messageId, ownerId, threadId, turnId, prompt],
             );
+            if (copied) {
+              const original = randomUUID();
+              await db.pool.query(
+                `INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background,started_at,finished_at,withdrawn)
+                 VALUES($1,$2,$3,$4,'user',$5,'failed',true,now()-interval '1 minute',now()-interval '1 minute',true)`,
+                [original, ownerId, threadId, id, prompt],
+              );
+              await db.pool.query(
+                "UPDATE turns SET source='resume',parent_turn_id=$2,prompt=$3,message_id=NULL WHERE id=$1",
+                [turnId, original, `Synthetic old check\nThe request was: ${prompt}`],
+              );
+              await db.pool.query('UPDATE messages SET turn_id=$2 WHERE id=$1', [
+                messageId,
+                original,
+              ]);
+            }
             await db.pool.query(
               `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,now_text,next_check)
                VALUES($1,$2,$3,$1,'Synthetic tracked work','Synthetic reply arrived','Waiting',date_trunc('milliseconds',now())-interval '1 minute')`,
@@ -2652,14 +2669,14 @@ test(
             assert.equal(checks.length, 1);
             const check = checks[0]!;
             assert.equal(check.parent_turn_id, turnId);
-            assert.equal(check.prompt.includes(prompt), !withdrawn);
+            assert.equal(check.prompt.includes(prompt), !withdrawn && !copied);
             await waitFor(settled(check.id));
             const context = ran(check.id)!;
             assert.equal(context.sessionId, id);
-            assert.equal(context.prompt.includes(prompt), !withdrawn);
+            assert.equal(context.prompt.includes(prompt), !withdrawn && !copied);
             assert.equal(
               context.history.some(({ text }) => text === prompt),
-              !withdrawn,
+              !withdrawn && !copied,
             );
             if (withdrawn)
               assert.equal(context.withdrawnRequest, status === 'failed' ? 'failed' : 'stopped');
@@ -2671,6 +2688,26 @@ test(
             const detail = await request('GET', '/api/tasks');
             assert.equal(detail.statusCode, 200);
             assert.equal(JSON.stringify(detail.json()).includes(prompt), false);
+            if (copied) {
+              const renewed = randomUUID();
+              const renewedPrompt = 'Synthetic new owner request';
+              await db.pool.query(
+                `INSERT INTO turns(id,owner_id,thread_id,session_id,parent_turn_id,source,prompt,status,background,started_at,finished_at)
+                 VALUES($1,$2,$3,$4,$5,'user',$6,'succeeded',true,now(),now())`,
+                [renewed, ownerId, threadId, id, check.id, renewedPrompt],
+              );
+              await thread.resumeTurn(renewed, `synthetic-renewed:${id}`, 'Synthetic new check');
+              const next = (
+                await db.pool.query<{ id: string; prompt: string }>(
+                  'SELECT id,prompt FROM turns WHERE source_id=$1',
+                  [`synthetic-renewed:${id}`],
+                )
+              ).rows[0]!;
+              assert.equal(next.prompt.includes(renewedPrompt), true);
+              assert.equal(next.prompt.includes(prompt), false);
+              await waitFor(settled(next.id));
+              assert.equal(ran(next.id)!.prompt.includes(renewedPrompt), true);
+            }
           });
         }
       });

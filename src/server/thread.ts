@@ -1110,7 +1110,14 @@ export async function resumeTurn(
     await lockThread(client);
     const turn = (
       await client.query(
-        `SELECT u.channel,u.status,u.background,u.prompt,u.withdrawn,u.session_id,th.archived_at IS NULL AS active FROM turns u JOIN threads th ON th.id=u.thread_id
+        `WITH RECURSIVE copied AS (
+           SELECT id,parent_turn_id,session_id,source,withdrawn FROM turns WHERE id=$1 AND owner_id=$2
+           UNION
+           SELECT p.id,p.parent_turn_id,p.session_id,p.source,p.withdrawn FROM turns p JOIN copied c
+             ON c.source='resume' AND p.id=c.parent_turn_id AND p.session_id=c.session_id WHERE p.owner_id=$2
+         )
+         SELECT u.channel,u.status,u.background,u.prompt,u.session_id,
+           EXISTS(SELECT 1 FROM copied WHERE withdrawn) AS withdrawn,th.archived_at IS NULL AS active FROM turns u JOIN threads th ON th.id=u.thread_id
          WHERE u.id=$1 AND u.owner_id=$2`,
         [turnId, ownerId],
       )
