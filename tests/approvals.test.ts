@@ -4754,6 +4754,52 @@ test(
         },
       );
 
+      await t.test('stale pending file versions do not hide a completed exact result', async () => {
+        for (const source of ['user', 'schedule'] as const)
+          for (const action of ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT']) {
+            const turn =
+              source === 'user'
+                ? await begin('Read the synthetic file.')
+                : await attachSchedule(await begin('Read the synthetic file.', { source }));
+            const args = { path: `/synthetic/${randomUUID()}.txt`, version: 'a'.repeat(64) };
+            const id = await propose(turn, action, args);
+            const result = { text: 'Completed synthetic observation' };
+            await db.pool.query(
+              "UPDATE approvals SET status='completed',result=$2::jsonb WHERE id=$1",
+              [id, result],
+            );
+            const sessionId = (await row(turn.turnId)).session_id;
+            await finish(turn.turnId, 'succeeded');
+            const pendingTurn = await running(
+              await thread.enqueueTurn('Read a changed synthetic file.', {
+                source: 'resume',
+                parentTurnId: turn.turnId,
+                sessionId,
+                background: source === 'schedule',
+              }),
+            );
+            const stale = await propose(pendingTurn, action, { ...args, version: 'b'.repeat(64) });
+            await finish(pendingTurn.turnId, 'failed');
+            const resumed = await running(
+              await thread.enqueueTurn('Continue the synthetic request.', {
+                source: 'resume',
+                parentTurnId: pendingTurn.turnId,
+                sessionId,
+                background: source === 'schedule',
+              }),
+            );
+            const before = calls.length;
+            assert.deepEqual(
+              await approvals.request(resumed, action, args, { allowed: true }),
+              result,
+            );
+            assert.equal(calls.length, before);
+            assert.equal(await proposal(resumed.turnId), undefined);
+            assert.equal((await stored(stale)).status, 'expired');
+            assert.equal((await stored(id)).status, 'completed');
+            await finish(resumed.turnId, 'succeeded');
+          }
+      });
       await t.test('completed app approvals keep their result ordering', async () => {
         for (const source of ['user', 'schedule'] as const) {
           const turn =
