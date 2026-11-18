@@ -4721,6 +4721,74 @@ test('composer preserves keyboard shortcuts, upload retries, previews and failed
         assert.equal(sends.at(-1).text, '**bold\\*star** next *literal*');
         const richVisible = await assertVisiblePaste(sends.at(-1), 'bold*star next *literal*');
         assert.equal(richVisible.querySelector('strong')?.textContent, 'bold*star');
+        for (const draft of [
+          'See \\![docs](https://example.test/docs)',
+          'See \\\\[docs](https://example.test/docs)',
+          'See \\\\**docs**',
+          'See \\\\<u>docs</u>',
+          'a\\~~~x~~ ~~y~~\\~b',
+          'a\\**x* *y*\\*b',
+          'a\\***x**\\*b',
+          '\\*\\**x*',
+          '\\*!\\**x*',
+          '\\~a\nb *x*\\~',
+          '\\*Y\\* \\**Y*\\*',
+          'y'.repeat(5000) + '\n\\\u0060a \u0060x\u0060',
+          '\\\u0060a \u0060x\u0060',
+          'a\\\u0060\u0060x\u0060\\\u0060b',
+          '| a          |\n| ---------- |\n| b\\\\\\\\<br>c |',
+          '&#x61;~~<u>x</u>~~&#x61;',
+          '\\<!a **Q1**',
+        ]) {
+          await act(async () => replaceText(draft));
+          await submit();
+          assert.deepEqual(parseComposerMarkdown(sends.at(-1).text), parseComposerMarkdown(draft));
+        }
+        for (const [draft, sent] of [
+          ['# \u0060\u0060\u0060a *x* *', '# \u0060\u0060\u0060a *x* *'],
+          ['**Note:**&#x73;ee_it', '**Note:**&#x73;ee_it'],
+          ['\\#tag a*b\nc **Q1**\n========', '#tag a*b\nc **Q1**\n========'],
+        ]) {
+          await act(async () => replaceText(draft));
+          await submit();
+          assert.equal(sends.at(-1).text.trimEnd(), sent);
+        }
+        const { Editor } = await import('@tiptap/core');
+        const { createComposerExtensions } = await import('./src/web/lib/composer-editor.ts');
+        const { composerMarkdown } = await import('./src/web/lib/composer-markdown.ts');
+        const serializer = new Editor({ extensions: createComposerExtensions({ submit() {}, upload() {} }) });
+        for (const [address, href] of [
+          ['https://example.test', 'https://example.test'],
+          ['ada@example.test', 'mailto:ada@example.test'],
+          ['www.example.test', 'http://www.example.test'],
+        ]) {
+          serializer.commands.setContent({
+            type: 'doc',
+            content: [{ type: 'paragraph', content: [
+              { type: 'text', text: 'see ' + address },
+              { type: 'text', text: '(x)', marks: [{ type: 'strike' }] },
+            ] }],
+          });
+          const nodes = parseComposerMarkdown(composerMarkdown(serializer.state.doc)).content[0].content;
+          assert.deepEqual(
+            nodes.map((node) => [node.text, node.marks?.map((mark) => mark.attrs?.href ?? mark.type)]),
+            [['see ', undefined], [address, [href]], ['(x)', ['strike']]],
+          );
+        }
+        serializer.commands.setContent({
+          type: 'doc',
+          content: [{ type: 'paragraph', content: [
+            { type: 'text', text: 'see \\https://example.test' },
+            { type: 'text', text: '(x)', marks: [{ type: 'strike' }] },
+          ] }],
+        });
+        assert.deepEqual(
+          parseComposerMarkdown(composerMarkdown(serializer.state.doc)).content[0].content.map((node) => [
+            node.text,
+            node.marks?.map((mark) => mark.attrs?.href ?? mark.type),
+          ]),
+          [['see \\', undefined], ['https://example.test', ['https://example.test']], ['(x)', ['strike']]],
+        );
         await act(async () => replaceText('| label | value |\n| --- | --- |\n| first | second |'));
         await pasteAtEnd('table tr:last-child td:first-child p', 'A|B\\|C\nD');
         await submit();
@@ -6687,7 +6755,8 @@ test('chat reloads older history after hidden confirmations exceed the ID window
         await settle(() => hasDraft() && !document.querySelector('.composer-reply'));
         assert.equal(JSON.parse(localStorage.getItem(draftKey)).reply, null);
         await submit();
-        await settle(() => document.querySelector('[role="alert"]')?.textContent.includes('may have been sent'));
+        await settle(() => hasDraft() &&
+          document.querySelector('[role="alert"]')?.textContent.includes('may have been sent'));
         assert.equal(sends.length, 2);
         assert.ok(hasDraft());
         await submit();
@@ -7311,7 +7380,7 @@ test('a verified app connection opens chat only on request and keeps private det
       const url = 'https://example.test/sign-in';
       const hash = await setupLinkHash(url);
       const attempt = 'A'.repeat(43);
-      let connected = false, statusReads = 0;
+      let connected = false, statusReads = 0, failure;
       const requests = [], captured = [];
       const app = { slug: 'gmail', name: privateName, status: 'disconnected', triggersEnabled: false, direct: true };
       globalThis.fetch = async (path, options = {}) => {
@@ -7319,7 +7388,7 @@ test('a verified app connection opens chat only on request and keeps private det
         if (path === '/api/apps') return Response.json(connected ? [{ ...app, status: 'connected', connectionId: 'private-connection' }] : []);
         if (path === '/api/apps/catalog') return Response.json([app]);
         if (path === '/api/apps/gmail/connect') return Response.json({ url, attempt });
-        if (path === '/api/apps/setup-status') { statusReads++; return Response.json({ completed: connected ? [hash] : [], apps: [{ hash, slug: 'gmail', name: privateName, available: true }] }); }
+        if (path === '/api/apps/setup-status') { statusReads++; return Response.json({ completed: connected ? [hash] : [], apps: [{ hash, slug: 'gmail', name: privateName, available: !failure, ...(failure ? { error: failure } : {}) }] }); }
         throw new Error('Unexpected fixture request: ' + path);
       };
       setRequestAccount('synthetic-owner');
@@ -7371,6 +7440,26 @@ test('a verified app connection opens chat only on request and keeps private det
         assert.equal(window.location.pathname, '/');
         assert.equal(captured.filter(item => item.event === 'app_connection_chat_requested').length, 1);
         assert.equal(requests.filter(([path]) => path === '/api/messages').length, 0);
+        await act(async () => root.render(null));
+        pageDataCache.clear();
+        connected = false;
+        statusReads = 0;
+        window.history.replaceState(null, '', '/apps');
+        await act(async () => root.render(createElement(Apps, { key: 'failed-sign-in', onAsk() {} })));
+        await settle(() => document.querySelector('[data-connect-service="gmail"]'));
+        await act(async () => document.querySelector('[data-connect-service="gmail"]').click());
+        await settle(() => statusReads > 0);
+        failure = 'Sign-in could not finish: invalid_request: Synthetic refusal';
+        await act(async () => channels.at(-1).onmessage({ data: { service: 'gmail', attempt, connection: 'failed' } }));
+        await settle(() => document.body.textContent.includes(failure));
+        await act(async () => root.render(null));
+        pageDataCache.clear();
+        statusReads = 0;
+        failure = 'Sign-in could not finish: Synthetic polled refusal';
+        await act(async () => root.render(createElement(Apps, { key: 'polled-failure', onAsk() {} })));
+        await settle(() => document.querySelector('[data-connect-service="gmail"]'));
+        await act(async () => document.querySelector('[data-connect-service="gmail"]').click());
+        await settle(() => document.body.textContent.includes(failure));
       } finally { await act(async () => root.unmount()); dom.window.close(); }
     `,
   });

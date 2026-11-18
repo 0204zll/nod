@@ -5568,6 +5568,25 @@ test(
           );
           await thread.stopThread();
           await waitFor(settledThread);
+          await onboarding.complete('Alex');
+          assert.equal(onboarding.planning(), undefined);
+          assert.equal(
+            (
+              await db.pool.query(
+                'SELECT 1 FROM onboarding_suggestions WHERE greeted_at IS NOT NULL',
+              )
+            ).rowCount,
+            0,
+          );
+          assert.equal(
+            (
+              await db.pool.query(
+                'SELECT 1 FROM messages WHERE owner_id=$1 AND turn_id IS NULL AND role=$2',
+                [ownerId, 'assistant'],
+              )
+            ).rowCount,
+            0,
+          );
           t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-10-24T12:00:00Z') });
           currentApps = [
             {
@@ -11135,6 +11154,46 @@ test(
       await remember([add('about', 'before-clear', beforeClear)], beforeClearMessage);
       assert.equal((await memory.view()).notes.length, 1);
       curator.curate = curate;
+
+      const tea = 'I drink synthetic green tea every morning.';
+      const unquoted = add('about', 'coffee', 'Drinks synthetic black coffee.');
+      const secret = 'The store key is sk-fixturefixture1234.';
+      const leaked = (m: number) => ({ ...add('about', 'key', secret)(m), quote: tea });
+      const notesBefore = (await memory.view()).notes.length;
+      await assert.rejects(
+        remember([unquoted, leaked], await post(tea)),
+        (error: Error) =>
+          /quote/.test(error.message) &&
+          /secret/.test(error.message) &&
+          /Nothing was saved/.test(error.message) &&
+          !error.message.includes('sk-fixture'),
+      );
+      assert.equal((await memory.view()).notes.length, notesBefore);
+      await assert.rejects(
+        remember([add('about', 'tea', tea), unquoted], await post(tea)),
+        /quote/,
+      );
+      assert.equal((await memory.view()).notes.length, notesBefore);
+      await remember([add('about', 'tea', tea)], await post(tea));
+      const moved = 'I switched from synthetic green tea to coffee.';
+      await assert.rejects(
+        remember(
+          [
+            (m: number) => ({
+              op: 'archive',
+              path: 'about/tea',
+              reason: 'obsolete',
+              m: [m],
+              quote: moved,
+            }),
+            unquoted,
+            add('about', 'switch', moved),
+          ],
+          await post(moved),
+        ),
+        /Nothing was saved/,
+      );
+      assert.ok((await memory.view()).notes.some((note) => note.path === 'about/tea'));
 
       const older = await post('My synthetic library card renews in March.');
       for (let index = 0; index < 10; index++) await post(`Synthetic filler ${index}.`);
