@@ -40,7 +40,8 @@ Nod opens an app only when your words name it or ask for work that needs it. Ope
 | Read a window    | Reads the window's controls, labels and text, or the app's menu bar. A busy window comes back as an outline first. |
 | Picture a window | Takes a picture of that one window, never the whole screen. It needs Screen Recording.                             |
 | Press, choose    | Presses a button or chooses a menu item.                                                                           |
-| Type             | Sets or types the text of a field, picks an option, or sends a shortcut such as Cmd+N to that app only.            |
+| Type             | Sets or types the text of a field, or picks an option.                                                             |
+| Key              | Sends a shortcut, such as Cmd+N, to that app only.                                                                 |
 
 Each step that could commit something goes through the same [trust check](/trust/approvals/) as an app action, with the app, the window and the control as the app labels it. Reading, moving around and typing into a document or field run without asking. Sending, saving over or deleting a file, submitting, ordering, paying, changing settings and quitting without saving need your words; otherwise Nod asks. Typing that ends a line, such as pressing Return in a chat app, counts as a step that can send. A step you approved runs only while the same control is still in the same window; otherwise Nod doesn't run it and looks again.
 

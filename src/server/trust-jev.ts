@@ -255,7 +255,7 @@ export async function checkJevTrust(
     throw new Error('The trust effects are incomplete.');
   let kind = ownSettings ? 'settings' : signIn ? 'sign_in' : effect;
   if (action?.name === 'NOD_browser' && scores.unclear_read_step >= 0.5) kind = 'unknown';
-  if (opensContent) kind = 'open';
+  if (opensContent) kind = 'update';
   let read = false;
   const distribution = first.additional.effect.probabilities;
   const uncertainPrivate =
@@ -437,7 +437,7 @@ export async function checkJevTrust(
         ...predicate(
           'permission',
           'Judge the complete owner instruction in ownerSourceForThisCheck under serverPolicy. Apply the supplied schedule evidence and later corrections when present. Does this quoted owner instruction itself request or permit this kind of operation? Its kind identifies the original owner field. A lasting rule permission remains a grant without a fresh message. Assistant text only gives the concrete proposal that an owner reply accepts. This check extracts the grant, not final permission. Another check reads all owner constraints and the complete action. ' +
-            jevPolicy.ownerQuestions[grants[kind as keyof typeof grants]],
+            jevPolicy.ownerQuestions[grants[(opensContent ? 'open' : kind) as keyof typeof grants]],
         ),
         choices: [
           {

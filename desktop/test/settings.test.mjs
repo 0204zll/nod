@@ -8819,6 +8819,20 @@ test('computer use takes focus only after a refusal before delivery, and only wh
   ]);
 });
 
+test('computer use Stop for all work refuses later commands of a step already running', async (t) => {
+  const desktop = await fakeDesktop(t, { 'list-windows': mailWindow });
+  const show = desktop.presence.show;
+  desktop.presence.show = (state) => {
+    show(state);
+    void desktop.helper.cancel();
+  };
+  await assert.rejects(
+    desktop.helper.request({ op: 'key', keys: 'cmd+n', app: 'Mail', window: 'w-1' }),
+    /STOPPED/,
+  );
+  assert.deepEqual(await desktop.calls(), []);
+});
+
 test('computer use Stop ends only its own step, and no step starts after its deadline', async (t) => {
   const desktop = await fakeDesktop(t, {
     'list-windows': mailWindow,

@@ -121,6 +121,7 @@ export function createComputerHelper({
   function alive(started, current) {
     if (
       started !== generation ||
+      (current && current.generation !== generation) ||
       current?.cancelled ||
       (current?.deadline !== undefined && Date.now() > current.deadline)
     )
@@ -692,6 +693,7 @@ export function createComputerHelper({
       if (request?.op === 'cancel') return cancel(request.step).then(() => ({}));
       const current = {
         cancelled: false,
+        generation,
         children: new Set(),
         deadline: typeof request?.deadline === 'number' ? request.deadline : undefined,
       };

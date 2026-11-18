@@ -101,6 +101,8 @@ Only the server holds keys and decides what runs. The model, the workspace and a
 - Browser snapshots and typing without submitting do not need an action check. Source installs and self-hosted servers block private and reserved workspace addresses. The desktop runtime does too. Public internet access can still send data outside Nod.
 - A saved card can't make the issuer enforce the amount, and card support isn't a PCI DSS compliance claim.
 - HTML that you download and open outside Nod does not have Nod's preview protections.
+- [Computer use](/connect/computer-use/) can reach files through an allowed app's native Open and Save panels, which [local files](/connect/local-files/) path checks would refuse.
+- A window picture with computer use isn't redacted, except that Nod takes none while a password field has focus. Whatever the window shows goes to your model service.
 - Tests cover known failure cases. They don't prove that every injection or browser exploit is blocked.
 
 :::
