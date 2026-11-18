@@ -174,6 +174,7 @@ test(
     let appOutage = false;
     let connectionWait: IntegrationBackoff | undefined;
     let appSessions = 0;
+    let unoffered: string | undefined;
     let appResult: unknown;
     let changeRulesOnDraftRead = false;
     let changedRulesDuringDraftRead = 0;
@@ -510,6 +511,7 @@ test(
               uploads.push(Buffer.from(file.bytes).toString());
               return { name: file.name, mimetype: file.mimeType, s3key: randomUUID() };
             };
+            if (unoffered) session.offers = async (action) => action !== unoffered;
             const search = session.search.bind(session);
             session.search = async (...input) =>
               toolSearch ? { tools: toolSearch, suggestions: [] } : search(...input);
@@ -1179,6 +1181,30 @@ test(
           const again = await click(clickCard.id);
           assert.equal(again.statusCode, 409, again.body);
           assert.equal(sends(), 1);
+        },
+      );
+
+      await t.test(
+        'an action the connection service does not offer asks for no approval',
+        async () => {
+          const writes = integrationFixture.writes.length;
+          unoffered = 'GMAIL_SEND_MESSAGE';
+          const text = `Synthetic proposal ${randomUUID()}`;
+          plans.set(text, {
+            tool: 'apps',
+            action: 'GMAIL_SEND_MESSAGE',
+            args: { recipient_email: 'collector@example.test' },
+          });
+          const refused = (await submitUserMessage(text)).turnId;
+          await waitFor(refused, 'failed').finally(() => {
+            unoffered = undefined;
+          });
+          assert.match(
+            (await pool.query('SELECT error FROM turns WHERE id=$1', [refused])).rows[0].error,
+            /GMAIL_SEND_MESSAGE/,
+          );
+          assert.deepEqual(await approvalsFor(refused), []);
+          assert.equal(integrationFixture.writes.length, writes);
         },
       );
 
