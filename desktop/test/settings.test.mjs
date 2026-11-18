@@ -8825,7 +8825,7 @@ const input = fs.readFileSync(0, 'utf8');
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, input }) + '\\n');
 const answers = ${JSON.stringify(answers)};
 const key = Object.keys(answers).find((prefix) => args.join(' ').startsWith(prefix));
-let answer = key ? answers[key] : { ok: true, data: {} };
+let answer = key ? answers[key] : { ok: true, data: args[0] === 'snapshot' ? { complete: true, tree: { role: 'window', name: 'Mail' } } : {} };
 if (Array.isArray(answer)) {
   const counter = ${JSON.stringify(log)} + '.' + key.replaceAll(' ', '_');
   const seen = fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0;
@@ -8894,6 +8894,166 @@ const mailWindow = {
   ],
 };
 const refused = (code, message) => ({ ok: false, error: { code, message } });
+
+test('computer use binds current window content and hides password content', async (t) => {
+  const window = (value, ref, focused = false) => ({
+    ok: true,
+    data: {
+      complete: true,
+      tree: {
+        role: 'window',
+        name: 'Message',
+        children: [
+          { role: 'textfield', name: 'To', value, ref_id: ref, states: focused ? ['focused'] : [] },
+          {
+            role: 'textfield',
+            name: 'private password label',
+            value: 'private password value',
+            states: ['secure'],
+          },
+        ],
+      },
+    },
+  });
+  const desktop = await fakeDesktop(t, {
+    snapshot: [
+      window('ana@example.test', '@sfirst01:e1'),
+      window('ana@example.test', '@ssecond1:e8', true),
+      window('bo@example.test', '@sthird01:e2'),
+      { ok: true, data: { complete: false, tree: { role: 'window' } } },
+      { ok: true, data: { complete: true, tree: { role: 'window', children_count: 1 } } },
+    ],
+  });
+  const inspect = () => desktop.helper.request({ op: 'inspect', app: 'Mail', window: 'w-1' });
+  const first = await inspect();
+  const second = await inspect();
+  const third = await inspect();
+  assert.equal(first.state, second.state);
+  assert.notEqual(first.focus, second.focus);
+  assert.notEqual(first.state, third.state);
+  assert.doesNotMatch(JSON.stringify(first), /private password/);
+  await assert.rejects(inspect(), /complete window/);
+  await assert.rejects(inspect(), /Part of the window is missing/);
+});
+
+test('computer use checks the window again after waiting for the owner', async (t) => {
+  const tree = (value) => ({
+    role: 'window',
+    name: 'Mail',
+    children: [{ role: 'textfield', name: 'To', value }],
+  });
+  const desktop = await fakeDesktop(
+    t,
+    {
+      'list-windows': mailWindow,
+      snapshot: [
+        { ok: true, data: { complete: true, tree: tree('ana@example.test') } },
+        { ok: true, data: { complete: true, tree: tree('bo@example.test') } },
+      ],
+    },
+    { platform: 'win32' },
+  );
+  const inspected = await desktop.helper.request({ op: 'inspect', app: 'Mail', window: 'w-1' });
+  desktop.presence.idle = [0, 5];
+  await assert.rejects(
+    desktop.helper.request({
+      op: 'key',
+      keys: 'ctrl+enter',
+      app: 'Mail',
+      window: 'w-1',
+      expected: inspected.state,
+    }),
+    /STALE_REF: That window changed/,
+  );
+  assert.ok(desktop.events.includes('waiting'));
+  assert.ok(!(await desktop.calls()).some((call) => call.startsWith('press ')));
+});
+
+test('computer use refuses a password focus or renamed control at delivery', async (t) => {
+  const secured = (focused) => ({
+    role: 'window',
+    children: [{ role: 'textfield', states: focused ? ['secure', 'focused'] : ['secure'] }],
+  });
+  const desktop = await fakeDesktop(
+    t,
+    {
+      'list-windows': mailWindow,
+      'snapshot --root': {
+        ok: true,
+        data: { complete: true, tree: { role: 'button', name: 'Delete' } },
+      },
+      snapshot: [
+        { ok: true, data: { complete: true, tree: secured(false) } },
+        { ok: true, data: { complete: true, tree: secured(true) } },
+      ],
+    },
+    { platform: 'win32' },
+  );
+  const inspected = await desktop.helper.request({ op: 'inspect', app: 'Mail', window: 'w-1' });
+  await assert.rejects(
+    desktop.helper.request({
+      op: 'key',
+      keys: 'x',
+      app: 'Mail',
+      window: 'w-1',
+      expected: inspected.state,
+      noSecureFocus: true,
+    }),
+    /password field has focus/,
+  );
+  await assert.rejects(
+    desktop.helper.request({
+      op: 'press',
+      ref: '@sfirst01:e1',
+      app: 'Mail',
+      window: 'w-1',
+      control: { role: 'button', name: 'Send' },
+    }),
+    /STALE_REF: That control changed/,
+  );
+  assert.ok(!(await desktop.calls()).some((call) => /^(press|click) /.test(call)));
+});
+
+test('computer use refuses a changed keyboard target even when window content stays the same', async (t) => {
+  const tree = (selected) => ({
+    role: 'window',
+    children: ['First', 'Second'].map((name, index) => ({
+      role: 'textfield',
+      name,
+      value: '',
+      states: index === selected ? ['focused'] : [],
+    })),
+  });
+  const desktop = await fakeDesktop(
+    t,
+    {
+      'list-windows': mailWindow,
+      snapshot: [
+        { ok: true, data: { complete: true, tree: tree(0) } },
+        { ok: true, data: { complete: true, tree: tree(1) } },
+      ],
+    },
+    { platform: 'win32' },
+  );
+  const inspected = await desktop.helper.request({
+    op: 'inspect',
+    app: 'Mail',
+    window: 'w-1',
+    focus: true,
+  });
+  await assert.rejects(
+    desktop.helper.request({
+      op: 'key',
+      keys: 'enter',
+      app: 'Mail',
+      window: 'w-1',
+      expected: inspected.state,
+      expectedFocus: inspected.focus,
+    }),
+    /keyboard target changed/,
+  );
+  assert.ok(!(await desktop.calls()).some((call) => call.startsWith('press ')));
+});
 
 test('computer use takes focus only after a refusal before delivery, and only while the owner pauses', async (t) => {
   const desktop = await fakeDesktop(t, {
@@ -9046,6 +9206,7 @@ test('computer use pastes into a message body in front and restores the owner cl
   assert.deepEqual(await desktop.calls(), [
     'focus-window --app Mail --window-id w-1',
     'focus @s1abcdef:e1',
+    'snapshot --app Mail --window-id w-1 --max-depth 50',
     'press cmd+v --app Mail --window-id w-1 --headed',
   ]);
   assert.equal(desktop.clipboard(), 'owner copied this');

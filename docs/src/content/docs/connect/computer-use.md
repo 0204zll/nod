@@ -43,7 +43,9 @@ Nod opens an app only when your words name it or ask for work that needs it. Ope
 | Type             | Sets or types the text of a field, or picks an option.                                                             |
 | Key              | Sends a shortcut, such as Cmd+N, to that app only.                                                                 |
 
-Each step that could commit something goes through the same [trust check](/trust/approvals/) as an app action, with the app, the window, the control as the app labels it, and what Nod typed, set or chose in that app during the request, such as a recipient and a message. When that's too long to show in full, a send needs your words for the whole message; otherwise Nod asks. Reading, moving around, typing into a document or field and filling an empty field run without asking. Replacing text already in a field needs your words, because it deletes that text. Sending, saving over or deleting a file, submitting, ordering, paying, changing settings and quitting without saving need your words; otherwise Nod asks. Typing that ends a line, such as pressing Return in a chat app, counts as a step that can send. A step you approved runs only while the same control is still in the same window and Nod hasn't typed anything more in that app; otherwise Nod doesn't run it and looks again.
+Each step that can change content goes through the same [trust check](/trust/approvals/) as a connected app action. The check receives the app, window, control, proposed input, and current accessible window content. This includes existing recipients and message text, not only what Nod typed. Text entry is checked too: it can replace a selection or save at once. Only reading and moving focus run without this check.
+
+Before input, Nod reads the window again. It refuses the step if the window content or control changed after the check. It checks again after waiting to bring an app forward. Keyboard input also stays bound to the focused control. A step cannot run if the accessibility service returns an incomplete window or the window content exceeds 24,000 characters.
 
 ## What Nod never does
 
@@ -60,7 +62,7 @@ Nod refuses these, without a judgment call. It recognizes apps by their ID and p
 
 Web browsers, such as Chrome and Safari, and code editors, such as VS Code, are view-only: Nod can read them but never presses, types or chooses anything there. For websites Nod uses [its own browser](/use/browser/), with your Vault and its safety checks.
 
-Nod never reads or types into password fields: it checks the field again right before typing, and sends no shortcut and takes no picture of an app while a password field has focus. To sign in somewhere, Nod uses [Vault](/trust/vault/) in its own browser.
+Nod never reads or types into password fields: it checks the field again right before input, and sends no shortcut and takes no picture of an app while a password field has focus. To sign in somewhere, Nod uses [Vault](/trust/vault/) in its own browser.
 
 ## See when Nod uses an app
 
@@ -100,6 +102,7 @@ Nod uses apps only in work you started: a message you sent, a task that started 
 - Text in app windows reaches Nod as data, not instructions. A window can still contain text written to mislead Nod, like any web page or email. The trust check limits what such text can make Nod do, but it can't recognize every trick, so keep apps with untrusted content out of Nod's reach when you don't need them.
 - The list of refused apps is by app. An app that isn't on it but can run commands or reach your secrets, such as a database tool, is not recognized; keep such apps out of Nod.
 - Window text and pictures go to your model provider like any other tool result, and are part of [conversation traces](/trust/conversation-traces/) when you share them. Pictures are replaced with `[image]` there. Window pictures aren't redacted: whatever is visible in the window, private content included, reaches the model. Only Vault entry in Nod's own browser keeps secrets out.
+- The check can see only what the accessibility service provides. Apps can hide content from that service. A window can also change between the last check and the operating system receiving input.
 - Apps that draw their own controls, such as some games, show little to accessibility. Nod can't use them.
 
 ## Related resources

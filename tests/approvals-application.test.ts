@@ -1,7 +1,7 @@
 import { actionTarget, approvalTitle } from '../src/server/action-presentation.ts';
 import assert from 'node:assert/strict';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -426,13 +426,16 @@ test(
             if (input.op === 'locate') return { bundle: app.bundle, name: app.name };
             if (input.op === 'apps') return { apps: [app] };
             if (input.op === 'permissions') return {};
-            if (input.op === 'snapshot')
+            const tree = {
+              role: 'window',
+              name: 'Notes',
+              children: [{ role: 'button', name: 'Delete', ref_id: '@snotes01:e7' }],
+            };
+            if (input.op === 'snapshot') return { tree: input.ref ? tree.children[0] : tree };
+            if (input.op === 'inspect')
               return {
-                tree: {
-                  role: 'window',
-                  name: 'Notes',
-                  children: [{ role: 'button', name: 'Delete', ref_id: '@snotes01:e7' }],
-                },
+                tree,
+                state: createHash('sha256').update(JSON.stringify(tree)).digest('hex'),
               };
             desktopSteps.push(input.op);
             return { disposition: { delivery: 'delivered_verified' } };

@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   access,
   chmod,
@@ -26,6 +27,7 @@ const pasteRoles = new Set(['scrollarea', 'webarea', 'group', 'document']);
 const appSteps = new Set([
   'open',
   'snapshot',
+  'inspect',
   'find',
   'screenshot',
   'press',
@@ -65,6 +67,61 @@ const passedEnvironment = [
 const desktopId = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/;
 const programName = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,99}$/;
 const refusedCategories = /(^|;)(Settings|System|FileManager|Security)(;|$)/;
+
+function secure(node) {
+  return node.states?.includes('secure') || /secure|password/i.test(node.role ?? '');
+}
+
+function secureFocus(node) {
+  return Boolean(
+    node &&
+    ((secure(node) && node.states?.includes('focused')) || node.children?.some(secureFocus)),
+  );
+}
+
+function inspectResult(data) {
+  if (data.complete !== true || !data.tree || data.truncated || data.identity_unproven)
+    throw new Error(
+      'POLICY_DENIED: Nod could not read the complete window, so this step did not run.',
+    );
+  const focused = [];
+  const walk = (node, path = []) => {
+    if (node.subtree_truncated || (node.children_count ?? 0) > (node.children?.length ?? 0))
+      throw new Error('POLICY_DENIED: Part of the window is missing, so this step did not run.');
+    const hidden = secure(node);
+    if (node.states?.includes('focused') && !['window', 'dialog'].includes(node.role))
+      focused.push({ path, role: node.role ?? '', name: hidden ? '' : (node.name ?? '') });
+    return {
+      role: node.role ?? '',
+      ...(hidden
+        ? { secure: true }
+        : {
+            name: node.name ?? '',
+            value: node.value ?? null,
+            ...Object.fromEntries(
+              [
+                'description',
+                'hint',
+                'subrole',
+                'role_description',
+                'placeholder',
+                'native_id',
+                'available_actions',
+              ]
+                .filter((key) => node[key] != null)
+                .map((key) => [key, node[key]]),
+            ),
+            states: (node.states ?? [])
+              .filter((state) => !['focused', 'hovered'].includes(state))
+              .sort(),
+            children: (node.children ?? []).map((child, index) => walk(child, [...path, index])),
+          }),
+    };
+  };
+  const tree = walk(data.tree);
+  const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  return { tree, state: hash(tree), focus: hash(focused), focused };
+}
 
 async function windowsProgram(path) {
   const file = await open(path).catch(() => undefined);
@@ -209,6 +266,44 @@ export function createComputerHelper({
     check(request.app, appName, 'app'),
     ...(request.window ? ['--window-id', check(request.window, windowId, 'window')] : []),
   ];
+  const inspectArgs = (request) => ['snapshot', ...scope(request), '--max-depth', '50'];
+
+  function guarded(request, args, input) {
+    if (!request.expected && !request.control && !request.noSecureFocus) return run(args, input);
+    const started = generation;
+    return run(args, input, async (args, input, current) => {
+      const read = (args) => {
+        alive(started, current);
+        return spawnCommand(args, undefined, current);
+      };
+      if (request.expected || request.noSecureFocus) {
+        const data = await read(inspectArgs(request));
+        const inspected = inspectResult(data);
+        if (request.expected && inspected.state !== request.expected)
+          throw new Error('STALE_REF: That window changed since this step was checked.');
+        if (request.expectedFocus && inspected.focus !== request.expectedFocus)
+          throw new Error('STALE_REF: The keyboard target changed since this step was checked.');
+        if (request.noSecureFocus && secureFocus(data.tree))
+          throw new Error('POLICY_DENIED: A password field has focus, so this step did not run.');
+      }
+      if (request.control) {
+        const data = await read([
+          'snapshot',
+          '--root',
+          check(request.ref, ref, 'ref'),
+          '--max-depth',
+          '50',
+        ]);
+        inspectResult(data);
+        const node = data.tree;
+        if (secure(node)) throw new Error('POLICY_DENIED: Nod never uses password fields.');
+        if (node.role !== request.control.role || (node.name ?? '') !== request.control.name)
+          throw new Error('STALE_REF: That control changed since this step was checked.');
+      }
+      alive(started, current);
+      return spawnCommand(args, input, current);
+    });
+  }
 
   async function permissions() {
     const data = await run(['status']);
@@ -227,7 +322,7 @@ export function createComputerHelper({
     await mkdir(join(home, 'tmp'), { recursive: true, mode: 0o700 });
     const path = join(home, 'tmp', `window-${process.pid}-${Date.now()}.png`);
     try {
-      await run(['screenshot', ...scope(request), path]);
+      await guarded(request, ['screenshot', ...scope(request), path]);
       return { image: (await readFile(path)).toString('base64') };
     } finally {
       await rm(path, { force: true });
@@ -424,18 +519,18 @@ export function createComputerHelper({
     const inFront = window && (front || (await chromium(window.pid)));
     if (!inFront)
       try {
-        return await run(args, input);
+        return await guarded(request, args, input);
       } catch (error) {
         if (!window || !needsFocus.test(error.message)) throw error;
       }
     if (inFront) stale.add(target.window);
     return focused(target, window, async () => {
-      if (front || args[0] === 'press') return run([...args, '--headed'], input);
+      if (front || args[0] === 'press') return guarded(request, [...args, '--headed'], input);
       try {
-        return await run(args, input);
+        return await guarded(request, args, input);
       } catch (error) {
         if (!needsFocus.test(error.message)) throw error;
-        return run([...args, '--headed'], input);
+        return guarded(request, [...args, '--headed'], input);
       }
     });
   }
@@ -457,11 +552,11 @@ export function createComputerHelper({
   async function paste(request, target, window) {
     stale.add(target.window);
     return focused(target, window, async () => {
-      await run(['focus', check(request.ref, ref, 'ref')]);
+      await guarded(request, ['focus', check(request.ref, ref, 'ref')]);
       const saved = await presence.clipboard.save();
-      await presence.clipboard.write(String(request.text ?? ''));
       try {
-        return await run([
+        await presence.clipboard.write(String(request.text ?? ''));
+        return await guarded({ ...request, noSecureFocus: true }, [
           'press',
           platform === 'darwin' ? 'cmd+v' : 'ctrl+v',
           ...scope(target),
@@ -558,6 +653,13 @@ export function createComputerHelper({
         const data = await run([...args, '-i', '--compact']);
         return { tree: data.tree };
       }),
+    inspect: async (request) => {
+      const read = async () => inspectResult(await run(inspectArgs(request)));
+      if (!request.focus) return observe(request, read);
+      const window = await windowOf(request);
+      if (!window) throw new Error('STALE_REF: That window is gone.');
+      return focused(request, window, read);
+    },
     find: (request) =>
       observe(request, () =>
         run([

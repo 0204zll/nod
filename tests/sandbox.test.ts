@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import {
@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import { basename, join } from 'node:path';
 import test from 'node:test';
+import Fastify from 'fastify';
 import { promisify } from 'node:util';
 import { parse } from 'yaml';
 import type { WorkspaceSession } from '../src/ports/computer.ts';
@@ -1483,6 +1484,10 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
   assert.equal(systemShortcut('ctrl+shift+t', 'linux'), false);
   assert.equal(systemShortcut('ctrl+n', 'win32'), false);
   assert.equal(systemShortcut('cmd+n', 'darwin'), false);
+  assert.equal(systemShortcut('cmd+cmd+space', 'darwin'), true);
+  assert.equal(systemShortcut('ctrl+ctrl+up', 'darwin'), true);
+  assert.equal(systemShortcut('c m d+space', 'darwin'), true);
+  assert.equal(systemShortcut('cmd+shift+space', 'darwin'), true);
   assert.equal(systemShortcut('cmd+n', 'linux'), true);
   assert.equal(computerAppRule('com.apple.iWork.Numbers').kind, 'use');
   assert.equal(
@@ -1575,6 +1580,15 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
           return {
             tree: [...window.children, ...findings].find((node) => node.ref_id === request.ref),
           };
+        if (request.op === 'inspect') {
+          const tree = { ...window, children: [...window.children, ...findings] };
+          return {
+            tree,
+            state: createHash('sha256').update(JSON.stringify(tree)).digest('hex'),
+            focus: createHash('sha256').update('synthetic-focus').digest('hex'),
+            focused: [],
+          };
+        }
         if (request.op === 'snapshot')
           return {
             tree: request.menu
@@ -1590,6 +1604,12 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
         if (request.op === 'find') return { matches: findings };
         if (request.text === 'cut off')
           throw new Error('ACTION_FAILED: the app stopped answering after the text arrived');
+        if (request.op === 'type' || request.op === 'set_value') {
+          const node = [...window.children, ...findings].find(
+            (node) => node.ref_id === request.ref,
+          )!;
+          node.value = (request.op === 'type' ? String(node.value ?? '') : '') + request.text;
+        }
         return { disposition: { delivery: 'delivered_verified' } };
       },
     },
@@ -1667,6 +1687,7 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
   assert.deepEqual(computer.checked('COMPUTER_PRESS', press), {
     app: { bundle: 'com.apple.TextEdit', name: 'TextEdit' },
     control: { role: 'button', name: 'Send', window: 'Draft' },
+    windowContext: press.windowContext,
     step: 'press',
   });
   await computer.execute(turn, 'COMPUTER_PRESS', press);
@@ -1675,6 +1696,8 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     ref: '@sdraft01:e1',
     app: 'TextEdit',
     role: 'button',
+    control: { role: 'button', name: 'Send' },
+    expected: press.windowBinding!.state,
     window: 'w-1',
   });
   const found = (await computer.execute(
@@ -1703,12 +1726,12 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     ref: '@sfind001:e1',
     text: 'Hello',
   });
-  assert.equal(computer.needsCheck('COMPUTER_SET_VALUE', filling), false);
+  assert.equal(computer.needsCheck('COMPUTER_SET_VALUE', filling), true);
   findings[0]!.value = 'Ada wrote this';
   await assert.rejects(
     computer.execute(turn, 'COMPUTER_SET_VALUE', filling),
     (error: Error & { notRun?: boolean }) =>
-      error.notRun === true && /field changed/.test(error.message),
+      error.notRun === true && /window changed/.test(error.message),
   );
   findings[0]!.value = '';
   const line = await computer.prepare(turn, 'COMPUTER_TYPE', {
@@ -1754,9 +1777,9 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     }),
   );
   const send = await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' });
-  assert.deepEqual(
-    (computer.checked('COMPUTER_PRESS', send) as Record<string, unknown>).typedInApp,
-    [{ control: 'Message to Ada', text: 'Ada, see you at 10' }],
+  assert.match(
+    String(computer.checked('COMPUTER_PRESS', send).windowContext),
+    /Ada, see you at 10/,
   );
   await computer.execute(
     turn,
@@ -1766,7 +1789,7 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
   await assert.rejects(
     computer.execute(turn, 'COMPUTER_PRESS', send),
     (error: Error & { notRun?: boolean }) =>
-      error.notRun === true && /typed more/.test(error.message),
+      error.notRun === true && /window changed/.test(error.message),
   );
   await assert.rejects(
     computer.execute(
@@ -1776,68 +1799,41 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     ),
     /stopped answering/,
   );
-  for (let line = 0; line < 12; line++)
-    await computer.execute(
-      turn,
-      'COMPUTER_SET_VALUE',
-      await computer.prepare(turn, 'COMPUTER_SET_VALUE', {
-        ref: '@sfind001:e1',
-        text: `v${line}`,
-      }),
-    );
-  const later = await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' });
-  assert.deepEqual(
-    (computer.checked('COMPUTER_PRESS', later) as Record<string, unknown>).typedInApp,
-    [
-      { control: 'Subject', text: 'cut off' },
-      { control: 'Message to Ada', text: 'v11' },
-    ],
+  const body = findings[0]!;
+  body.value = 'a'.repeat(2500);
+  const longSend = await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' });
+  assert.match(String(computer.checked('COMPUTER_PRESS', longSend).windowContext), /a{2500}/);
+  body.value += ' Changed after approval';
+  await assert.rejects(computer.execute(turn, 'COMPUTER_PRESS', longSend), /window changed/);
+  body.value = 'b'.repeat(24_001);
+  await assert.rejects(
+    computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' }),
+    /complete window/,
   );
-  const notes = await computer.prepare(turn, 'COMPUTER_SET_VALUE', {
-    ref: '@sdraft01:e5',
-    text: 'Replaced',
+  body.value = 'Current message';
+  const recipient = window.children[5]!;
+  recipient.value = 'ana@example.test';
+  const addressed = await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' });
+  assert.match(
+    String(computer.checked('COMPUTER_PRESS', addressed).windowContext),
+    /ana@example.test/,
+  );
+  recipient.value = 'bo@example.test';
+  await assert.rejects(computer.execute(turn, 'COMPUTER_PRESS', addressed), /window changed/);
+  const replacing = await computer.prepare(turn, 'COMPUTER_TYPE', {
+    ref: '@sfind001:e1',
+    text: 'Replacement',
   });
-  assert.equal(computer.needsCheck('COMPUTER_SET_VALUE', notes), true);
-  for (const [ref, text] of [
-    ['@sdraft01:e6', 'ana@example.test'],
-    ['@sdraft01:e7', 'bo@example.test'],
-  ] as const)
-    await computer.execute(
-      turn,
-      'COMPUTER_TYPE',
-      await computer.prepare(turn, 'COMPUTER_TYPE', { ref, text }),
-    );
-  const addressed = computer.checked(
-    'COMPUTER_PRESS',
-    await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' }),
-  ) as Record<string, unknown>;
-  assert.deepEqual((addressed.typedInApp as unknown[]).slice(-2), [
-    { control: 'textfield', text: 'ana@example.test' },
-    { control: 'textfield', text: 'bo@example.test' },
-  ]);
-  assert.equal(addressed.typedInAppIncomplete, undefined);
-  await computer.execute(
-    turn,
-    'COMPUTER_SET_VALUE',
-    await computer.prepare(turn, 'COMPUTER_SET_VALUE', {
-      ref: '@sdraft01:e6',
-      text: 'x'.repeat(2001),
-    }),
-  );
-  const long = computer.checked(
-    'COMPUTER_PRESS',
-    await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' }),
-  ) as Record<string, unknown>;
-  assert.equal(long.typedInAppIncomplete, true);
+  assert.equal(computer.needsCheck('COMPUTER_TYPE', replacing), true);
+  assert.equal(replacing.replacesText, true);
+  const renamed = await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' });
+  window.children[0]!.name = 'Delete';
+  await assert.rejects(computer.execute(turn, 'COMPUTER_PRESS', renamed), /control changed/);
+  window.children[0]!.name = 'Send';
   findings[0]!.role = 'group';
   await assert.rejects(
-    computer.execute(
-      turn,
-      'COMPUTER_TYPE',
-      await computer.prepare(turn, 'COMPUTER_TYPE', { ref: '@sfind001:e1', text: 'Hi' }),
-    ),
-    (error: Error & { notRun?: boolean }) =>
-      error.notRun === true && /control changed/.test(error.message),
+    computer.prepare(turn, 'COMPUTER_TYPE', { ref: '@sfind001:e1', text: 'Hi' }),
+    (error: Error & { notRun?: boolean }) => /control changed/.test(error.message),
   );
   findings[0]!.role = 'textfield';
 
@@ -1894,6 +1890,103 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@sdraft01:e1' }),
     /no snapshot with that ref/,
   );
+});
+
+test('turning computer use off cancels input waiting on a read, even if that read ignores cancellation', async () => {
+  let enabled = true;
+  const pool = {
+    query: async (sql: string, values: unknown[] = []) => {
+      if (sql.startsWith('SELECT computer_use'))
+        return { rows: [{ computer_use: enabled, computer_keep_out: [] }] };
+      if (sql.startsWith('WITH RECURSIVE'))
+        return { rows: [{ id: 'root', source: 'user', message_id: 'message', proactive: false }] };
+      if (sql.includes('INSERT INTO preferences')) {
+        enabled = Boolean(values[1]);
+        return { rows: [] };
+      }
+      assert.fail(`Unexpected query: ${sql}`);
+    },
+  } as unknown as Pool;
+  const app = {
+    pid: 11,
+    bundle: 'com.example.Notes',
+    name: 'Notes',
+    windows: [{ id: 'w-1', title: 'Notes' }],
+  };
+  const node = { role: 'textfield', name: 'Notes', value: '', ref_id: '@snotes01:e1' };
+  let hold = false;
+  let release!: () => void;
+  let entered!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const calls: string[] = [];
+  const computer = createComputerUse(pool, 'owner', {
+    platform: 'darwin',
+    desktop: {
+      request: async (request) => {
+        calls.push(request.op);
+        if (request.op === 'apps') return { apps: [app] };
+        if (request.op === 'inspect')
+          return {
+            tree: node,
+            state: createHash('sha256').update(JSON.stringify(node)).digest('hex'),
+          };
+        if (request.op === 'snapshot') {
+          if (hold && request.ref) {
+            entered();
+            await gate;
+          }
+          return { tree: node };
+        }
+        return {};
+      },
+    },
+  });
+  const server = Fastify();
+  computer.registerRoutes(server);
+  const turn = { turnId: 'turn', threadId: 'thread' };
+  try {
+    await computer.execute(
+      turn,
+      'COMPUTER_OPEN',
+      await computer.prepare(turn, 'COMPUTER_OPEN', { bundle: app.bundle }),
+    );
+    await computer.execute(
+      turn,
+      'COMPUTER_SNAPSHOT',
+      await computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: app.pid }),
+    );
+    const prepared = await computer.prepare(turn, 'COMPUTER_SET_VALUE', {
+      ref: node.ref_id,
+      text: 'New note',
+    });
+    hold = true;
+    const pending = computer.execute(turn, 'COMPUTER_SET_VALUE', prepared);
+    const rejected = assert.rejects(pending, /Computer use was turned off/);
+    await waiting;
+    const response = await server.inject({
+      method: 'PATCH',
+      url: '/api/computer-use',
+      payload: { enabled: false },
+    });
+    assert.equal(response.statusCode, 200);
+    release();
+    await rejected;
+    assert.ok(calls.includes('cancel'));
+    assert.ok(!calls.includes('set_value'));
+    await server.inject({ method: 'PATCH', url: '/api/computer-use', payload: { enabled: true } });
+    await assert.rejects(
+      computer.execute(turn, 'COMPUTER_SET_VALUE', prepared),
+      /no snapshot with that ref/,
+    );
+  } finally {
+    release();
+    await server.close();
+  }
 });
 
 test('computer use on Windows keeps an opened app granted however the app list names it, and refuses apps it cannot identify', async () => {

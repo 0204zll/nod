@@ -1526,15 +1526,15 @@ test(
       );
 
       await t.test(
-        'a declined computer step is not asked again when only typed text or refs differ',
+        'a declined computer step is not asked again when only window content or refs differ',
         async () => {
           const turn = await begin('Send Ana the synthetic note in Mail.');
           const press = (typed: string, ref: string) => ({
             ref,
-            typedKey: 'id:com.apple.mail',
+            windowBinding: { window: 'w-1', state: 'synthetic-state' },
             app: { bundle: 'com.apple.mail', name: 'Mail' },
             control: { role: 'button', name: 'Send', window: 'Synthetic note' },
-            typedInApp: [{ control: 'Message', text: typed }],
+            windowContext: typed,
           });
           const ended = await begin('Synthetic earlier request that ended.');
           try {

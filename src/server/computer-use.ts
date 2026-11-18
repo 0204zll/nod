@@ -58,8 +58,6 @@ const observing = new Set<Action>([
   'COMPUTER_SCREENSHOT',
 ]);
 const findLimit = 40;
-const typedFields = 10;
-const typedChars = 2000;
 const targeted = new Set<Action>([
   'COMPUTER_PRESS',
   'COMPUTER_FOCUS',
@@ -69,12 +67,12 @@ const targeted = new Set<Action>([
 ]);
 const beforeDelivery =
   /^(OWNER_ACTIVE|STALE_REF|ACTION_NOT_SUPPORTED|POLICY_DENIED|AMBIGUOUS_TARGET|PERM_DENIED|STOPPED|INVALID):/;
-const entersText = new Set<Action>(['COMPUTER_TYPE', 'COMPUTER_SET_VALUE', 'COMPUTER_FOCUS']);
-const textRoles = new Set(['textfield', 'textarea', 'searchfield', 'combobox']);
 const step = (action: Action) => action.slice('COMPUTER_'.length).toLowerCase();
-export const computerInternalArgs = ['pid', 'ref', 'window', 'typedKey'];
+export const computerInternalArgs = ['pid', 'ref', 'window', 'windowBinding'];
 export const computerRequestArgs = [
   ...computerInternalArgs,
+  'windowContext',
+  'typedKey',
   'typedInApp',
   'typedInAppIncomplete',
   'replacesText',
@@ -157,17 +155,15 @@ const systemMenu =
 export function systemShortcut(keys: string, platform: string = process.platform) {
   const parts = keys
     .toLowerCase()
+    .replace(/\s/g, '')
     .split('+')
     .map((part) => modifierNames[part.trim()] ?? part.trim());
   const key = parts.pop() ?? '';
-  const combo = [...parts.sort(), key].join('+');
-  if (platform === 'darwin') return systemKeys.has(combo);
   const pressed = [...parts, key];
   return (
-    pressed.includes('cmd') ||
-    pressed.includes('print') ||
-    pressed.includes('sysrq') ||
-    [...otherSystemKeys].some((blocked) => {
+    (platform !== 'darwin' &&
+      (pressed.includes('cmd') || pressed.includes('print') || pressed.includes('sysrq'))) ||
+    [...(platform === 'darwin' ? systemKeys : otherSystemKeys)].some((blocked) => {
       const needed = blocked.split('+');
       return needed.at(-1) === key && needed.slice(0, -1).every((part) => parts.includes(part));
     })
@@ -248,12 +244,9 @@ type Control = {
 export type ComputerPrepared = Record<string, unknown> & {
   app?: Identity;
   control?: { role: string; name: string; window: string };
+  windowBinding?: { state: string; window: string; focus?: string };
 };
 type Refusal = IntegrationError & { notRun?: boolean };
-type Typed = {
-  fields: Array<{ ref: string; control: string; text: string }>;
-  incomplete: boolean;
-};
 
 export function isComputerAction(action: string): action is Action {
   return Object.hasOwn(schemas, action);
@@ -335,7 +328,7 @@ export function createComputerUse(
     [...(grants.get(root)?.values() ?? [])].some((ids) => ids.includes(identity(app)));
   const grants = new Map<string, Map<string, string[]>>();
   const controls = new Map<string, Map<string, Control>>();
-  const typing = new Map<string, Map<string, Typed>>();
+  let access = new AbortController();
   let listing: { at: number; apps: Promise<App[]> } | undefined;
 
   function unavailable() {
@@ -360,11 +353,14 @@ export function createComputerUse(
   }
 
   async function ask(request: Record<string, unknown>, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     if (!desktop) throw unavailable();
-    if (!['apps', 'locate', 'snapshot', 'screenshot'].includes(String(request.op)))
+    if (!['apps', 'locate', 'snapshot', 'inspect', 'screenshot'].includes(String(request.op)))
       listing = undefined;
     try {
-      return await desktop.request(request as { op: string }, signal);
+      const result = await desktop.request(request as { op: string }, signal);
+      signal?.throwIfAborted();
+      return result;
     } catch (error) {
       signal?.throwIfAborted();
       throw new IntegrationError(error instanceof Error ? error.message : String(error), 409);
@@ -440,37 +436,6 @@ export function createComputerUse(
     }
   }
 
-  function typedIn(root: string, key: string) {
-    const state = typing.get(root)?.get(key);
-    return {
-      ...(state?.fields.length
-        ? { typedInApp: state.fields.map(({ control, text }) => ({ control, text })) }
-        : {}),
-      ...(state?.incomplete ? { typedInAppIncomplete: true } : {}),
-    };
-  }
-
-  function noteTyped(
-    root: string,
-    key: string,
-    field: { ref: string; control: string },
-    text: string,
-    append: boolean,
-  ) {
-    const current = forRoot(typing, root, () => new Map<string, Typed>());
-    const state: Typed = current.get(key) ?? { fields: [], incomplete: false };
-    const before = state.fields.find((entry) => entry.ref === field.ref);
-    const full = (append ? (before?.text ?? '') : '') + text;
-    const fields = [
-      ...state.fields.filter((entry) => entry !== before),
-      { ...field, text: full.slice(0, typedChars) },
-    ];
-    current.set(key, {
-      fields: fields.slice(-typedFields),
-      incomplete: state.incomplete || full.length > typedChars || fields.length > typedFields,
-    });
-  }
-
   async function live(found: Control, ref: string, signal?: AbortSignal) {
     const { tree } = (await ask(
       {
@@ -483,23 +448,56 @@ export function createComputerUse(
     )) as { tree?: Node };
     if (!tree) throw new IntegrationError('That control is gone. Take a new snapshot.', 409);
     if (secure(tree)) throw new IntegrationError('Nod never uses password fields.', 403);
-    if (tree.role !== found.role)
+    if (tree.role !== found.role || (tree.name ?? '') !== found.name)
       throw new IntegrationError('That control changed. Take a new snapshot.', 409);
     return tree;
   }
 
-  function unchangedTyping(root: string, action: Action, prepared: ComputerPrepared) {
-    if (!needsCheck(action, prepared)) return;
-    const now = typedIn(root, String(prepared.typedKey));
-    const checkedTyping = {
-      ...(prepared.typedInApp ? { typedInApp: prepared.typedInApp } : {}),
-      ...(prepared.typedInAppIncomplete ? { typedInAppIncomplete: true } : {}),
-    };
-    if (JSON.stringify(now) !== JSON.stringify(checkedTyping))
+  async function windowContext(app: string, window: string, signal?: AbortSignal, focus = false) {
+    const result = await ask(
+      { op: 'inspect', app, window, ...(focus ? { focus: true } : {}) },
+      signal,
+    );
+    const text = JSON.stringify(
+      focus ? { tree: result.tree, focused: result.focused } : result.tree,
+    );
+    if (
+      !text ||
+      !result.tree ||
+      typeof result.state !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(result.state) ||
+      (focus && (typeof result.focus !== 'string' || !/^[a-f0-9]{64}$/.test(result.focus))) ||
+      text.length > treeChars
+    )
       throw new IntegrationError(
-        'Nod typed more in this app since this step was checked, so it did not run.',
+        'Nod could not read the complete window within its size limit, so this step did not run.',
         409,
       );
+    return {
+      windowContext: redactSecretText(text),
+      windowBinding: {
+        state: result.state,
+        window,
+        ...(focus ? { focus: String(result.focus) } : {}),
+      },
+    };
+  }
+
+  async function unchangedWindow(prepared: ComputerPrepared, signal?: AbortSignal) {
+    const binding = prepared.windowBinding;
+    if (!binding)
+      throw new IntegrationError('This step has no checked window. Take a new snapshot.', 409);
+    const current = await windowContext(
+      prepared.app!.name,
+      binding.window,
+      signal,
+      Boolean(binding.focus),
+    );
+    if (
+      current.windowBinding.state !== binding.state ||
+      current.windowBinding.focus !== binding.focus
+    )
+      throw new IntegrationError('That window changed since this step was checked.', 409);
   }
 
   async function noSecureFocus(
@@ -508,7 +506,7 @@ export function createComputerUse(
     signal?: AbortSignal,
   ) {
     const current = (await ask({ op: 'snapshot', ...scope }, signal)) as { tree?: Node };
-    if (secureFocused(current.tree)) throw new IntegrationError(refusal, 403);
+    if (!current.tree || secureFocused(current.tree)) throw new IntegrationError(refusal, 403);
   }
 
   function shown(root: string, refId: string) {
@@ -586,6 +584,7 @@ export function createComputerUse(
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<ComputerPrepared> {
+    signal = signal ? AbortSignal.any([signal, access.signal]) : access.signal;
     const { root, keptOut } = await ready(turn);
     const input = validate(action, args);
     if (action === 'COMPUTER_APPS') return input;
@@ -604,17 +603,18 @@ export function createComputerUse(
     }
     if (targeted.has(action)) {
       const found = targetOf(root, input.ref!, keptOut);
-      const key = identity(found);
-      const typed = typedIn(root, key);
+      const node = await live(found, input.ref!, signal);
+      const app = await appFor(root, found.pid!, keptOut, true, signal);
+      const chosen = found.windowId ?? app.windows?.[0]?.id;
+      if (!chosen) throw new IntegrationError(`${found.app} has no open window.`, 409);
       return {
         ...input,
         app: { bundle: found.bundle, name: found.app },
         control: { role: found.role, name: found.name, window: found.window },
-        ...(action === 'COMPUTER_SET_VALUE'
-          ? { replacesText: holdsText(await live(found, input.ref!, signal)) }
+        ...(['COMPUTER_SET_VALUE', 'COMPUTER_TYPE'].includes(action)
+          ? { replacesText: holdsText(node) }
           : {}),
-        ...(action !== 'COMPUTER_FOCUS' ? typed : {}),
-        typedKey: key,
+        ...(action !== 'COMPUTER_FOCUS' ? await windowContext(found.app, chosen, signal) : {}),
       };
     }
     if (action === 'COMPUTER_KEY' && systemShortcut(input.keys!, platform))
@@ -646,27 +646,20 @@ export function createComputerUse(
           : `${app.name} has no open window.`,
         404,
       );
-    const key = identity(app);
-    const typed = action === 'COMPUTER_KEY' ? typedIn(root, key) : {};
     return {
       ...base,
       menu: false,
       window: chosen.id,
       windowTitle: chosen.title,
-      ...typed,
-      typedKey: key,
+      ...(action === 'COMPUTER_KEY' ? await windowContext(app.name, chosen.id, signal, true) : {}),
     };
   }
 
-  function needsCheck(action: Action, prepared: ComputerPrepared) {
-    if (observing.has(action) || action === 'COMPUTER_FOCUS') return false;
-    const text = textRoles.has(prepared.control?.role ?? '');
-    if (action === 'COMPUTER_SET_VALUE') return !text || prepared.replacesText === true;
-    if (action === 'COMPUTER_TYPE') return !text || /[\r\n]/.test(String(prepared.text ?? ''));
-    return true;
+  function needsCheck(action: Action, _prepared?: ComputerPrepared) {
+    return !observing.has(action) && action !== 'COMPUTER_FOCUS';
   }
 
-  function checked(action: Action, prepared: ComputerPrepared) {
+  function checked(action: Action, prepared: ComputerPrepared): Record<string, unknown> {
     const visible = Object.fromEntries(
       Object.entries(prepared).filter(([key]) => !computerInternalArgs.includes(key)),
     );
@@ -827,23 +820,8 @@ export function createComputerUse(
       )
         throw new IntegrationError('That control changed since this step was checked.', 409);
       unique(await running(signal), found.app);
-      unchangedTyping(root, action, prepared);
-      if (entersText.has(action)) {
-        const node = await live(found, String(prepared.ref), signal);
-        if (action === 'COMPUTER_SET_VALUE' && holdsText(node) !== prepared.replacesText)
-          throw new IntegrationError('That field changed since this step was checked.', 409);
-      }
-      const entered = prepared.text ?? prepared.option;
-      const note = () => {
-        if (action !== 'COMPUTER_FOCUS' && typeof entered === 'string' && entered)
-          noteTyped(
-            root,
-            String(prepared.typedKey),
-            { ref: String(prepared.ref), control: found.name || found.role },
-            entered,
-            action === 'COMPUTER_TYPE',
-          );
-      };
+      await live(found, String(prepared.ref), signal);
+      if (needsCheck(action)) await unchangedWindow(prepared, signal);
       return async () => {
         const result = (await ask(
           {
@@ -851,16 +829,17 @@ export function createComputerUse(
             ref: prepared.ref,
             app: found.app,
             role: found.role,
-            ...(found.windowId ? { window: found.windowId } : {}),
+            control: { role: found.role, name: found.name },
+            ...(prepared.windowBinding
+              ? { window: prepared.windowBinding.window, expected: prepared.windowBinding.state }
+              : found.windowId
+                ? { window: found.windowId }
+                : {}),
             ...(prepared.text !== undefined ? { text: prepared.text } : {}),
             ...(prepared.option !== undefined ? { option: prepared.option } : {}),
           },
           signal,
-        ).catch((error: Error) => {
-          if (!beforeDelivery.test(error.message)) note();
-          throw error;
-        })) as { disposition?: { delivery?: string } };
-        note();
+        )) as { disposition?: { delivery?: string } };
         return {
           done: true,
           ...(result.disposition?.delivery ? { delivery: result.disposition.delivery } : {}),
@@ -880,16 +859,26 @@ export function createComputerUse(
           'A password field has focus in this window, so Nod took no screenshot.',
           signal,
         );
-        return ask({ op: 'screenshot', ...scope }, signal);
+        return ask({ op: 'screenshot', ...scope, noSecureFocus: true }, signal);
       };
-    unchangedTyping(root, action, prepared);
+    await unchangedWindow(prepared, signal);
     await noSecureFocus(
       scope,
       'A password field has focus in this window, so Nod sent no keys.',
       signal,
     );
     return async () => {
-      await ask({ op: 'key', keys: prepared.keys, ...scope }, signal);
+      await ask(
+        {
+          op: 'key',
+          keys: prepared.keys,
+          ...scope,
+          expected: prepared.windowBinding!.state,
+          expectedFocus: prepared.windowBinding!.focus,
+          noSecureFocus: true,
+        },
+        signal,
+      );
       return { done: true };
     };
   }
@@ -900,6 +889,7 @@ export function createComputerUse(
     prepared: ComputerPrepared,
     signal?: AbortSignal,
   ) {
+    signal = signal ? AbortSignal.any([signal, access.signal]) : access.signal;
     const run = await plan(turn, action, prepared, signal).catch((error: Refusal) => {
       error.notRun = true;
       throw error;
@@ -965,11 +955,13 @@ export function createComputerUse(
         [ownerId, input.data.enabled],
       );
       if (!input.data.enabled) {
+        access.abort(
+          new IntegrationError('Computer use was turned off, so this step did not run.', 403),
+        );
         grants.clear();
         controls.clear();
-        typing.clear();
         await desktop.request({ op: 'cancel' }).catch(() => {});
-      }
+      } else if (access.signal.aborted) access = new AbortController();
       return status();
     });
     app.post('/api/computer-use/permission', async (request, reply) => {

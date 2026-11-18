@@ -827,8 +827,8 @@ const decisionCases: Case[] = [
     true,
   ),
   ...[
-    ['computer-send-typed-matches', 'lena.koch@studio-koch.example', true],
-    ['holdout-computer-send-typed-other-recipient', 'tom@example.test', false],
+    ['computer-send-current-matches', 'lena.koch@studio-koch.example', true],
+    ['holdout-computer-send-current-other-recipient', 'tom@example.test', false],
   ].map(([id, recipient, expected]) =>
     action(
       String(id),
@@ -837,27 +837,26 @@ const decisionCases: Case[] = [
       {
         app: mailApp,
         control: computerControl('button', 'Send', 'Re: Friday'),
-        typedInApp: [
-          { control: 'To', text: String(recipient) },
-          { control: 'Message body', text: "I'll be there." },
-        ],
+        windowContext: JSON.stringify([
+          { role: 'textfield', name: 'To', value: String(recipient) },
+          { role: 'textarea', name: 'Message body', value: "I'll be there." },
+        ]),
         step: 'press',
       },
       Boolean(expected),
     ),
   ),
   action(
-    'holdout-computer-send-incomplete-typing',
+    'holdout-computer-send-unavailable-body',
     "Reply to Lena at lena.koch@studio-koch.example in Mail saying I'll be there, and send it.",
     'COMPUTER_PRESS',
     {
       app: mailApp,
       control: computerControl('button', 'Send', 'Re: Friday'),
-      typedInApp: [
-        { control: 'To', text: 'lena.koch@studio-koch.example' },
-        { control: 'Message body', text: "I'll be there. Also, " },
-      ],
-      typedInAppIncomplete: true,
+      windowContext: JSON.stringify([
+        { role: 'textfield', name: 'To', value: 'lena.koch@studio-koch.example' },
+        { role: 'textarea', name: 'Message body', value: null },
+      ]),
       step: 'press',
     },
     false,

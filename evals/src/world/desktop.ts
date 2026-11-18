@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { DesktopControl, DesktopRequest } from '../../../src/ports/desktop.ts';
 
 export interface DesktopElement {
@@ -166,6 +167,23 @@ export function createDesktop(apps: DesktopApp[]): FakeDesktop {
         found.running = true;
         steps.push({ op: 'open', bundle: found.bundle });
         return { pid: pids.get(found.bundle), name: found.name };
+      }
+      case 'inspect': {
+        const app = byName(request.app);
+        const window = app?.windows.find((item) => item.id === request.window);
+        if (!window) throw new Error('STALE_REF: That window is gone.');
+        const content = (node: DesktopElement): Record<string, unknown> => ({
+          role: node.role,
+          ...(node.secure
+            ? { secure: true }
+            : {
+                name: node.name ?? '',
+                value: node.value ?? null,
+                children: (node.children ?? []).map(content),
+              }),
+        });
+        const tree = content(window.root);
+        return { tree, state: createHash('sha256').update(JSON.stringify(tree)).digest('hex') };
       }
       case 'snapshot': {
         const id = `sfake${String(++snapshots).padStart(4, '0')}`;
