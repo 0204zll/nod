@@ -2384,15 +2384,22 @@ async function initializeApplication(
               ? handoff
               : { result: handoff };
         }
+        const namedControl = request.page.controls?.some(
+          ({ role, name }) => name.trim() && !['RootWebArea', 'WebArea', 'document'].includes(role),
+        );
+        const form = request.page.submits;
+        const knownForm = typeof form === 'object' && form.method.trim() && form.to.trim();
+        const click = request.step.action === 'click';
+        const enter =
+          (request.step.action === 'press' && request.step.key === 'Enter') ||
+          (request.step.action === 'type' && /[\r\n]/.test(request.step.text ?? ''));
         if (
-          request.step.action === 'click' &&
-          request.step.x !== undefined &&
-          !request.page.controls?.some(
-            ({ role, name }) => name && !['RootWebArea', 'WebArea', 'document'].includes(role),
-          )
+          !namedControl &&
+          ((request.step.action === 'click' && (request.step.x !== undefined || !knownForm)) ||
+            (enter && !knownForm))
         )
           throw new Error(
-            'The click target is not identified. Inspect a fresh snapshot or screenshot and choose the actual control. Do not ask the owner to approve an unidentified click.',
+            `The ${click ? 'click' : 'Enter'} target is not identified. Inspect a fresh snapshot or screenshot and choose the actual control. Do not ask the owner to approve an unidentified ${click ? 'click' : 'Enter press'}.`,
           );
         if (request.subagent) return 'refused';
         const visible =
