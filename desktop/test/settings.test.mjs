@@ -8915,11 +8915,18 @@ test('computer use binds current window content and hides password content', asy
       },
     },
   });
+  const withButton = (...children) => {
+    const read = window('bo@example.test', '@sfourth1:e2');
+    read.data.tree.children.push({ role: 'button', name: 'Full Screen', children });
+    return read;
+  };
   const desktop = await fakeDesktop(t, {
     snapshot: [
       window('ana@example.test', '@sfirst01:e1'),
       window('ana@example.test', '@ssecond1:e8', true),
       window('bo@example.test', '@sthird01:e2'),
+      withButton({ role: 'group', children: [{ role: 'group' }] }),
+      withButton(),
       { ok: true, data: { complete: false, tree: { role: 'window' } } },
       { ok: true, data: { complete: true, tree: { role: 'window', children_count: 1 } } },
     ],
@@ -8931,6 +8938,11 @@ test('computer use binds current window content and hides password content', asy
   assert.equal(first.state, second.state);
   assert.notEqual(first.focus, second.focus);
   assert.notEqual(first.state, third.state);
+  const fourth = await inspect();
+  assert.equal(
+    fourth.state,
+    (await desktop.helper.request({ op: 'inspect', app: 'Mail', window: 'w-1' })).state,
+  );
   assert.doesNotMatch(JSON.stringify(first), /private password/);
   await assert.rejects(inspect(), /complete window/);
   await assert.rejects(inspect(), /Part of the window is missing/);

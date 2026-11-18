@@ -91,6 +91,16 @@ const listRoles = new Set([
 ]);
 const listLimit = 20;
 
+const emptyGroup = (node) =>
+  node.role === 'group' &&
+  !node.name &&
+  node.value == null &&
+  !node.states?.length &&
+  !node.children?.length &&
+  !Object.keys(node).some((key) =>
+    ['description', 'hint', 'placeholder', 'native_id', 'secure'].includes(key),
+  );
+
 function inspectResult(data, menu = false, target) {
   if (data.complete !== true || !data.tree || data.truncated || data.identity_unproven)
     throw new Error(
@@ -144,7 +154,7 @@ function inspectResult(data, menu = false, target) {
       ),
       states: (node.states ?? []).filter((state) => !['focused', 'hovered'].includes(state)).sort(),
       ...(kept.length < all.length ? { more: true } : {}),
-      children: kept.map(walk),
+      children: kept.map(walk).filter((child) => !emptyGroup(child)),
     };
   };
   const source = menu
