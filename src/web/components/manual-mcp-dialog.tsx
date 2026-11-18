@@ -14,11 +14,15 @@ import {
   SearchField,
 } from './ui';
 
+const listedKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+
 export function ManualMcpDialog({
+  listed,
   onClose,
   onCreated,
   returnFocus,
 }: {
+  listed: { name: string; slug: string }[];
   onClose(): void;
   onCreated(id: string): void;
   returnFocus(): HTMLElement | null;
@@ -44,9 +48,13 @@ export function ManualMcpDialog({
     return () => controller.abort();
   }, []);
 
+  const taken = new Set(listed.flatMap((app) => [listedKey(app.name), listedKey(app.slug)]));
+  const offered = suggestions.filter(
+    (item) => !taken.has(listedKey(item.name)) && !taken.has(listedKey(item.slug)),
+  );
   const needle = query.trim().toLowerCase();
   const matches = needle
-    ? suggestions
+    ? offered
         .filter((item) =>
           `${item.name} ${item.slug} ${item.description}`.toLowerCase().includes(needle),
         )
@@ -108,7 +116,7 @@ export function ManualMcpDialog({
             <DialogDescription>Add a server to use its tools in Nod.</DialogDescription>
           </div>
         </div>
-        {suggestions.length > 0 && (
+        {offered.length > 0 && (
           <div className="mcp-suggestions">
             <SearchField
               type="search"
@@ -121,7 +129,7 @@ export function ManualMcpDialog({
                 }
               }}
               onClear={() => setQuery('')}
-              placeholder={`Search ${suggestions.length} servers from the n8n catalog`}
+              placeholder={`Search ${offered.length} servers from the n8n catalog`}
               aria-label="Search suggested servers"
               disabled={saving}
               autoComplete="off"
