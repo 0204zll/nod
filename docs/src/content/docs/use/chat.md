@@ -193,6 +193,14 @@ An action that needs your approval appears as a card with Nod's question and two
 
 Nod doesn't ask for passwords or card numbers in chat. It uses a saved login or a private form instead. See [Vault](/trust/vault/).
 
+## Start a fresh chat
+
+Send `/clear` to start fresh chat context and a clean view. This command works without a model connection, in Nod, Telegram and WhatsApp.
+
+Nod stops work in the main chat. Independent tasks keep running. Files, apps, Vault, memory, schedules and settings stay. Previous messages remain available in chat search. The next message starts with fresh model context; automatic related-chat recall also starts at this point.
+
+Nod has one main chat. `/clear` does not create a second conversation or delete previous messages.
+
 ## Stop Nod
 
 While Nod works, the status line under the chat shows its work on your messages, and each task shows its progress on its card and as a dot above the message box.

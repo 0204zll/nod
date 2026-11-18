@@ -169,6 +169,14 @@ Each session also checks in with you. When its model spend since your last messa
 
 ## Reset
 
+### Start fresh chat
+
+The owner can send `/clear` through web, desktop, Telegram or WhatsApp. The server handles it without a model call.
+
+Under the thread lock, it cancels only main-chat turns, saves the command, and records new context and view boundaries. The next main-chat turn starts a fresh Pi transcript. Recent chat and automatic related-chat recall exclude earlier messages. Chat search can still read them.
+
+The thread, workspace, browser, independent tasks, schedules, memory, accounts and settings stay. A repeated web command with the same message ID returns its first result and does not clear newer work. A stale thread ID or a message ID from another request is refused. The chat apps use their saved inbox transaction to handle the command once.
+
 ### Restart chat context
 
 When a chat turn ends with a confirmed context failure, the web and desktop apps offer **Restart chat**. Automatic retries and compaction finish before this control appears. Other model errors do not offer a context restart.

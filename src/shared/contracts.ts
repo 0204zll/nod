@@ -265,6 +265,7 @@ export interface Configuration {
 }
 export interface AppState {
   chatRecovery?: { turnId: string };
+  chatClearedAt?: string;
   tasks?: Task[];
   threadId: string;
   hasEarlierMessages?: boolean;

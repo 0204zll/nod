@@ -109,11 +109,12 @@ Telegram and WhatsApp show each task as messages Nod writes in your language. Th
 
 Use the chat app's **Reply** control to send an update or answer to a task. Other messages go to the main chat. These commands answer from Nod's task records, and Nod words the reply:
 
-| Command   | Result                                                                                                  |
-| --------- | ------------------------------------------------------------------------------------------------------- |
-| `/tasks`  | List open tasks and their current state.                                                                |
-| `/status` | Show each open task's goal, steps and current state. Reply to a task message to see only that task.     |
-| `/stop`   | Stop all active work and close open tasks. Reply to a task message with `/stop` to stop only that task. |
+| Command   | Result                                                                                                             |
+| --------- | ------------------------------------------------------------------------------------------------------------------ |
+| `/tasks`  | List open tasks and their current state.                                                                           |
+| `/status` | Show each open task's goal, steps and current state. Reply to a task message to see only that task.                |
+| `/stop`   | Stop all active work and close open tasks. Reply to a task message with `/stop` to stop only that task.            |
+| `/clear`  | Start fresh main-chat context and a clean view. Independent tasks keep running. Previous messages stay searchable. |
 
 The task list sends one message per task. You can reply to that message, the task's first message, a question, a file, a result or a status response. If Nod cannot match a reply to a task, `/stop` asks you to select a task. It does not stop all work.
 

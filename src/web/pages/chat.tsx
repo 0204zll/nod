@@ -583,6 +583,25 @@ export function Chat({
     epoch: number;
     oldest: Pick<Message, 'id' | 'createdAt'> | null;
   }>({ threadId, count: hiddenCount, epoch: 0, oldest: null });
+  const clearedHistory = useRef({ threadId, at: state.chatClearedAt });
+  if (clearedHistory.current.threadId !== threadId)
+    clearedHistory.current = { threadId, at: state.chatClearedAt };
+  else if (clearedHistory.current.at !== state.chatClearedAt) {
+    clearedHistory.current = { threadId, at: state.chatClearedAt };
+    hiddenHistory.current = {
+      threadId,
+      count: hiddenCount,
+      epoch: hiddenHistory.current.epoch + 1,
+      oldest: null,
+    };
+    known.current = { threadId, messages: [] };
+  }
+  useEffect(() => {
+    if (!state.chatClearedAt) return;
+    cancelFocusedMessage();
+    setReplyTo(null);
+    setOptimistic((current) => current.filter((item) => item.threadId !== threadId));
+  }, [threadId, state.chatClearedAt]);
   if (hiddenHistory.current.threadId !== threadId)
     hiddenHistory.current = { threadId, count: hiddenCount, epoch: 0, oldest: null };
   else if (hiddenHistory.current.count !== hiddenCount) {
@@ -2589,7 +2608,6 @@ export function Chat({
             </Notice>
           )}
           <div
-            hidden={!state.configuration.llmReady && !working && !sending}
             onInputCapture={() => {
               unreadPositioned.current = currentUnreadVisit.current;
             }}
@@ -2603,7 +2621,11 @@ export function Chat({
               restoreReply={(saved) => {
                 if (!saved || !hiddenMessageIds.current.has(saved.id)) setReplyTo(saved);
               }}
-              ready={state.configuration.llmReady && !welcoming && !recovering}
+              ready={
+                (state.configuration.llmReady || text.trim().toLowerCase() === '/clear') &&
+                !welcoming &&
+                !recovering
+              }
               busy={connected && working}
               text={text}
               setText={setText}

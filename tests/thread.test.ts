@@ -41,6 +41,7 @@ import type { ThreadDependencies } from '../src/server/thread.ts';
 import type {
   Artifact,
   Connection,
+  Message,
   SubmitMessageResponse,
   Task,
   Turn,
@@ -6345,6 +6346,305 @@ test(
           }
         },
       );
+
+      await t.test(
+        'clear starts fresh chat without a model and keeps independent work',
+        async () => {
+          await waitFor(settledThread);
+          const threadId = (await thread.activeThread()).id;
+          const earlierPrompt = 'Synthetic earlier chat before clear';
+          const earlier = await thread.submitUserMessage(earlierPrompt);
+          await waitFor(settled(earlier.turnId));
+          const backgroundPrompt = 'Synthetic independent work during clear';
+          const runningPrompt = 'Synthetic current chat before clear';
+          const nextPrompt = 'Synthetic new request after clear';
+          block(backgroundPrompt);
+          block(runningPrompt);
+          modelErrors.set('/clear', 'Synthetic unavailable model');
+          const background = await thread.enqueueTurn(backgroundPrompt, {
+            source: 'schedule',
+            background: true,
+          });
+          const running = await thread.submitUserMessage(runningPrompt);
+          try {
+            await waitFor(() => Boolean(ran(background)) && Boolean(ran(running.turnId)));
+            const independent = ran(background)!;
+            const file = join(independent.workspacePath, 'clear-kept.txt');
+            await writeFile(file, 'Synthetic saved work');
+            const clientMessageId = randomUUID();
+            const clear = () =>
+              request('POST', '/api/messages', {
+                threadId,
+                text: '/clear',
+                clientMessageId,
+              });
+            const [response, concurrent] = await Promise.all([clear(), clear()]);
+            assert.equal(response.statusCode, 200, response.body);
+            const cleared = response.json() as SubmitMessageResponse;
+            assert.deepEqual(concurrent.json(), cleared);
+            assert.equal(await turnStatus(cleared.turnId), 'succeeded');
+            await waitFor(settled(cleared.turnId));
+            assert.equal(Boolean(ran(cleared.turnId)), false);
+            assert.equal(await turnStatus(running.turnId), 'cancelled');
+            assert.equal(independent.signal.aborted, false);
+            assert.equal(await turnStatus(background), 'running');
+            assert.equal(await readFile(file, 'utf8'), 'Synthetic saved work');
+            const state = (await request('GET', '/api/state')).json();
+            assert.equal(state.threadId, threadId);
+            assert.equal(typeof state.chatClearedAt, 'string');
+            assert.equal(
+              state.messages.some((message: Message) => message.id === earlier.messageId),
+              false,
+            );
+            assert.equal(
+              (await request('GET', '/api/messages'))
+                .json()
+                .messages.some((message: Message) => message.id === earlier.messageId),
+              false,
+            );
+            assert.equal(
+              (
+                await request(
+                  'GET',
+                  '/api/messages/search?q=Synthetic%20earlier%20chat%20before%20clear',
+                )
+              )
+                .json()
+                .some((message: Message) => message.id === earlier.messageId),
+              true,
+            );
+            assert.equal(
+              (await personal.recall(earlierPrompt, undefined, null)).some(
+                ({ id }) => id === earlier.messageId,
+              ),
+              false,
+            );
+            block(nextPrompt);
+            const next = await thread.submitUserMessage(nextPrompt);
+            await waitFor(() => Boolean(ran(next.turnId)));
+            const context = ran(next.turnId)!;
+            assert.ok(context.contextRestart);
+            assert.equal(
+              context.history.some(({ text }) => text === earlierPrompt),
+              false,
+            );
+            assert.deepEqual((await clear()).json(), cleared);
+            assert.equal(context.signal.aborted, false);
+            assert.equal(await turnStatus(next.turnId), 'running');
+            assert.equal(
+              (await request('GET', '/api/state')).json().chatClearedAt,
+              state.chatClearedAt,
+            );
+            assert.equal(
+              (
+                await request('POST', '/api/messages', {
+                  threadId: randomUUID(),
+                  text: '/clear',
+                  clientMessageId: randomUUID(),
+                })
+              ).statusCode,
+              409,
+            );
+            assert.equal(
+              (
+                await request('POST', '/api/messages', {
+                  threadId,
+                  text: '/clear',
+                  clientMessageId: earlier.messageId,
+                })
+              ).statusCode,
+              409,
+            );
+            release(nextPrompt);
+            await waitFor(settled(next.turnId));
+          } finally {
+            modelErrors.delete('/clear');
+            release(backgroundPrompt);
+            release(runningPrompt);
+            release(nextPrompt);
+            await waitFor(settled(background));
+            await waitFor(settled(running.turnId));
+          }
+        },
+      );
+
+      await t.test(
+        'clear cancels earlier text and audio intake but keeps an addressed task reply',
+        async (t) => {
+          await waitFor(settledThread);
+          const threadId = (await thread.activeThread()).id;
+          const taskId = randomUUID();
+          const anchor = randomUUID();
+          const origin = await thread.enqueueTurn('Synthetic task before clear intake', {
+            source: 'task',
+            sessionId: taskId,
+            background: true,
+          });
+          await waitFor(settled(origin));
+          await db.pool.query(
+            "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'assistant','Synthetic task question')",
+            [anchor, ownerId, threadId, origin],
+          );
+          await db.pool.query(
+            "INSERT INTO tasks(id,owner_id,turn_id,session_id,message_id,title,done_when,now_text,applied_revision) VALUES($1,$2,$3,$1,$4,'Synthetic independent task','Synthetic reply arrived','Waiting',1)",
+            [taskId, ownerId, origin, anchor],
+          );
+          await db.pool.query('UPDATE turns SET task_id=$1 WHERE id=$2', [taskId, origin]);
+          const statusMessage = randomUUID();
+          await db.pool.query(
+            "INSERT INTO messages(id,owner_id,thread_id,role,text,reply_to_message_id) VALUES($1,$2,$3,'assistant','Synthetic task status',$4)",
+            [statusMessage, ownerId, threadId, anchor],
+          );
+          const mainText = 'Synthetic main input still being read';
+          const taskText = 'Synthetic addressed task input still being read';
+          const reading = new Set<string>();
+          let releaseReading!: () => void;
+          const held = new Promise<void>((resolve) => {
+            releaseReading = resolve;
+          });
+          const accept = verification.accept.bind(verification);
+          t.mock.method(verification, 'accept', async (...args: Parameters<typeof accept>) => {
+            if (args[0] === mainText || args[0] === taskText) {
+              reading.add(args[0]);
+              await held;
+              return undefined;
+            }
+            return accept(...args);
+          });
+          let releaseAudio!: () => void;
+          transcriptionGate = new Promise<void>((resolve) => {
+            releaseAudio = resolve;
+          });
+          const previousTranscript = transcript;
+          const previousReady = chatReady;
+          transcript = 'Synthetic audio input before clear';
+          const audioCount = transcriptions.length;
+          const main = request('POST', '/api/messages', {
+            threadId,
+            text: mainText,
+            clientMessageId: randomUUID(),
+          }).then((response) => response);
+          const task = request('POST', '/api/messages', {
+            threadId,
+            text: taskText,
+            clientMessageId: randomUUID(),
+            replyToMessageId: statusMessage,
+          }).then((response) => response);
+          const audio = sendAudio({ threadId, clientMessageId: randomUUID() }).then(
+            (response) => response,
+          );
+          try {
+            await waitFor(() => reading.size === 2 && transcriptions.length > audioCount);
+            chatReady = false;
+            const cleared = await request('POST', '/api/messages', {
+              threadId,
+              text: '/clear',
+              clientMessageId: randomUUID(),
+            });
+            assert.equal(cleared.statusCode, 200, cleared.body);
+            chatReady = previousReady;
+            releaseReading();
+            releaseAudio();
+            const [mainResult, taskResult, audioResult] = await Promise.all([main, task, audio]);
+            for (const response of [mainResult, audioResult]) {
+              assert.equal(response.statusCode, 200, response.body);
+              const id = response.json().turnId as string;
+              assert.equal(await turnStatus(id), 'cancelled');
+              assert.equal(Boolean(ran(id)), false);
+              assert.equal(
+                (await db.pool.query('SELECT withdrawn FROM turns WHERE id=$1', [id])).rows[0]
+                  .withdrawn,
+                true,
+              );
+            }
+            assert.equal(taskResult.statusCode, 200, taskResult.body);
+            const continued = taskResult.json().turnId as string;
+            await waitFor(settled(continued));
+            assert.equal(ran(continued)!.sessionId, taskId);
+            assert.equal(ran(continued)!.prompt, taskText);
+            assert.equal(await turnStatus(continued), 'succeeded');
+          } finally {
+            chatReady = previousReady;
+            releaseReading();
+            releaseAudio();
+            await Promise.allSettled([main, task, audio]);
+            transcriptionGate = undefined;
+            transcript = previousTranscript;
+            await request('POST', `/api/tasks/${taskId}/stop`);
+            await db.pool.query('UPDATE turns SET task_id=NULL WHERE session_id=$1', [taskId]);
+            await db.pool.query('DELETE FROM tasks WHERE id=$1', [taskId]);
+          }
+        },
+      );
+
+      await t.test('chat-app clear saves one visible acknowledgement in Nod', async () => {
+        const { createChannels } = await import('../src/server/channels.ts');
+        const threadId = (await thread.activeThread()).id;
+        for (const provider of ['telegram', 'whatsapp']) {
+          let pending = true;
+          const posts: string[] = [];
+          const channels = await createChannels(db.pool, {
+            ownerId,
+            transport: {
+              channels: [
+                {
+                  id: provider,
+                  status: 'configured',
+                  missing: [],
+                  accountId: 'synthetic-clear',
+                  allowedSenderIds: ['111'],
+                },
+              ],
+              poll: async (accept) => {
+                if (!pending) return;
+                pending = false;
+                await accept({
+                  channelId: provider,
+                  accountId: 'synthetic-clear',
+                  senderId: '111',
+                  messageId: randomUUID(),
+                  threadId: 'synthetic-chat',
+                  text: '/clear',
+                  sentAt: new Date(),
+                });
+              },
+              receive: async () => ({ status: 200, body: {} }),
+              post: async ({ text }) => {
+                posts.push(text);
+                return { id: 'synthetic-sent-clear' };
+              },
+              close: async () => {},
+            },
+            subscribe: () => () => {},
+            intervalMs: 600_000,
+            activeThread: (client) => thread.activeThread(client),
+            taskCommand: tasks.chatCommand,
+            submit: async () => {
+              throw new Error('Clear must not start a model turn.');
+            },
+          });
+          try {
+            await channels.drain();
+            assert.deepEqual(posts, [thread.chatClearedMessage]);
+            for (const path of ['/api/state', '/api/messages']) {
+              const messages = (await request('GET', path)).json().messages as Message[];
+              assert.equal(
+                messages.filter(
+                  ({ role, text }) => role === 'assistant' && text === thread.chatClearedMessage,
+                ).length,
+                1,
+              );
+            }
+            const boundary = (await request('GET', '/api/state')).json().chatClearedAt;
+            await channels.drain();
+            assert.equal(posts.length, 1);
+            assert.equal((await request('GET', '/api/state')).json().chatClearedAt, boundary);
+            assert.equal((await thread.activeThread()).id, threadId);
+          } finally {
+            await channels.close();
+          }
+        }
+      });
 
       await t.test(
         'a context restart keeps chat, files and independent work and refuses stale requests',
