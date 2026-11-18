@@ -2859,6 +2859,16 @@ test('rich feedback redaction handles embedded JSON, identifying addresses, enco
     'Open "https://tenant.example.test/Personal%20Notes/log.txt" failed with HTTP 412.',
     'Rejected fixture%2fsecret-token and marta.vidal%40example.test.',
     'External record 00000000-1111-4222-8333-444444444444 was not found.',
+    '/media/private-owner/BACKUP/Medical Notes/scan.pdf does not exist.',
+    '/run/media/private-owner/USB/Tax Return/form.pdf does not exist.',
+    'Book a slot at calendly.com/synthetic-booker/30min please.',
+    'Profile www.example.com/in/synthetic-profile?ref=private-ref#private-anchor failed.',
+    'Redirect via unlisted.notatld/next?to=example.com/synthetic-hidden failed.',
+    'Mirror downloads.example.com:8443/synthetic-mirror?key=synthetic-query failed.',
+    'Open example.com/Private%20Records/Tax%20Return.pdf failed with HTTP 413.',
+    'Open example%2Ecom%2FReport%09synthetic-tab-record.pdf failed with HTTP 414.',
+    'Open example.com:8443/private?label=Case%20synthetic-query-record failed with HTTP 415.',
+    'Open example.com./private#Case%0Asynthetic-fragment-record failed with HTTP 416.',
     { type: 'image', data: 'synthetic-private-image' },
     {
       content: [
@@ -2905,6 +2915,20 @@ test('rich feedback redaction handles embedded JSON, identifying addresses, enco
     'Client Records',
     'Design Review',
     'Private Files',
+    'Medical Notes',
+    'Tax Return',
+    'BACKUP',
+    'synthetic-booker',
+    '30min',
+    'synthetic-profile',
+    'private-ref',
+    'private-anchor',
+    'synthetic-hidden',
+    'synthetic-mirror',
+    'synthetic-query',
+    'synthetic-tab-record',
+    'synthetic-query-record',
+    'synthetic-fragment-record',
     'fixture',
     'marta.vidal',
     '00000000-1111',
@@ -2936,8 +2960,24 @@ test('rich feedback redaction handles embedded JSON, identifying addresses, enco
     'HTTP 410',
     'HTTP 411',
     'HTTP 412',
+    'HTTP 413',
+    'HTTP 414',
+    'HTTP 415',
+    'HTTP 416',
+    'Book a slot at [url] please',
   ])
     assert.ok(encoded.includes(useful), useful);
+  const { timeZoneRegion } = await import('../src/shared/date-locale.ts');
+  const local = createFeedbackRedactor({
+    secrets: [],
+    profile: { names: [], region: timeZoneRegion('America/Los_Angeles') ?? undefined },
+  }).text('Call the clinic at (415) 555-0134 today.');
+  assert.ok(!local.includes('555-0134'), local);
+  assert.ok(local.includes('Call the clinic'), local);
+  const chained = createFeedbackRedactor({ secrets: [], profile: { names: [] } }).text(
+    `${'a.zz/'.repeat(6000)} then example.com:8443 and example.com./synthetic-chained?q=1 at example.com.`,
+  );
+  assert.ok(chained.endsWith(' then [host] and [url] at [host].'), chained.slice(-60));
   const concealedType = createFeedbackRedactor({ secrets: ['image'], profile: { names: [] } });
   assert.ok(
     !JSON.stringify(concealedType.value({ type: 'image', data: 'c3ludGhldGljIGltYWdl' })).includes(
@@ -4681,6 +4721,23 @@ test('composer preserves keyboard shortcuts, upload retries, previews and failed
         assert.equal(sends.at(-1).text, '**bold\\*star** next *literal*');
         const richVisible = await assertVisiblePaste(sends.at(-1), 'bold*star next *literal*');
         assert.equal(richVisible.querySelector('strong')?.textContent, 'bold*star');
+        for (const draft of [
+          'See \\![docs](https://example.test/docs)',
+          'See \\\\[docs](https://example.test/docs)',
+          'See \\\\**docs**',
+          'See \\\\<u>docs</u>',
+          'a\\~~~x~~ ~~y~~\\~b',
+          'a\\**x* *y*\\*b',
+          'a\\***x**\\*b',
+          '\\*\\**x*',
+          'a\\\u0060\u0060x\u0060\\\u0060b',
+          '| a          |\n| ---------- |\n| b\\\\\\\\<br>c |',
+        ]) {
+          await act(async () => replaceText(draft));
+          await submit();
+          assert.equal(sends.at(-1).text.trimEnd(), draft);
+          assert.deepEqual(parseComposerMarkdown(sends.at(-1).text), parseComposerMarkdown(draft));
+        }
         await act(async () => replaceText('| label | value |\n| --- | --- |\n| first | second |'));
         await pasteAtEnd('table tr:last-child td:first-child p', 'A|B\\|C\nD');
         await submit();
@@ -6647,7 +6704,8 @@ test('chat reloads older history after hidden confirmations exceed the ID window
         await settle(() => hasDraft() && !document.querySelector('.composer-reply'));
         assert.equal(JSON.parse(localStorage.getItem(draftKey)).reply, null);
         await submit();
-        await settle(() => document.querySelector('[role="alert"]')?.textContent.includes('may have been sent'));
+        await settle(() => hasDraft() &&
+          document.querySelector('[role="alert"]')?.textContent.includes('may have been sent'));
         assert.equal(sends.length, 2);
         assert.ok(hasDraft());
         await submit();
@@ -7271,7 +7329,7 @@ test('a verified app connection opens chat only on request and keeps private det
       const url = 'https://example.test/sign-in';
       const hash = await setupLinkHash(url);
       const attempt = 'A'.repeat(43);
-      let connected = false, statusReads = 0;
+      let connected = false, statusReads = 0, failure;
       const requests = [], captured = [];
       const app = { slug: 'gmail', name: privateName, status: 'disconnected', triggersEnabled: false, direct: true };
       globalThis.fetch = async (path, options = {}) => {
@@ -7279,7 +7337,7 @@ test('a verified app connection opens chat only on request and keeps private det
         if (path === '/api/apps') return Response.json(connected ? [{ ...app, status: 'connected', connectionId: 'private-connection' }] : []);
         if (path === '/api/apps/catalog') return Response.json([app]);
         if (path === '/api/apps/gmail/connect') return Response.json({ url, attempt });
-        if (path === '/api/apps/setup-status') { statusReads++; return Response.json({ completed: connected ? [hash] : [], apps: [{ hash, slug: 'gmail', name: privateName, available: true }] }); }
+        if (path === '/api/apps/setup-status') { statusReads++; return Response.json({ completed: connected ? [hash] : [], apps: [{ hash, slug: 'gmail', name: privateName, available: !failure, ...(failure ? { error: failure } : {}) }] }); }
         throw new Error('Unexpected fixture request: ' + path);
       };
       setRequestAccount('synthetic-owner');
@@ -7331,6 +7389,26 @@ test('a verified app connection opens chat only on request and keeps private det
         assert.equal(window.location.pathname, '/');
         assert.equal(captured.filter(item => item.event === 'app_connection_chat_requested').length, 1);
         assert.equal(requests.filter(([path]) => path === '/api/messages').length, 0);
+        await act(async () => root.render(null));
+        pageDataCache.clear();
+        connected = false;
+        statusReads = 0;
+        window.history.replaceState(null, '', '/apps');
+        await act(async () => root.render(createElement(Apps, { key: 'failed-sign-in', onAsk() {} })));
+        await settle(() => document.querySelector('[data-connect-service="gmail"]'));
+        await act(async () => document.querySelector('[data-connect-service="gmail"]').click());
+        await settle(() => statusReads > 0);
+        failure = 'Sign-in could not finish: invalid_request: Synthetic refusal';
+        await act(async () => channels.at(-1).onmessage({ data: { service: 'gmail', attempt, connection: 'failed' } }));
+        await settle(() => document.body.textContent.includes(failure));
+        await act(async () => root.render(null));
+        pageDataCache.clear();
+        statusReads = 0;
+        failure = 'Sign-in could not finish: Synthetic polled refusal';
+        await act(async () => root.render(createElement(Apps, { key: 'polled-failure', onAsk() {} })));
+        await settle(() => document.querySelector('[data-connect-service="gmail"]'));
+        await act(async () => document.querySelector('[data-connect-service="gmail"]').click());
+        await settle(() => document.body.textContent.includes(failure));
       } finally { await act(async () => root.unmount()); dom.window.close(); }
     `,
   });

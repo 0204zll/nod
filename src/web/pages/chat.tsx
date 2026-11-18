@@ -1,5 +1,13 @@
 import { Tooltip } from '../components/tooltip';
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  Fragment,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type SetStateAction,
+} from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import { ArrowDown, Check, CornerUpLeft, LoaderCircle, Repeat } from '../components/icons';
 import type {
@@ -367,7 +375,11 @@ export function Chat({
       ),
     [connections],
   );
-  const [text, setText] = useState('');
+  const [text, setDraftText] = useState('');
+  function setText(value: SetStateAction<string>) {
+    setDraftText(value);
+    setReplyNotice('');
+  }
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const [recovering, setRecovering] = useState(false);
@@ -379,7 +391,6 @@ export function Chat({
   const [replyTo, setReplyTo] = useState<ComposerReply | null | undefined>(null);
   const [replyNotice, setReplyNotice] = useState('');
   const [unavailableQuestions, setUnavailableQuestions] = useState<ReadonlySet<string>>(new Set());
-  useEffect(() => setReplyNotice(''), [text, state.threadId]);
   const taskReply = useRef<string | null>(null);
   const [focusTarget, setFocusTarget] = useState<{
     id: string;
@@ -712,10 +723,12 @@ export function Chat({
   const working = live.some((item) => !item.background);
   const lastMessage = allMessages.at(-1);
   const beforeLast = allMessages.at(-2);
+  const failureKind = lastMessage?.streamId?.split(':')[0];
+  const modelAdvice = failureKind !== 'offline-failure' || Boolean(state.configuration.modelIssue);
   const modelFailed =
     lastMessage?.role === 'assistant' &&
     lastMessage.id !== recovered &&
-    lastMessage.streamId?.startsWith('model-failure:') &&
+    (failureKind === 'model-failure' || failureKind === 'offline-failure') &&
     beforeLast?.role === 'user' &&
     beforeLast.turnId === lastMessage.turnId;
   const failedRequest =
@@ -2272,7 +2285,7 @@ export function Chat({
                           ...(task.kind
                             ? { kind: task.kind === 'ongoing' ? 'ongoing' : 'immediate' }
                             : {}),
-                          origin: task.origin === 'common' ? 'common' : 'learned',
+                          origin: task.origin ?? 'learned',
                           position,
                         });
                         void send(task.title, [], null, 'task_card');
@@ -2526,15 +2539,24 @@ export function Chat({
             </Notice>
           )}
           {state.configuration.llmReady &&
+            state.configuration.modelChecking &&
+            !state.configuration.modelIssue && (
+              <div className="chat-model-check" role="status">
+                <LoaderCircle size={14} className="spin" aria-hidden="true" />
+                Checking your model connection…
+              </div>
+            )}
+          {state.configuration.llmReady &&
             !state.chatRecovery &&
             (state.configuration.modelIssue ||
-              (modelFailed && (failedRequest || state.configuration.modelAlternative))) && (
+              (modelFailed &&
+                (failedRequest || (modelAdvice && state.configuration.modelAlternative)))) && (
               <Notice kind="info">
                 {state.configuration.modelIssue
-                  ? `Your model’s last request failed: ${state.configuration.modelIssue.reason.replace(/(?<![.!?])$/, '.')}`
+                  ? `Your model connection needs attention: ${state.configuration.modelIssue.reason.replace(/(?<![.!?])$/, '.')}`
                   : 'Your model’s last request failed.'}
                 <span className="notice-actions">
-                  {state.configuration.modelAlternative && (
+                  {modelAdvice && state.configuration.modelAlternative && (
                     <Button
                       type="button"
                       size="sm"
@@ -2556,7 +2578,7 @@ export function Chat({
                       Try again
                     </Button>
                   )}
-                  <a href="/settings/models">{appPages['/settings/models']}</a>
+                  {modelAdvice && <a href="/settings/models">{appPages['/settings/models']}</a>}
                 </span>
               </Notice>
             )}

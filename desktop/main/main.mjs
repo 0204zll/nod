@@ -50,8 +50,13 @@ import { registerArtifactFileHandlers } from './artifact-file-handlers.mjs';
 import { saveArtifactDownload } from './downloads.mjs';
 import { createDesktopLifecycle, startupErrorDetails } from './lifecycle.mjs';
 import { createMacEncryption } from './mac-encryption.mjs';
-import { createDesktopUpdater, createUpdateSource, startDesktopUpdateChecks } from './updates.mjs';
-import { startWindowsInstall } from './windows-update.mjs';
+import {
+  createDesktopUpdater,
+  createUpdateSource,
+  macInstallerRunning,
+  startDesktopUpdateChecks,
+} from './updates.mjs';
+import { clearInstalledWindowsUpdates, startWindowsInstall } from './windows-update.mjs';
 import { appOpenPath } from './app-links.mjs';
 import { trustSystemCertificates } from './system-certificates.mjs';
 import { opensAtLogin, setOpenAtLogin } from './login-item.mjs';
@@ -208,6 +213,7 @@ let nativePreferencesPending = false;
 let guidedStartup = false;
 let quitting = false;
 let installingUpdate = false;
+let macInstallerBusy = false;
 let updateSource;
 let updates;
 let checkingUpdates;
@@ -216,6 +222,7 @@ let updateRestartConfirmed = false;
 let updatePhase = 'idle';
 let updateProgress;
 let updateFailed = false;
+let installUpdateOnQuit = true;
 let dismissedUpdateVersion;
 let pendingPreload;
 let stopUpdateChecks;
@@ -2243,6 +2250,19 @@ async function rememberState(window) {
     .catch(() => {});
 }
 
+async function openedDuringUpdateRestart() {
+  if (process.platform !== 'darwin' || !app.isPackaged || testInstall) return false;
+  const running = await macInstallerRunning('dev.nod.desktop.ShipIt').catch(async (error) => {
+    await updateEvent('installer-check-failed', { code: error.code, signal: error.signal });
+  });
+  macInstallerBusy = running !== false;
+  if (!running) return false;
+  const version = await resumeRead.then((text) => JSON.parse(text).version).catch(() => undefined);
+  const restart = typeof version === 'string' && version !== app.getVersion();
+  await updateEvent('installer-running', { restart });
+  return restart;
+}
+
 async function resumeState() {
   const text = await resumeRead;
   if (text === undefined) return;
@@ -2312,7 +2332,7 @@ async function confirmRestart() {
   return response === 0 && !quitting;
 }
 
-async function installUpdate() {
+async function installUpdate({ relaunch = true } = {}) {
   const version = updates?.ready?.version;
   if (process.platform === 'win32') {
     await updateEvent('install-started', { method: 'windows-installer', version });
@@ -2321,6 +2341,7 @@ async function installUpdate() {
       appPath: process.execPath,
       pid: process.pid,
       systemRoot: process.env.SystemRoot,
+      relaunch,
     });
     await updateEvent('installer-launched', { version });
     installingUpdate = true;
@@ -2351,6 +2372,24 @@ async function installUpdate() {
     } catch (error) {
       failed(error);
     }
+  });
+}
+
+async function quitApp() {
+  await quit(async () => {
+    if (installUpdateOnQuit && process.platform === 'win32' && updates?.ready) {
+      try {
+        await installUpdate({ relaunch: false });
+        return;
+      } catch (error) {
+        await updateEvent('error', {
+          phase: 'install-on-quit',
+          code: error.code,
+          message: error.message,
+        });
+      }
+    }
+    app.exit();
   });
 }
 
@@ -2725,12 +2764,16 @@ async function importRuntime() {
   return status;
 }
 
-if (!app.requestSingleInstanceLock()) app.quit();
+if (!app.requestSingleInstanceLock()) app.exit();
 else if (process.argv.includes('--quit')) app.exit();
+else if (await openedDuringUpdateRestart()) app.exit();
 else {
   if (testInstall) process.on('SIGTERM', () => app.quit());
   app.on('second-instance', (_event, argv) => {
-    if (argv.includes('--quit')) return void app.quit();
+    if (argv.includes('--quit')) {
+      installUpdateOnQuit = false;
+      return void app.quit();
+    }
     const path = argv.map((value) => appOpenPath(value, appPages)).find(Boolean);
     if (path) pendingAppPath = path;
     showEngine();
@@ -2741,9 +2784,7 @@ else {
     if (installingUpdate) return;
     event.preventDefault();
     if (quitting) return;
-    void quit(() => app.exit()).catch(
-      (error) => void writeDiagnostic(error.message).catch(() => {}),
-    );
+    void quitApp().catch((error) => void writeDiagnostic(error.message).catch(() => {}));
   });
   void app
     .whenReady()
@@ -2793,7 +2834,8 @@ else {
       if (app.isPackaged && !testInstall && ['darwin', 'win32'].includes(process.platform)) {
         const { nodBuild } = JSON.parse(await readFile(join(desktopRoot, 'package.json'), 'utf8'));
         const windows = process.platform === 'win32';
-        if (windows) await rm(windowsUpdates, { recursive: true, force: true }).catch(() => {});
+        if (windows)
+          await clearInstalledWindowsUpdates(windowsUpdates, app.getVersion()).catch(() => {});
         updateSource = createUpdateSource({ sourceUrl: nodBuild?.updateSourceUrl });
         updates = createDesktopUpdater({
           source: updateSource,
@@ -2891,6 +2933,7 @@ else {
         stopUpdateChecks = startDesktopUpdateChecks({
           check: () => checkForUpdates(false),
           powerMonitor,
+          defer: macInstallerBusy,
         });
       }
       nativeTheme.on('updated', publishPreferences);

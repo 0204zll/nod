@@ -44,6 +44,7 @@ import {
   type Workspace,
 } from '../ports/computer.ts';
 import { fileBytes } from '../shared/files.ts';
+import { localeRegion, timeZoneRegion } from '../shared/date-locale.ts';
 import type { ObservationProvider, ObservationSource } from '../ports/proactivity.ts';
 import type { IntegrationProvider } from '../ports/integrations.ts';
 import { hasWorkspaceFiles, saveIntegrationFiles } from './integration-files.ts';
@@ -1902,9 +1903,10 @@ async function initializeApplication(
           ? [connection.accountName]
           : [],
       ),
-      region: preferences.locale
-        ? new Intl.Locale(preferences.locale).maximize().region
-        : undefined,
+      region:
+        localeRegion(preferences.locale) ??
+        timeZoneRegion(preferences.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone) ??
+        undefined,
     };
   };
   let feedbackProfileRead: ReturnType<typeof ownerProfile> | undefined;
@@ -2181,6 +2183,7 @@ async function initializeApplication(
           ? `Your ${other.label} connection is also set up: you can switch to it in ${appPages['/settings/models']}.`
           : undefined;
       },
+      desktopRuntime: desktopMode,
       taskClassification: true,
       observeTurn: (turnId, operation) =>
         analytics
@@ -2937,6 +2940,7 @@ async function initializeApplication(
         model: adapters.model.name,
         llmReady: adapters.model.configured,
         modelReconnect: adapters.model.reconnect === true,
+        ...(adapters.models?.current.checking ? { modelChecking: true } : {}),
         ...(adapters.model.issue ? { modelIssue: adapters.model.issue } : {}),
         ...(alternative ? { modelAlternative: alternative } : {}),
         integrationsReady: adapters.integrations.configured,
