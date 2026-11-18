@@ -134,6 +134,10 @@ const fileVersion = (info: BigIntStats) =>
   createHash('sha256')
     .update([info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs].join(':'))
     .digest('hex');
+const changedRead = (path: string) =>
+  Object.assign(new IntegrationError(`${path} changed after this file read was checked.`, 409), {
+    notRun: true,
+  });
 const keepOutLimit = 100;
 
 type Turn = { turnId: string; threadId: string };
@@ -614,7 +618,7 @@ export function createLocalFiles(
         throw new IntegrationError(`${path} changed while Nod was opening it.`);
       const checkVersion = async () => {
         if (version && fileVersion(await file.stat({ bigint: true })) !== version)
-          throw new IntegrationError(`${path} changed after this file read was checked.`, 409);
+          throw changedRead(path);
       };
       await checkVersion();
       const size = opened.size;
@@ -675,8 +679,7 @@ export function createLocalFiles(
     const path = await real(input.path!);
     if (action === 'LOCAL_FILES_READ' || action === 'LOCAL_FILES_IMPORT') {
       const version = fileVersion(await lstat(path, { bigint: true }));
-      if (input.version && input.version !== version)
-        throw new IntegrationError(`${path} changed after this file read was checked.`, 409);
+      if (input.version && input.version !== version) throw changedRead(path);
       return { ...input, path, version };
     }
     return { ...input, path };
@@ -703,6 +706,13 @@ export function createLocalFiles(
       return resolved;
     };
     const target = async (path: string) => bound(await resolve(path), path);
+    if ((action === 'LOCAL_FILES_READ' || action === 'LOCAL_FILES_IMPORT') && !input.version) {
+      await target(input.path);
+      throw Object.assign(
+        new IntegrationError('This file read has no checked version. Request a new read.', 409),
+        { notRun: true },
+      );
+    }
     const destination = async (path: string, source?: string) => {
       const resolved = await target(path);
       if (

@@ -4754,6 +4754,45 @@ test(
         },
       );
 
+      await t.test('completed app approvals keep their result ordering', async () => {
+        for (const source of ['user', 'schedule'] as const) {
+          const turn =
+            source === 'user'
+              ? await begin('Read the synthetic app record.')
+              : await attachSchedule(await begin('Read the synthetic app record.', { source }));
+          const args = email('anna@example.test');
+          const original = await propose(turn, 'GMAIL_SEND_EMAIL', args);
+          const first = '00000000-0000-4000-8000-000000000001';
+          const second = '00000000-0000-4000-8000-000000000002';
+          const result = { id: 'original-synthetic-result' };
+          await db.pool.query(
+            "UPDATE approvals SET id=$2,status='completed',result=$3::jsonb WHERE id=$1",
+            [original, first, result],
+          );
+          try {
+            await db.pool.query(
+              "INSERT INTO approvals(id,owner_id,thread_id,turn_id,action,args,status,source_message_id,confirmation_message_id) SELECT $2,owner_id,thread_id,turn_id,action,args,'declined',source_message_id,confirmation_message_id FROM approvals WHERE id=$1",
+              [first, second],
+            );
+            let repeats = 0;
+            assert.deepEqual(
+              await approvals.request(turn, 'GMAIL_SEND_EMAIL', args, {
+                allowed: true,
+                run: async () => {
+                  repeats++;
+                },
+              }),
+              result,
+            );
+            assert.equal(repeats, 0);
+          } finally {
+            await db.pool.query('DELETE FROM approvals WHERE id=ANY($1::uuid[])', [
+              [first, second],
+            ]);
+            await finish(turn.turnId, 'succeeded');
+          }
+        }
+      });
       await t.test('local file observations keep refusal fences across file versions', async () => {
         for (const source of ['user', 'schedule'] as const)
           for (const action of ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT'])

@@ -411,11 +411,11 @@ export async function createApprovals(
       let previous = (
         background
           ? await client.query(
-              "SELECT * FROM approvals WHERE turn_id=ANY($1::uuid[]) AND owner_id=$2 AND action=$3 AND (args=$4::jsonb OR ($5::boolean AND status<>'completed' AND args-'version'=$4::jsonb-'version')) AND status<>'expired' ORDER BY (status='completed'),id LIMIT 1",
+              "SELECT * FROM approvals WHERE turn_id=ANY($1::uuid[]) AND owner_id=$2 AND action=$3 AND (args=$4::jsonb OR ($5::boolean AND status<>'completed' AND args-'version'=$4::jsonb-'version')) AND status<>'expired' ORDER BY ($5::boolean AND status='completed'),id LIMIT 1",
               [chain.map((item) => item.id), ownerId, action, snapshot, fileObservation],
             )
           : await client.query(
-              "SELECT * FROM approvals WHERE thread_id=$1 AND owner_id=$2 AND source_message_id=$3 AND action=$4 AND (args=$5::jsonb OR ($6::boolean AND status<>'completed' AND args-'version'=$5::jsonb-'version')) AND status<>'expired' ORDER BY (status='completed'),id LIMIT 1",
+              "SELECT * FROM approvals WHERE thread_id=$1 AND owner_id=$2 AND source_message_id=$3 AND action=$4 AND (args=$5::jsonb OR ($6::boolean AND status<>'completed' AND args-'version'=$5::jsonb-'version')) AND status<>'expired' ORDER BY ($6::boolean AND status='completed'),id LIMIT 1",
               [turn.threadId, ownerId, authorMessageId, action, snapshot, fileObservation],
             )
       ).rows[0];

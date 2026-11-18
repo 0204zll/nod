@@ -399,7 +399,11 @@ test(
               async prompt(text) {
                 prompts.set(options.turnId, text);
                 const tool = (name: string) => options.tools.find((item) => item.name === name)!;
-                if (repeatAfterConfirm && text.includes('executed once by the trusted worker')) {
+                if (
+                  repeatAfterConfirm &&
+                  (text.includes('executed once by the trusted worker') ||
+                    text.includes('confirmed did not run, so nothing was done'))
+                ) {
                   const calls = repeatAfterConfirm;
                   repeatAfterConfirm = undefined;
                   for (const call of Array.isArray(calls) ? calls : [calls])
@@ -5323,6 +5327,56 @@ test(
           });
           assert.equal(letIn.statusCode, 200, letIn.body);
           assert.ok(!letIn.json().paths.includes(join(folder, 'sorted')));
+        },
+      );
+      await t.test(
+        'changed and legacy local reads return no result and permit a fresh checked read',
+        async () => {
+          await request('PATCH', '/api/preferences', { localFilesEnabled: true });
+          const folder = await mkdtemp(join(localHome, 'changed-read-'));
+          for (const action of ['read', 'import'])
+            for (const legacy of [false, true]) {
+              const path = join(folder, `${randomUUID()}.txt`);
+              await writeFile(path, 'Original synthetic bytes');
+              const text = `Read the synthetic file ${randomUUID()}`;
+              const opening = await propose(action, { path }, 'files', text);
+              const [approval] = await approvalsFor(opening);
+              if (legacy)
+                await pool.query("UPDATE approvals SET args=args-'version' WHERE id=$1", [
+                  approval.id,
+                ]);
+              await writeFile(path, 'Current synthetic bytes');
+              const beforeFiles = new Set(workspaceFiles.keys());
+              asked.add(text);
+              repeatAfterConfirm = { tool: 'files', action, args: { path } };
+              const accepted = await request('POST', '/api/messages', {
+                text: 'Yes',
+                replyToMessageId: approval.confirmation_message_id,
+                approvalAnswer: { approvalId: approval.id, approved: true },
+              });
+              assert.equal(accepted.statusCode, 200, accepted.body);
+              const resumed = accepted.json().turnId;
+              await waitFor(resumed, 'succeeded');
+              const [saved] = await approvalsFor(opening);
+              assert.equal(saved.status, 'expired');
+              assert.match(saved.result.error, legacy ? /no checked version/ : /changed after/);
+              assert.doesNotMatch(
+                JSON.stringify(saved.result),
+                /Original synthetic bytes|Current synthetic bytes/,
+              );
+              assert.equal(repeatAfterConfirm, undefined);
+              if (action === 'read')
+                assert.ok(JSON.stringify(results.get(resumed)).includes('Current synthetic bytes'));
+              else {
+                const imported = [...workspaceFiles.keys()].filter((key) => !beforeFiles.has(key));
+                assert.equal(imported.length, 1);
+                assert.equal(
+                  Buffer.from(workspaceFiles.get(imported[0]!)!).toString(),
+                  'Current synthetic bytes',
+                );
+              }
+              assert.deepEqual(await approvalsFor(resumed), []);
+            }
         },
       );
       await t.test('confirmed local reads observe edits in the same request', async () => {

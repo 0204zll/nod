@@ -1116,10 +1116,7 @@ test('local file reads refuse a write that occurs before the read completes', as
     },
   );
   try {
-    await assert.rejects(
-      files.execute('LOCAL_FILES_READ', checked),
-      /changed after this file read/,
-    );
+    await assert.rejects(files.execute('LOCAL_FILES_READ', checked), { notRun: true });
   } finally {
     intercepted.mock.restore();
   }
@@ -1213,10 +1210,11 @@ test('local files stay in home, skip secrets and kept-out folders, and never ove
       const original = await lstat(path);
       const checked = await files.prepare(action, { path });
       assert.ok('version' in checked);
+      await assert.rejects(files.execute(action, { path }), { notRun: true });
       await writeFile(path, 'new');
       await utimes(path, original.atime, original.mtime);
-      await assert.rejects(files.prepare(action, checked), /changed after this file read/);
-      await assert.rejects(files.execute(action, checked), /changed after this file read/);
+      await assert.rejects(files.prepare(action, checked), { notRun: true });
+      await assert.rejects(files.execute(action, checked), { notRun: true });
       const current = await files.prepare(action, { path });
       assert.ok('version' in current);
       assert.notEqual(current.version, checked.version);
@@ -1329,7 +1327,10 @@ test('local files stay in home, skip secrets and kept-out folders, and never ove
       files.execute('LOCAL_FILES_READ', { path: join(shared, 'away', 'secret.txt') }),
       (error: Error) => !error.message.includes(outside),
     );
-    const imported = (await files.execute('LOCAL_FILES_IMPORT', { path: latin })) as {
+    const imported = (await files.execute(
+      'LOCAL_FILES_IMPORT',
+      await files.prepare('LOCAL_FILES_IMPORT', { path: latin }),
+    )) as {
       file: { name: string; bytes: Uint8Array };
     };
     assert.equal(imported.file.name, 'latin.txt');
@@ -1466,7 +1467,12 @@ test('local files stay in home, skip secrets and kept-out folders, and never ove
     ] as const)
       await assert.rejects(files.prepare(action, args), /keep out/, action);
     assert.equal(
-      ((await files.execute('LOCAL_FILES_READ', { path: note })) as { text: string }).text,
+      (
+        (await files.execute(
+          'LOCAL_FILES_READ',
+          await files.prepare('LOCAL_FILES_READ', { path: note }),
+        )) as { text: string }
+      ).text,
       '1 two two',
     );
     await files.keepOut(turn, join(shared, 'Later', 'New'), pool);
