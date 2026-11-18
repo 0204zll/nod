@@ -87,7 +87,7 @@ import { fileBytes } from '../src/shared/files.ts';
 import { connectionGroups } from '../src/web/lib/secondary-pages.ts';
 import { fakeComputer, fakeExecution, fakeWorkspace } from './runtime-fixtures.ts';
 import { appAccessPath, bundledApps, loadAppCatalog } from '../src/server/app-catalog.ts';
-import { createMcpRegistry } from '../src/server/mcp-registry.ts';
+import { createMcpRegistry, endpointKey } from '../src/server/mcp-registry.ts';
 import { appAccessSchema } from '../src/server/app-access.ts';
 import { checkAppContract } from '../scripts/check-apps.ts';
 import { createApp, type CreateAppOptions } from '../scripts/create-app.ts';
@@ -14324,6 +14324,10 @@ test('the MCP catalog sync keeps only connectable servers and survives an outage
       ],
     );
     assert.equal(first.list().find((server) => server.slug === 'named')?.name, 'Roboflow Official');
+    assert.equal(
+      endpointKey('https://Good.fixtures.io/mcp/'),
+      endpointKey('https://good.fixtures.io/mcp'),
+    );
     online = false;
     const second = createMcpRegistry({
       file,

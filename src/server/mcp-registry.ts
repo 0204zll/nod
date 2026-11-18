@@ -60,6 +60,11 @@ function brief(text: string) {
   return text.replace(/\s+/g, ' ').trim().slice(0, 120);
 }
 
+export function endpointKey(value: string) {
+  const url = URL.parse(value);
+  return url ? `${url.host.toLowerCase()}${url.pathname.replace(/\/+$/, '')}` : value;
+}
+
 export function suggestionFrom(raw: unknown): McpSuggestion | undefined {
   const parsed = entrySchema.safeParse(
     raw && typeof raw === 'object' && 'attributes' in raw

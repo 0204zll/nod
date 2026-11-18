@@ -92,7 +92,7 @@ import {
 import { createDiscoveredOAuth } from '../providers/discovered/oauth.ts';
 import { createDiscoveredConnections } from './discovered-connections.ts';
 import { bundledApps } from './app-catalog.ts';
-import { createMcpRegistry } from './mcp-registry.ts';
+import { createMcpRegistry, endpointKey } from './mcp-registry.ts';
 import { createLocalFiles, isLocalFilesAction } from './local-files.ts';
 import { createAppGrantVault } from './vault-app-grants.ts';
 import { createDockerWorkspace } from '../providers/docker/index.ts';
@@ -2963,7 +2963,15 @@ async function initializeApplication(
   const mcpRegistryStarted = options.workers !== false ? mcpRegistry.start() : Promise.resolve();
   app.get('/api/apps/mcp/registry', async () => {
     await Promise.race([mcpRegistryStarted, delay(5000, undefined, { ref: false })]);
-    return { servers: mcpRegistry.list() };
+    const served = new Set(
+      [
+        ...[...bundledApps.values()].map((app) => app.endpoint),
+        ...(await discovered.analyticsConnections()).map((connection) => connection.endpoint),
+      ].flatMap((endpoint) => (endpoint ? [endpointKey(endpoint)] : [])),
+    );
+    return {
+      servers: mcpRegistry.list().filter((server) => !served.has(endpointKey(server.endpoint))),
+    };
   });
   personal.registerRoutes(app);
   onboardingSuggestions.registerRoutes(app);
