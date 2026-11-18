@@ -11,6 +11,8 @@ import { Steps } from '@astrojs/starlight/components';
 
 While Vault is empty, it lists the ways to fill it: import passwords, add a login or a card, or sign in to a website.
 
+If you stop the task while a private form waits for its submit button, Nod stops the private entry too. This applies to saved logins, private forms and card entry. A stopped private operation is not repeated. Check the website before you start a new attempt.
+
 ## Add a login
 
 <Steps>
@@ -72,6 +74,8 @@ sequenceDiagram
 ```
 
 Nod picks the account, the fields and the submit button. The server enters and submits in one private step that Nod can't watch, then Nod carries on with the live page.
+
+Some websites disable the submit button while they check a field. Nod waits up to 30 seconds for the button to become enabled. If it stays disabled, the page changes or the browser closes, Nod stops the private step. It does not activate the disabled control or repeat the submission. A failed private entry can keep the page unreadable until you reload it.
 
 | Item               | What the model receives                                                                |
 | ------------------ | -------------------------------------------------------------------------------------- |
