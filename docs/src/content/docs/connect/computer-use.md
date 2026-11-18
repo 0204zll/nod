@@ -51,7 +51,7 @@ Nod refuses these, without a judgment call. It recognizes apps by their ID and p
 
 - Terminals and apps that run scripts or commands, such as Terminal, iTerm, Script Editor, Automator, Shortcuts, Raycast, Windows Terminal, Command Prompt, PowerShell and GNOME Terminal.
 - System settings and security, such as System Settings, Keychain Access, Activity Monitor, Disk Utility and macOS security prompts, Windows Settings, Control Panel, Registry Editor and Task Manager, and GNOME or KDE Settings, Passwords and Keys, and Disks.
-- File managers: Finder, File Explorer, Files (Nautilus) and Dolphin. Nod works with your files only through [local files](/connect/local-files/), with its protections.
+- File managers: Finder, File Explorer, Files (Nautilus) and Dolphin. Nod works with your files only through [local files](/connect/local-files/), with its protections. An app Nod may use can still open and save files through its own Open and Save panels, which local files would refuse; [keep Nod out of that app](#keep-nod-out-of-an-app) if that matters.
 - Password managers, such as Passwords and 1Password, and crypto wallets.
 - Nod itself.
 - On macOS, the Apple menu, with Restart, Shut Down, Log Out and System Settings, and each app's own menu, with Services. Nod never shows them to the model.

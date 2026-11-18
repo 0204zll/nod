@@ -328,15 +328,17 @@ export function createComputerHelper({
     awake();
   }
 
-  async function giveBack(previous, pid, window) {
-    if (!previous) return;
-    const front = await frontmost();
-    if (front?.pid !== pid || (window && front.id !== window)) return;
-    if (previous.pid === presence.ownPid) return presence.focusSelf();
-    if (previous.window)
-      await run(['focus-window', '--app', previous.app, '--window-id', previous.window]).catch(
-        () => {},
-      );
+  function giveBack(previous, pid, window) {
+    return steps.exit(async () => {
+      if (!previous) return;
+      const front = await frontmost();
+      if (front?.pid !== pid || (window && front.id !== window)) return;
+      if (previous.pid === presence.ownPid) return presence.focusSelf();
+      if (previous.window)
+        await run(['focus-window', '--app', previous.app, '--window-id', previous.window]).catch(
+          () => {},
+        );
+    });
   }
 
   async function release(handover = false) {

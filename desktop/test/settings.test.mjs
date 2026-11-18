@@ -8712,7 +8712,14 @@ const input = fs.readFileSync(0, 'utf8');
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, input }) + '\\n');
 const answers = ${JSON.stringify(answers)};
 const key = Object.keys(answers).find((prefix) => args.join(' ').startsWith(prefix));
-process.stdout.write(JSON.stringify(key ? answers[key] : { ok: true, data: {} }));
+let answer = key ? answers[key] : { ok: true, data: {} };
+if (Array.isArray(answer)) {
+  const counter = ${JSON.stringify(log)} + '.' + key.replaceAll(' ', '_');
+  const seen = fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0;
+  fs.writeFileSync(counter, String(seen + 1));
+  answer = answer[Math.min(seen, answer.length - 1)];
+}
+process.stdout.write(JSON.stringify(answer));
 `,
     { mode: 0o755 },
   );
@@ -8817,6 +8824,43 @@ test('computer use takes focus only after a refusal before delivery, and only wh
   assert.deepEqual((await desktop.calls()).slice(before), [
     'press cmd+n --app Mail --window-id w-1',
   ]);
+});
+
+test('computer use Stop for all work still gives focus back to the owner window', async (t) => {
+  const notes = {
+    id: 'w-2',
+    pid: process.pid,
+    app_name: 'TextEdit',
+    is_focused: true,
+    bounds: { x: 0, y: 0, width: 300, height: 200 },
+  };
+  const mail = { ...mailWindow.data[0], is_focused: false };
+  const desktop = await fakeDesktop(t, {
+    'list-windows --app': mailWindow,
+    'list-windows': [
+      { ok: true, data: [notes, mail] },
+      {
+        ok: true,
+        data: [
+          { ...notes, is_focused: false },
+          { ...mail, is_focused: true },
+        ],
+      },
+    ],
+    'press cmd+n': refused('STALE_REF', "The named window's exact focus could not be confirmed"),
+  });
+  const show = desktop.presence.show;
+  desktop.presence.show = (state) => {
+    show(state);
+    if (!state.background && !state.waiting) void desktop.helper.cancel();
+  };
+  await assert.rejects(
+    desktop.helper.request({ op: 'key', keys: 'cmd+n', app: 'Mail', window: 'w-1' }),
+    /STOPPED/,
+  );
+  const calls = await desktop.calls();
+  assert.ok(calls.includes('focus-window --app TextEdit --window-id w-2'), calls.join('\n'));
+  assert.ok(!calls.includes('press cmd+n --app Mail --window-id w-1 --headed'));
 });
 
 test('computer use Stop for all work refuses later commands of a step already running', async (t) => {
