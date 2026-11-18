@@ -1620,6 +1620,13 @@ test(
               step: { action: 'type', text: 'synthetic\r' },
               controls: [{ role: 'textbox', name: ' ' }],
             },
+            { step: { action: 'press', key: 'Shift+Enter' }, controls, submits: 'unknown' },
+            { step: { action: 'press', key: 'Control+Enter' }, controls },
+            { step: { action: 'press', key: 'NumpadEnter' }, controls },
+            { step: { action: 'press', key: 'Return' }, controls },
+            { step: { action: 'press', key: 'Enter+Shift' }, controls },
+            { step: { action: 'press', key: '\r' }, controls },
+            { step: { action: 'press', key: '\n' }, controls },
           ];
           try {
             for (const entry of cases) {
@@ -1640,6 +1647,8 @@ test(
               assert.deepEqual(await approvalsFor(response.json().turnId), []);
               assert.equal(seen.length, before);
               assert.match(batchErrors.slice(errors).join('\n'), /target is not identified/);
+              if (entry.step.action === 'type')
+                assert.match(batchErrors.slice(errors).join('\n'), /typed line break/);
             }
             for (const entry of [
               {

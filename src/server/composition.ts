@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { isEnterKey } from '../shared/browser-keys.ts';
 import { z } from 'zod';
 import {
   appConfirmation,
@@ -2389,18 +2390,24 @@ async function initializeApplication(
         );
         const form = request.page.submits;
         const knownForm = typeof form === 'object' && form.method.trim() && form.to.trim();
-        const click = request.step.action === 'click';
         const enter =
-          (request.step.action === 'press' && request.step.key === 'Enter') ||
+          (request.step.action === 'press' && isEnterKey(request.step.key)) ||
           (request.step.action === 'type' && /[\r\n]/.test(request.step.text ?? ''));
         if (
           !namedControl &&
           ((request.step.action === 'click' && (request.step.x !== undefined || !knownForm)) ||
             (enter && !knownForm))
-        )
+        ) {
+          const action =
+            request.step.action === 'click'
+              ? 'click'
+              : request.step.action === 'type'
+                ? 'typed line break'
+                : 'Enter press';
           throw new Error(
-            `The ${click ? 'click' : 'Enter'} target is not identified. Inspect a fresh snapshot or screenshot and choose the actual control. Do not ask the owner to approve an unidentified ${click ? 'click' : 'Enter press'}.`,
+            `The ${action} target is not identified. Inspect a fresh snapshot or screenshot and choose the actual control. Do not ask the owner to approve an unidentified ${action}.`,
           );
+        }
         if (request.subagent) return 'refused';
         const visible =
           turn.browserId &&

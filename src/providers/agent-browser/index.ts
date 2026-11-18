@@ -20,6 +20,7 @@ import type {
 } from '../../ports/computer.ts';
 import { BrowserActionError } from '../../ports/computer.ts';
 import { fileBytes } from '../../shared/files.ts';
+import { isEnterKey } from '../../shared/browser-keys.ts';
 import type { BrowserHandoffInput } from '../../shared/browser-handoff.ts';
 import { threadIdentity } from '../../ports/thread-identity.ts';
 import { runProcess, serviceEnvironment } from '../process.ts';
@@ -1776,7 +1777,7 @@ export function createAgentBrowserComputer(options: {
             : { focused: step.action === 'type' };
     const { controls, identity: sourceIdentity } = await controlsOf(state, target);
     const enter =
-      (step.action === 'press' && step.key === 'Enter') ||
+      (step.action === 'press' && isEnterKey(step.key)) ||
       (step.action === 'type' && /[\r\n]/.test(step.text ?? ''));
     const submits =
       step.action === 'click' || enter ? await submissionOf(state, target, enter) : undefined;

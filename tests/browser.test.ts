@@ -6444,10 +6444,33 @@ test(
         to: `${origin}/reserve`,
       });
       await computer.act('submits', { action: 'fill', selector: 'input[name=q]', text: 'tables' });
-      assert.deepEqual(await submits({ action: 'press', key: 'Enter' }), {
-        method: 'GET',
-        to: `${origin}/search`,
-      });
+      for (const key of [
+        'Enter',
+        'Return',
+        'Shift+Enter',
+        'Enter+Shift',
+        'Ctrl+Enter+Meta',
+        'NumpadEnter',
+        '\r',
+        '\n',
+      ]) {
+        assert.deepEqual(
+          await submits({ action: 'press', key }),
+          {
+            method: 'GET',
+            to: `${origin}/search`,
+          },
+          key,
+        );
+      }
+      for (const key of [
+        'Enter+Unknown',
+        ' Enter ',
+        'ControlOrMeta+Enter',
+        'Enter\n',
+        'ShiftLeft+Enter',
+      ])
+        assert.equal(await submits({ action: 'press', key }), undefined, key);
       await computer.act('submits', {
         action: 'evaluate',
         script: "document.querySelector('form button').focus()",
