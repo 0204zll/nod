@@ -292,7 +292,9 @@ export async function createApprovals(
   const failureReason = (error: unknown) =>
     Array.from(
       toUSVString(
-        redact((error instanceof Error ? error.message : String(error)) || 'The action failed.'),
+        redact(
+          (error instanceof Error ? error.message : String(error)) || 'The action failed.',
+        ).replaceAll('\0', '\uFFFD'),
       ),
     )
       .slice(0, 4000)

@@ -1637,6 +1637,32 @@ test(
         await finish(confirmed.turnId, 'failed');
       });
 
+      await t.test('a failure with a NUL keeps its reason and repeat fence', async (t) => {
+        t.after(() => {
+          executionResult = undefined;
+        });
+        for (const notRun of [true, false]) {
+          const turn = await begin('Save the synthetic report with a service error.');
+          const id = await propose(turn, 'GMAIL_SEND_EMAIL', email('nul@example.test'));
+          await finish(turn.turnId);
+          const confirmed = await confirm(id, true);
+          assert.ok(confirmed && 'turnId' in confirmed);
+          executionResult = () => {
+            throw Object.assign(new Error('HTTP 503: synthetic\0upload unavailable.'), { notRun });
+          };
+          const before = calls.length;
+          await execute(id);
+          const shown = await shownApproval(id);
+          assert.equal(shown.state, notRun ? 'expired' : 'uncertain');
+          assert.match(shown.failure ?? '', /HTTP 503: synthetic.*upload unavailable\./);
+          assert.ok(!shown.failure.includes('\0'));
+          assert.equal((await stored(id)).result.error, shown.failure);
+          assert.equal(await execute(id), undefined);
+          assert.equal(calls.length, before + 1);
+          await finish(confirmed.turnId, 'failed');
+        }
+      });
+
       await t.test(
         'a failed confirmation preflight keeps its reason without dispatch',
         async (t) => {
