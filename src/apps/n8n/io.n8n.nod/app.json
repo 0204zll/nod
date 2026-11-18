@@ -13,11 +13,17 @@
   },
   "prompts": [
     "Find my workflows that handle support requests.",
-    "Build a draft workflow that records a sample form submission."
+    "Build a draft workflow that records a sample form submission.",
+    "Generate a product image with Nano Banana using my Gateway credits.",
+    "Scrape this page with Firecrawl and summarize it."
   ],
-  "requirements": ["An n8n account with instance-level MCP access enabled."],
+  "requirements": [
+    "An n8n account with instance-level MCP access enabled.",
+    "Gateway credits on the instance for models, image and video generation, web search and scraping, and PDF tools."
+  ],
   "limitations": [
     "Workflow access follows the permissions and MCP settings in your n8n instance.",
-    "Publishing and running a workflow can change other services."
+    "Publishing and running a workflow can change other services.",
+    "Gateway tools and models spend the instance's Gateway credits."
   ]
 }

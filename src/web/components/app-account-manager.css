@@ -150,3 +150,22 @@
     width: 100%;
   }
 }
+
+.app-manage-gateway {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface-subtle, rgba(127, 127, 127, 0.08));
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.app-manage-gateway p,
+.app-manage-gateway ul {
+  margin: 0;
+}
+
+.app-manage-gateway ul {
+  padding-left: 18px;
+}

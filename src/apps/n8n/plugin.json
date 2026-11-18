@@ -2,7 +2,7 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "n8n",
   "version": "1.0.0",
-  "description": "Build, test and run your workflows and agents.",
+  "description": "Build, test and run your workflows and agents. With Gateway credits, also use AI models, image and video generation, web search and scraping, and PDF tools without your own API keys.",
   "homepage": "https://n8n.io",
   "license": "Apache-2.0",
   "extensions": {

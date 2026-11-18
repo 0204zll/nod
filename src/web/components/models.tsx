@@ -107,6 +107,8 @@ const modelProviderLogos: Partial<Record<ModelProvider, string>> = {
   'n8n-gateway': 'n8n',
 };
 
+export const gatewayPricingUrl = 'https://docs.n8n.io/deploy/use-n8n-cloud/gateway-credits';
+
 const modelPrice = new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
@@ -567,6 +569,17 @@ export function ModelSettings({ onDirtyChange }: { onDirtyChange?(dirty: boolean
   return (
     <div className="model-settings">
       {available && <ModelSentences />}
+      {connections.some(
+        (connection) =>
+          connection.id === data.selection?.connectionId && connection.provider === 'n8n-gateway',
+      ) && (
+        <p className="model-key-note">
+          Your current model is billed to n8n Gateway credits.{' '}
+          <a href={gatewayPricingUrl} target="_blank" rel="noreferrer">
+            See Gateway credits pricing
+          </a>
+        </p>
+      )}
       <div className="model-section-heading">
         <h3>{connections.length ? 'Connections' : 'Connect a model'}</h3>
         {!!connections.length && (
@@ -721,7 +734,9 @@ export function ModelSettings({ onDirtyChange }: { onDirtyChange?(dirty: boolean
                                   ? 'Connected with sign-in'
                                   : connection.provider === 'compatible'
                                     ? 'Model server'
-                                    : 'API key'}
+                                    : connection.provider === 'n8n-gateway'
+                                      ? 'n8n account'
+                                      : 'API key'}
                             {connection.status === 'reconnect'
                               ? ' · Needs attention'
                               : connection.issue
@@ -737,6 +752,16 @@ export function ModelSettings({ onDirtyChange }: { onDirtyChange?(dirty: boolean
                           )}
                           {data.selection?.connectionId === connection.id && (
                             <span className="model-connection-selected">Current model</span>
+                          )}
+                          {connection.provider === 'n8n-gateway' && (
+                            <a
+                              className="model-connection-meta"
+                              href={gatewayPricingUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Gateway credits pricing
+                            </a>
                           )}
                         </div>
                       </div>
@@ -1660,7 +1685,12 @@ function GatewayForm({
         </select>
       </Field>
       {error && <Notice>{error}</Notice>}
-      <p className="model-key-note">Model use is billed to this instance's Gateway credits.</p>
+      <p className="model-key-note">
+        Model use is billed to this instance's Gateway credits.{' '}
+        <a href={gatewayPricingUrl} target="_blank" rel="noreferrer">
+          See pricing
+        </a>
+      </p>
       <div className="model-dialog-actions">
         <Button type="button" variant="ghost" disabled={busy} onClick={onCancel}>
           Cancel

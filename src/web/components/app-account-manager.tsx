@@ -12,6 +12,7 @@ import {
   UserRound,
 } from './icons';
 import { ServiceLogo } from './service-logo';
+import { gatewayPricingUrl } from './models';
 import { Button, Dialog, DialogContent, DialogDescription, DialogTitle, Notice } from './ui';
 
 function accountLabel(account: Connection) {
@@ -125,6 +126,7 @@ export function AppAccountManager({
               {group?.service.name} accounts
             </DialogTitle>
           </div>
+          {group?.service.slug === 'n8n' && <GatewayInfo />}
           {error && (
             <div data-analytics-private>
               <Notice onDismiss={onDismissError}>{error}</Notice>
@@ -262,5 +264,24 @@ export function AppAccountManager({
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+function GatewayInfo() {
+  return (
+    <div className="app-manage-gateway">
+      <strong>Includes the n8n Gateway</strong>
+      <p>With Gateway credits on the instance, Nod can use these without your own API keys:</p>
+      <ul>
+        <li>AI models from OpenAI, Anthropic, Google, Moonshot, MiniMax and Alibaba, in Models</li>
+        <li>Image generation with Nano Banana, GPT Image and MiniMax</li>
+        <li>Video generation with MiniMax</li>
+        <li>Web search and scraping with Brave, Browserbase and Firecrawl</li>
+        <li>PDF conversion and parsing with pdf.co and LlamaParse</li>
+      </ul>
+      <a href={gatewayPricingUrl} target="_blank" rel="noreferrer">
+        Gateway credits pricing
+      </a>
+    </div>
   );
 }

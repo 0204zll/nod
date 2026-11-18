@@ -25,4 +25,8 @@ await tools.write({
 });
 ```
 
+## Gateway tools
+
+The same n8n account also serves the n8n Gateway as a second MCP server (named "n8n Gateway"). Its tools generate images and videos, search and scrape the web, and convert or read PDFs, billed to the instance's Gateway credits. For a one-off request, call these tools directly; do not build a workflow for it. Generated images come back as files: share them with share_file. A video job returns a task ID: poll its status tool until the video URL is ready.
+
 End with one short message: what you built or changed, what you tested and with which data, what you could not test, and what the user still has to do.
