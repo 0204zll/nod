@@ -1083,6 +1083,7 @@ async function initializeApplication(
     localFilesAvailable: Boolean(adapters.trash),
     consumers,
     stopConsumer: (id) => boss.offWork('scheduled-task', { id, wait: true }),
+    clearBrowser: (id) => adapters.computer.clear(id),
     taskModels: {
       list: () => tasks.ownModels(),
       title: (id) => tasks.modelTask(id),
