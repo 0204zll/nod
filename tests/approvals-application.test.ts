@@ -598,11 +598,20 @@ test(
       origin: `http://localhost:${port}`,
       cookie: `${accessCookie(port)}=${await accessKey(dataRoot)}`,
     };
-    const request = (
+    let messagesAvailableAt = 0;
+    const request = async (
       method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
       path: string,
       payload?: Record<string, unknown>,
-    ) => application.app.inject({ method, url: path, headers, payload });
+    ) => {
+      const message = method === 'POST' && path === '/api/messages';
+      if (message && messagesAvailableAt > Date.now())
+        await delay(messagesAvailableAt - Date.now());
+      const response = await application.app.inject({ method, url: path, headers, payload });
+      if (message && Number(response.headers['x-ratelimit-remaining']) === 0)
+        messagesAvailableAt = Date.now() + Number(response.headers['x-ratelimit-reset']) * 1000;
+      return response;
+    };
     async function waitFor(id: string, status: string) {
       for (let attempt = 0; attempt < 300; attempt++) {
         const turn = (await pool.query('SELECT status,error FROM turns WHERE id=$1', [id])).rows[0];
