@@ -6,7 +6,6 @@ import { logFailure } from './failure-log.ts';
 import type { AnalyticsEvent, CaptureAnalytics } from './analytics.ts';
 import { BrowserActionError } from '../ports/computer.ts';
 import { browserErrorMessage } from '../shared/browser-errors.ts';
-import { browserErrorMessage } from '../shared/browser-errors.ts';
 
 type SecureEntry = Extract<AnalyticsEvent, { event: 'secure_entry_changed' }>['properties'];
 
