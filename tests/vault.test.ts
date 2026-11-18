@@ -22,6 +22,7 @@ import {
   normalizedEmail,
   verificationCode,
   verificationSenderDomain,
+  type EmailCodeRequest,
 } from '../src/server/email-code.ts';
 import { createIntegrations } from '../src/server/integrations.ts';
 import type { TurnRef } from '../src/server/thread.ts';
@@ -604,16 +605,22 @@ test(
     const stages = new Map<string, CredentialKind>();
     const injections: CredentialInjection[] = [];
     const resumed: string[] = [];
+    const emailCodeRequests: EmailCodeRequest[] = [];
     let app = Fastify();
+    let observedOrigin = 'https://example.com';
     const options = {
       requestKey: Buffer.alloc(32, 42),
       keyStore: { id: 'fixture', configured: true, getKey: async () => key },
-      page: async () => ({ origin: 'https://example.com', url: 'https://example.com/login' }),
+      page: async () => ({ origin: observedOrigin, url: `${observedOrigin}/login` }),
       inject: async (input: CredentialInjection) => {
         injections.push(input);
         stages.set(input.threadId, input.kind === 'identifier' ? 'password' : 'otp');
       },
       retry: async () => {},
+      emailCode: async (request: EmailCodeRequest) => {
+        emailCodeRequests.push(request);
+        return { code: '381742', current: async () => true };
+      },
       resume: async (turnId: string) => {
         const name = [...tasks].find(([, value]) => value.turnId === turnId)?.[0];
         assert.ok(name);
@@ -633,17 +640,17 @@ test(
       tasks.set(id, turn);
       stages.set(turn.threadId, kind);
     };
-    const input = (kind: CredentialKind = 'identifier') => ({
-      origin: 'https://example.com',
+    const input = (kind: CredentialKind = 'identifier', origin = 'https://example.com') => ({
+      origin,
       label: 'Model provided label',
       kind,
       ...(kind === 'identifier' ? { usernameSelector: '#login' } : { passwordSelector: '#login' }),
     });
-    const form = async (taskId: string) => {
+    const form = async (taskId: string, origin?: string) => {
       const request = await vault.request(
         task(taskId),
         'local-development',
-        input(stages.get(task(taskId).threadId)),
+        input(stages.get(task(taskId).threadId), origin),
       );
       await pool.query(
         "UPDATE turns SET status='waiting',waiting_reason='credentials' WHERE id=$1",
@@ -704,6 +711,249 @@ test(
           sealCredential(key, foreign, { username: 'foreign-user', password: 'foreign-secret' }),
         ],
       );
+
+      await t.test(
+        'root and www private entry keeps the real destination and saved binding',
+        async (t) => {
+          t.after(() => {
+            observedOrigin = 'https://example.com';
+          });
+          for (const [savedOrigin, destination] of [
+            ['https://example.net:8443', 'https://www.example.net:8443'],
+            ['https://www.example.org:9443', 'https://example.org:9443'],
+            ['https://tenant.github.io:8443', 'https://www.tenant.github.io:8443'],
+            ['https://xn--bcher-kva.de:7443', 'https://www.xn--bcher-kva.de:7443'],
+          ] as const) {
+            observedOrigin = destination;
+            const saved = await vault.saveLogin({
+              label: 'Synthetic root and www account',
+              origin: savedOrigin,
+              username: 'synthetic-account@example.test',
+              password: 'synthetic-www-password',
+              authenticatorKey: 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP',
+            });
+            const original = (
+              await pool.query('SELECT origin,ciphertext FROM vault_entries WHERE id=$1', [
+                saved.id,
+              ])
+            ).rows[0];
+            const name = `www-${saved.id}`;
+            await addTask(name);
+            const url = await form(name, destination);
+            const request = await describe(url);
+            assert.equal(request.origin, destination);
+            assert.deepEqual(
+              request.savedEntries?.map((entry) => entry.id),
+              [saved.id],
+            );
+            const before = injections.length;
+            const view = await vaultPage(
+              createElement(Credentials, { id: url.split('/').at(-1)!, embedded: true }),
+              async (path, init) => {
+                const response = await app.inject({
+                  method: (init.method ?? 'GET') as 'GET' | 'POST',
+                  url: path,
+                  headers: init.body ? { 'content-type': 'application/json' } : {},
+                  payload: init.body ? String(init.body) : undefined,
+                });
+                return new Response(response.body, {
+                  status: response.statusCode,
+                  headers: { 'content-type': 'application/json' },
+                });
+              },
+              'http://localhost:4310/',
+            );
+            try {
+              let button: HTMLButtonElement | undefined;
+              for (let attempt = 0; attempt < 100 && !button; attempt++) {
+                button = [...view.document.querySelectorAll('button')].find((item) =>
+                  item.textContent?.includes(saved.label),
+                );
+                if (!button)
+                  await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+              }
+              assert.ok(button);
+              assert.ok(view.document.body.textContent?.includes(new URL(destination).host));
+              await act(async () => button.click());
+              for (let attempt = 0; attempt < 100 && !resumed.includes(name); attempt++)
+                await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+              assert.ok(resumed.includes(name));
+            } finally {
+              await view.close();
+            }
+            assert.equal(injections.length, before + 1);
+            assert.equal(injections.at(-1)?.origin, destination);
+            assert.equal(injections.at(-1)?.username, 'synthetic-account@example.test');
+            assert.equal((await choose(url, saved.id)).statusCode, 409);
+            assert.equal(
+              await vault.fillSelected(
+                task(name),
+                'local-development',
+                input('password', destination),
+              ),
+              true,
+            );
+            assert.equal(injections.at(-1)?.origin, destination);
+            assert.equal(injections.at(-1)?.password, 'synthetic-www-password');
+            assert.equal(
+              await vault.fillSelected(
+                task(name),
+                'local-development',
+                input('password', destination),
+              ),
+              undefined,
+            );
+            const keyed = await vault.authenticatorLogin(
+              task(name),
+              'local-development',
+              destination,
+            );
+            assert.equal(keyed?.id, saved.id);
+            assert.equal(
+              await vault.fillAuthenticatorCode(
+                task(name),
+                'local-development',
+                saved.id,
+                input('otp', destination),
+              ),
+              true,
+            );
+            assert.match(injections.at(-1)?.code ?? '', /^\d{6}$/);
+            assert.equal(injections.at(-1)?.origin, destination);
+            assert.equal(
+              await vault.fillAuthenticatorCode(
+                task(name),
+                'local-development',
+                saved.id,
+                input('otp', destination),
+              ),
+              false,
+            );
+            const email = { ...input('otp', destination), emailCode: true };
+            assert.equal(await vault.fillEmailCode(task(name), 'local-development', email), true);
+            assert.equal(injections.at(-1)?.code, '381742');
+            assert.equal(injections.at(-1)?.origin, destination);
+            assert.equal(emailCodeRequests.at(-1)?.origin, destination);
+            assert.equal(emailCodeRequests.at(-1)?.recipient, 'synthetic-account@example.test');
+            assert.equal(await vault.fillEmailCode(task(name), 'local-development', email), false);
+            assert.deepEqual(
+              (
+                await pool.query('SELECT DISTINCT origin FROM vault_uses WHERE item_id=$1', [
+                  saved.id,
+                ])
+              ).rows,
+              [{ origin: destination }],
+            );
+            assert.deepEqual(
+              (
+                await pool.query('SELECT origin,ciphertext FROM vault_entries WHERE id=$1', [
+                  saved.id,
+                ])
+              ).rows[0],
+              original,
+            );
+            assert.deepEqual(
+              (
+                await pool.query(
+                  'SELECT origin FROM credential_account_selections WHERE entry_id=$1',
+                  [saved.id],
+                )
+              ).rows,
+              [{ origin: destination }],
+            );
+          }
+        },
+      );
+
+      await t.test('www matching refuses other sites and keeps exact excluded hosts', async (t) => {
+        t.after(() => {
+          observedOrigin = 'https://example.com';
+        });
+        for (const [savedOrigin, destination] of [
+          ['https://example.net:9444', 'https://www.example.net:9445'],
+          ['https://example.net:9446', 'https://login.example.net:9446'],
+          ['https://login.example.net:9447', 'https://www.login.example.net:9447'],
+          ['https://example.net:9448', 'https://www.www.example.net:9448'],
+          ['https://www.com', 'https://www.www.com'],
+          ['https://www.www.com', 'https://www.com'],
+          ['https://www.ck', 'https://www.www.ck'],
+          ['https://www.www.ck', 'https://www.ck'],
+          ['https://co.uk', 'https://www.co.uk'],
+          ['https://github.io', 'https://www.github.io'],
+          ['https://first.github.io', 'https://www.second.github.io'],
+          ['https://fixture.invalid', 'https://www.fixture.invalid'],
+          ['https://localhost', 'https://www.localhost'],
+          ['https://127.0.0.1', 'https://example.net:9449'],
+        ] as const) {
+          const saved = await save(
+            'Synthetic excluded login',
+            savedOrigin,
+            'excluded',
+            'excluded-password',
+          );
+          observedOrigin = destination;
+          const name = `excluded-${saved.id}`;
+          await addTask(name, 'password');
+          const url = await form(name, destination);
+          assert.ok(!(await describe(url)).savedEntries?.some((entry) => entry.id === saved.id));
+          const before = injections.length;
+          assert.notEqual((await choose(url, saved.id)).json().ok, true);
+          assert.equal(injections.length, before);
+          observedOrigin = savedOrigin;
+          await addTask(`${name}-exact`, 'password');
+          assert.equal(
+            await vault.fillSaved(task(`${name}-exact`), 'local-development', saved.id, {
+              ...input('password', savedOrigin),
+              usernameSelector: '#account',
+            }),
+            true,
+          );
+          assert.equal(injections.at(-1)?.origin, savedOrigin);
+        }
+      });
+
+      await t.test('www matching keeps account choice, owner and actual-page fences', async (t) => {
+        t.after(() => {
+          observedOrigin = 'https://example.com';
+        });
+        observedOrigin = 'https://www.example.com';
+        await addTask('www-accounts');
+        const url = await form('www-accounts', observedOrigin);
+        assert.deepEqual(
+          new Set((await describe(url)).savedEntries?.map((entry) => entry.id)),
+          new Set([first.id, second.id]),
+        );
+        const before = injections.length;
+        assert.notEqual((await choose(url, foreign.id)).json().ok, true);
+        assert.equal(injections.length, before);
+        await addTask('www-chosen');
+        const chosenUrl = await form('www-chosen', observedOrigin);
+        assert.equal((await choose(chosenUrl, first.id)).json().ok, true);
+        assert.equal(
+          await vault.fillSaved(
+            task('www-chosen'),
+            'local-development',
+            second.id,
+            input('password', observedOrigin),
+          ),
+          false,
+        );
+        assert.equal(injections.length, before + 1);
+        assert.equal(
+          await vault.fillSelected(
+            task('www-chosen'),
+            'local-development',
+            input('password', observedOrigin),
+          ),
+          true,
+        );
+        assert.equal(injections.at(-1)?.password, 'first-password');
+        await addTask('www-changed');
+        const changedUrl = await form('www-changed', observedOrigin);
+        observedOrigin = 'https://example.com';
+        assert.notEqual((await choose(changedUrl, first.id)).json().ok, true);
+        assert.equal(injections.length, before + 2);
+      });
 
       await t.test(
         'one task can use two saved accounts after each sign-in completes without replay',

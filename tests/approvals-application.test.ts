@@ -160,6 +160,7 @@ test(
     const browserActs: Array<Record<string, unknown>> = [];
     const injected: CredentialInput[] = [];
     let browserUrl = 'https://bank.example.test/transfer';
+    let browserOrigin = 'https://bank.example.test';
     let browserControls = [{ role: 'button', name: 'Authorize payment' }];
     let calendarBrowser: Pick<Computer, 'act' | 'currentPage'> | undefined;
     let calendarReview: ((input: object) => unknown) | undefined;
@@ -336,7 +337,9 @@ test(
                   results.set(
                     options.turnId,
                     await tool(call.tool ?? 'apps').execute(
-                      call.tool === 'files' ? { action: call.action, ...call.args } : call,
+                      call.tool === 'files' || call.tool === 'sign_in'
+                        ? { action: call.action, ...call.args }
+                        : call,
                     ),
                   );
                   return;
@@ -476,7 +479,7 @@ test(
             if (dialogOpen && step?.action !== 'accept_dialog')
               throw new Error('A JavaScript dialog blocks the page.');
             return {
-              origin: 'https://bank.example.test',
+              origin: browserOrigin,
               url: browserUrl,
               ...(step?.action === 'accept_dialog'
                 ? { dialog: 'Send 120 EUR to the synthetic payee?' }
@@ -591,11 +594,20 @@ test(
       origin: `http://localhost:${port}`,
       cookie: `${accessCookie(port)}=${await accessKey(dataRoot)}`,
     };
-    const request = (
+    let messagesAvailableAt = 0;
+    const request = async (
       method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
       path: string,
       payload?: Record<string, unknown>,
-    ) => application.app.inject({ method, url: path, headers, payload });
+    ) => {
+      const message = method === 'POST' && path === '/api/messages';
+      if (message && messagesAvailableAt > Date.now())
+        await delay(messagesAvailableAt - Date.now());
+      const response = await application.app.inject({ method, url: path, headers, payload });
+      if (message && Number(response.headers['x-ratelimit-remaining']) === 0)
+        messagesAvailableAt = Date.now() + Number(response.headers['x-ratelimit-reset']) * 1000;
+      return response;
+    };
     async function waitFor(id: string, status: string) {
       for (let attempt = 0; attempt < 300; attempt++) {
         const turn = (await pool.query('SELECT status,error FROM turns WHERE id=$1', [id])).rows[0];
@@ -3784,6 +3796,94 @@ test(
           );
         },
       );
+
+      await t.test('a root login approval does not approve its www destination', async (t) => {
+        const previousOrigin = browserOrigin;
+        const previousUrl = browserUrl;
+        t.after(() => {
+          browserOrigin = previousOrigin;
+          browserUrl = previousUrl;
+          repeatAfterConfirm = undefined;
+        });
+        const origin = 'https://example.org:8443';
+        const destination = 'https://www.example.org:8443';
+        const saved = await request('POST', '/api/vault', {
+          label: 'Synthetic www account',
+          origin,
+          username: 'synthetic-owner@example.test',
+          password: 'synthetic-www-private-password',
+        });
+        assert.equal(saved.statusCode, 200, saved.body);
+        const login = saved.json().id as string;
+        const original = (
+          await pool.query('SELECT origin,ciphertext FROM vault_entries WHERE id=$1', [login])
+        ).rows[0];
+        const input = {
+          origin,
+          label: 'Synthetic www account',
+          message: 'Sign in to the synthetic website.',
+          kind: 'password',
+          usernameSelector: '@username',
+          passwordSelector: '@password',
+          submitSelector: '@submit',
+        };
+        browserOrigin = origin;
+        browserUrl = `${origin}/login`;
+        const before = injected.length;
+        const held = await propose('Enter saved login', input, 'sign_in');
+        const [rootCard] = await approvalsFor(held);
+        assert.deepEqual(rootCard.args, { origin, kind: 'sign_in', itemId: login });
+        assert.equal(injected.length, before);
+        browserOrigin = destination;
+        browserUrl = `${destination}/login`;
+        const wwwInput = { ...input, origin: destination };
+        repeatAfterConfirm = { tool: 'sign_in', action: 'Enter saved login', args: wwwInput };
+        const rootApproval = await request('POST', '/api/messages', {
+          text: 'Sign in',
+          replyToMessageId: rootCard.confirmation_message_id,
+          clientMessageId: randomUUID(),
+          approvalAnswer: { approvalId: rootCard.id, approved: true },
+        });
+        assert.equal(rootApproval.statusCode, 200, rootApproval.body);
+        await waitFor(rootApproval.json().turnId, 'waiting');
+        const [wwwCard] = await approvalsFor(rootApproval.json().turnId);
+        assert.equal(wwwCard?.action, 'NOD_vault_allow');
+        assert.deepEqual(wwwCard.args, { origin: destination, kind: 'sign_in', itemId: login });
+        assert.equal((await approvalsFor(held))[0].status, 'completed');
+        assert.equal(injected.length, before);
+        assert.ok((await confirmationFor(wwwCard)).includes(destination));
+        repeatAfterConfirm = { tool: 'sign_in', action: 'Enter saved login', args: wwwInput };
+        const answer = {
+          text: 'Sign in',
+          replyToMessageId: wwwCard.confirmation_message_id,
+          clientMessageId: randomUUID(),
+          approvalAnswer: { approvalId: wwwCard.id, approved: true },
+        };
+        const wwwApproval = await request('POST', '/api/messages', answer);
+        assert.equal(wwwApproval.statusCode, 200, wwwApproval.body);
+        await waitFor(wwwApproval.json().turnId, 'succeeded');
+        assert.deepEqual(
+          (await request('POST', '/api/messages', answer)).json(),
+          wwwApproval.json(),
+        );
+        assert.equal(injected.length, before + 1);
+        assert.equal(injected.at(-1)?.origin, destination);
+        assert.equal(injected.at(-1)?.password, 'synthetic-www-private-password');
+        assert.doesNotMatch(
+          JSON.stringify(results.get(wwwApproval.json().turnId)),
+          /synthetic-www-private-password/,
+        );
+        assert.deepEqual(
+          (await pool.query('SELECT origin,kind,status FROM vault_uses WHERE item_id=$1', [login]))
+            .rows,
+          [{ origin: destination, kind: 'password', status: 'submitted' }],
+        );
+        assert.deepEqual(
+          (await pool.query('SELECT origin,ciphertext FROM vault_entries WHERE id=$1', [login]))
+            .rows[0],
+          original,
+        );
+      });
 
       await t.test(
         'a connect whose sign-in label cannot be written leaves no attempt behind',
