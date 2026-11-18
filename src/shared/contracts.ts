@@ -46,6 +46,7 @@ export type ApprovalState = 'pending' | 'working' | 'done' | 'declined' | 'expir
 export interface MessageApproval {
   id: string;
   state: ApprovalState;
+  failure?: string;
   title: string;
   app: string;
   slug: string;
