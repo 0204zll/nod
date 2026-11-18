@@ -472,6 +472,33 @@ test(
         (error: unknown) => error instanceof VaultUseError && error.statusCode === 409,
       );
       assert.equal(websiteSubmissions, 1);
+      const scripted = { ...use, id: randomUUID() };
+      await assert.rejects(
+        uses.run(scripted, {
+          perform: async () => {
+            throw new BrowserActionError('browser_card_reload', 'fixture-private-value');
+          },
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof VaultUseError);
+          assert.equal(error.statusCode, 502);
+          assert.match(error.message, /Reload the page/);
+          assert.equal(error.message.includes('fixture-private-value'), false);
+          return true;
+        },
+      );
+      assert.equal(
+        (await f.pool.query('SELECT status FROM vault_uses WHERE id=$1', [scripted.id])).rows[0]
+          .status,
+        'uncertain',
+      );
+      await assert.rejects(
+        uses.run(scripted, { perform: operation.perform }),
+        (error: unknown) => error instanceof VaultUseError && error.statusCode === 409,
+      );
+      const beforeRecovery = entries;
+      await uses.run({ ...use, id: randomUUID() }, operation);
+      assert.equal(entries, beforeRecovery + 1);
       for (const code of ['ECONNRESET', 'UND_ERR_SOCKET']) {
         const disconnected = { ...use, id: randomUUID() };
         await withFailureLog(record, async () => {
