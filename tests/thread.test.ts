@@ -2843,6 +2843,65 @@ test(
         assert.equal(ran(background), undefined);
       });
 
+      await t.test(
+        'a failed usage check leaves queued input separate from a completed response',
+        async () => {
+          const prompt = `usage-intake-${randomUUID()}`;
+          const originalRun = dependencies.runTurn;
+          const originalLimit = dependencies.spendingLimit;
+          let unavailable = false;
+          block(prompt);
+          dependencies.spendingLimit = async () => {
+            if (unavailable) throw new Error('Synthetic usage persistence unavailable.');
+            return (await originalLimit?.()) ?? null;
+          };
+          dependencies.runTurn = async (context) => {
+            if (context.prompt !== prompt) return originalRun(context);
+            runs.push(context);
+            await waiting.get(prompt);
+            unavailable = true;
+            try {
+              assert.deepEqual(await context.takeMessages!(), []);
+            } finally {
+              unavailable = false;
+            }
+            await context.reply('The first synthetic result is complete.');
+            return { status: 'succeeded' };
+          };
+          try {
+            const first = await thread.submitUserMessage(prompt);
+            await waitFor(() => Boolean(ran(first.turnId)));
+            const queued = await thread.submitUserMessage('Keep this synthetic request separate.');
+            assert.equal(await turnStatus(queued.turnId), 'queued');
+            release(prompt);
+            await waitFor(settled(first.turnId));
+            await waitFor(settled(queued.turnId));
+            assert.equal(await turnStatus(first.turnId), 'succeeded');
+            assert.equal(await turnStatus(queued.turnId), 'succeeded');
+            assert.ok(ran(queued.turnId));
+            assert.equal(
+              (await db.pool.query('SELECT turn_id FROM messages WHERE id=$1', [queued.messageId]))
+                .rows[0].turn_id,
+              queued.turnId,
+            );
+            assert.equal(
+              (
+                await db.pool.query(
+                  "SELECT count(*)::int AS count FROM messages WHERE turn_id=$1 AND text='The first synthetic result is complete.'",
+                  [first.turnId],
+                )
+              ).rows[0].count,
+              1,
+            );
+          } finally {
+            unavailable = false;
+            release(prompt);
+            dependencies.runTurn = originalRun;
+            dependencies.spendingLimit = originalLimit;
+          }
+        },
+      );
+
       await t.test('a scheduled turn continues when cache policy lookup fails', async (t) => {
         const previous = dependencies.scheduleCache;
         dependencies.scheduleCache = async () => {

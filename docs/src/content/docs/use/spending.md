@@ -47,6 +47,8 @@ How Nod counts usage depends on how you pay for the model.
 | A ChatGPT plan                                                                                                     | API-price estimate of what your plan covered | Doesn't count | Counts at API prices |
 | A model with no price, such as an [OpenAI-compatible server](/connect/local-models/), a free model or a token plan | **No price**                                 | Doesn't count | Doesn't count        |
 
+If Nod cannot save a completed model request's usage, it keeps the result and holds the unsaved usage in memory. It tries to save that usage before new model work. If the save still fails, new model work stops. Saving usage again does not repeat the model request or an app action.
+
 Costs are Nod's estimates from each model's API price. Your provider's bill is the final word. Any request whose API price Nod doesn't know shows **No price**, on a ChatGPT plan too, as does a voice reply or transcription without a known price.
 
 ## Set a monthly limit

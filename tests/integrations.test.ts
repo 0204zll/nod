@@ -13103,7 +13103,7 @@ test(
         },
       });
       const request = { task: 'review' as const, instructions: 'Synthetic', input: {} };
-      await assert.rejects(curator.curate(request), /Synthetic usage write failure/);
+      assert.deepEqual(await curator.curate(request), {});
       const failedAt = Date.now();
       await new Promise((resolve) => setTimeout(resolve, 20));
       await assert.rejects(curator.curate(request), /Synthetic usage write failure/);
