@@ -5105,6 +5105,74 @@ test(
         },
       );
       await t.test(
+        'local Markdown approvals preserve the reviewed path through execution',
+        async () => {
+          const folder = await mkdtemp(join(localHome, 'markdown-'));
+          const path = join(folder, 'Next Actions.md');
+          const contents = 'Synthetic next action: review the fixture.';
+          await writeFile(path, contents);
+          let draftPath = path;
+          let reviews = 0;
+          confirmationModel = (input) => {
+            const data = input.data as { action: string; args: { path: string } };
+            assert.ok(['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT'].includes(data.action));
+            assert.deepEqual(data.args, { path });
+            const operation = data.action === 'LOCAL_FILES_READ' ? 'read' : 'import';
+            if (input.purpose === 'confirmation_review') {
+              reviews++;
+              return input.text === `Can I ${operation} ${path}?`
+                ? { valid: true }
+                : { valid: false, reason: 'The question names a different path.' };
+            }
+            return { text: `Can I ${operation} ${draftPath}?`, action: 'Open file' };
+          };
+          try {
+            for (const action of ['read', 'import']) {
+              const before = new Set(workspaceFiles.keys());
+              const opening = await propose(action, { path }, 'files');
+              const [approval] = await approvalsFor(opening);
+              assert.equal(approval.status, 'pending');
+              assert.deepEqual(approval.args, { path });
+              assert.doesNotMatch(JSON.stringify(results.get(opening)), /Synthetic next action/);
+              assert.deepEqual([...workspaceFiles.keys()], [...before]);
+              const response = await request('POST', '/api/messages', {
+                text: 'Yes',
+                replyToMessageId: approval.confirmation_message_id,
+                approvalAnswer: { approvalId: approval.id, approved: true },
+              });
+              assert.equal(response.statusCode, 200, response.body);
+              await waitFor(response.json().turnId, 'succeeded');
+              assert.equal((await approvalsFor(opening))[0].status, 'completed');
+              const stored = (await approvalsFor(opening))[0].result;
+              if (action === 'read') assert.match(JSON.stringify(stored), /Synthetic next action/);
+              else {
+                const imported = [...workspaceFiles.keys()].filter((file) => !before.has(file));
+                assert.equal(imported.length, 1);
+                assert.equal(Buffer.from(workspaceFiles.get(imported[0]!)!).toString(), contents);
+              }
+              assert.equal(await readFile(path, 'utf8'), contents);
+            }
+            draftPath = join(folder, 'Different.md');
+            const prompt = `Synthetic changed Markdown path ${randomUUID()}`;
+            plans.set(prompt, { tool: 'files', action: 'read', args: { path } });
+            const response = await request('POST', '/api/messages', { text: prompt });
+            assert.equal(response.statusCode, 200, response.body);
+            const opening = response.json().turnId as string;
+            await waitFor(opening, 'succeeded|failed');
+            assert.deepEqual(await approvalsFor(opening), []);
+            const failed = (await pool.query('SELECT error FROM turns WHERE id=$1', [opening]))
+              .rows[0];
+            assert.match(
+              JSON.stringify(results.get(opening)) ?? failed.error,
+              /names a different path/,
+            );
+            assert.equal(reviews, 4);
+          } finally {
+            confirmationModel = undefined;
+          }
+        },
+      );
+      await t.test(
         'local files export imported workspace files and refuse changed approved bytes',
         async () => {
           const folder = await mkdtemp(join(localHome, 'exports-'));

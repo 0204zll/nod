@@ -45,6 +45,7 @@ import {
 } from '../src/server/action-presentation.ts';
 import { createCommunication } from '../src/server/communication.ts';
 import { ApprovalCard, ApprovalChoiceCard } from '../src/web/components/action-card.tsx';
+import { MessageText } from '../src/web/components/message.tsx';
 import { createE2eCurators } from '../scripts/e2e-curators.ts';
 import { createIntegrationFixture } from '../scripts/e2e-fixtures.ts';
 import { createPiMemoryCurator } from '../src/providers/pi/memory-curator.ts';
@@ -194,6 +195,69 @@ test('confirmation repairs rejected wording against the unchanged saved action',
     assert.equal(drafts, 2);
     assert.equal(checks, mode === 'format' ? 1 : 2);
     assert.deepEqual(proposal.args, { query: 'Synthetic receipts' });
+  }
+});
+
+test('local file confirmation reviews the visible path and rejects a different path', async (t) => {
+  for (const path of [
+    '/Users/tester/Second Brain/CLAUDE.md',
+    String.raw`C:\Users\tester\Documents\wiki\Projetos.md`,
+    '/home/tester/Documents/GTD/20 Actions/Next Actions.md',
+  ]) {
+    for (const action of ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT']) {
+      await t.test(`${action}: ${path}`, async () => {
+        const question = `Can I ${action === 'LOCAL_FILES_READ' ? 'read' : 'import'} ${path}?`;
+        let draftPath = path;
+        let reviews = 0;
+        const proposal: ApprovalDescription = {
+          turn: { threadId: 'synthetic-thread', turnId: 'synthetic-turn' },
+          action,
+          args: { path },
+        };
+        const communication = createCommunication({
+          pool: { query: async () => ({ rows: [] }) } as unknown as pg.Pool,
+          ownerId: 'synthetic-owner',
+          review: async (_instructions, input) => {
+            const request = input as Record<string, any>;
+            assert.equal(request.data.action, action);
+            assert.deepEqual(request.data.args, { path });
+            if (request.purpose === 'confirmation_review') {
+              reviews++;
+              return request.text === question
+                ? { valid: true }
+                : { valid: false, reason: 'The question names a different path.' };
+            }
+            return {
+              text: question.replace(path, draftPath),
+              action: action === 'LOCAL_FILES_READ' ? 'Read file' : 'Import file',
+            };
+          },
+        });
+        const result = await communication.describe(proposal);
+        assert.equal(visibleMarkdownText(result.question), question);
+        const visible = (node: DefaultTreeAdapterMap['node']): string =>
+          'value' in node
+            ? node.value
+            : 'childNodes' in node
+              ? node.childNodes.map(visible).join('')
+              : '';
+        assert.equal(
+          visible(
+            parseFragment(
+              renderToStaticMarkup(createElement(MessageText, { text: result.question })),
+            ),
+          ),
+          question,
+        );
+        assert.equal(reviews, 1);
+        for (const different of [path.replace('.md', '-other.md'), path.replace('.md', '\\.md')]) {
+          draftPath = different;
+          await assert.rejects(communication.describe(proposal), /names a different path/);
+        }
+        assert.equal(reviews, 5);
+        assert.deepEqual(proposal.args, { path });
+      });
+    }
   }
 });
 
@@ -556,7 +620,7 @@ test('confirmation reviews the text after private links and direction controls a
       if (request.purpose === 'confirmation_review') {
         assert.equal(request.text.includes(marker), false);
         assert.equal(request.text.includes('/vault/synthetic-private'), false);
-        assert.ok(visibleMarkdownText(request.text).includes('\\u{202e}'));
+        assert.ok(request.text.includes('\\u{202e}'));
         assert.ok(request.text.includes(joiner));
         assert.ok(request.text.includes(nonJoiner));
         return { valid: true };
@@ -606,7 +670,7 @@ test('confirmation keeps copied page links visible without making them active', 
     },
     details: { pageText },
   });
-  assert.equal(reviewedText, result.question);
+  assert.equal(reviewedText, visibleMarkdownText(result.question));
   const nodes = markdownNodes(result.question);
   const visibleText = visibleMarkdownText(result.question);
   assert.match(visibleText, /Authorize payment/);
