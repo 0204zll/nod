@@ -118,6 +118,16 @@ export function ScheduleRow({
           signal: AbortSignal.timeout(45_000),
         },
       );
+      if (accountVersion !== requestAccountVersion()) return;
+      pageDataCache.update<Schedule[]>(
+        schedulesPath,
+        (items) =>
+          items?.map((item) =>
+            item.id === schedule.id && item.activeRun?.turnId === turnId
+              ? { ...item, activeRun: null }
+              : item,
+          ) ?? null,
+      );
     } catch (cause) {
       if (accountVersion === requestAccountVersion())
         setRunError(

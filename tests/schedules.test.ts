@@ -2451,6 +2451,8 @@ test('waiting scheduled runs open their pending question without starting anothe
   let releaseStop = () => {};
   let stopWait: Promise<void> | undefined;
   let stopFailure = false;
+  let releaseSchedules = () => {};
+  let scheduleWait: Promise<void> | undefined;
   t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, options?: RequestInit) => {
     const path = String(input);
     const method = options?.method ?? 'GET';
@@ -2471,7 +2473,11 @@ test('waiting scheduled runs open their pending question without starting anothe
       history = { runs: [queued, completed], nextCursor: null };
       return Response.json({ turnId: queued.turnId, activeRun: schedule.activeRun });
     }
-    if (path === '/api/schedules') return Response.json([schedule]);
+    if (path === '/api/schedules') {
+      const response = [schedule];
+      await scheduleWait;
+      return Response.json(response);
+    }
     if (path === '/api/tasks') return Response.json([]);
     assert.equal(path, historyPath);
     return Response.json(history);
@@ -2558,6 +2564,55 @@ test('waiting scheduled runs open their pending question without starting anothe
   assert.deepEqual(asked, []);
   assert.deepEqual(focused, [{ messageId: questionId }, { messageId: resumedQuestionId }]);
 
+  const confirmedTurnId = schedule.activeRun!.turnId;
+  stopWait = new Promise<void>((resolve) => (releaseStop = resolve));
+  scheduleWait = new Promise<void>((resolve) => (releaseSchedules = resolve));
+  let staleRefresh: Promise<void>;
+  await act(async () => {
+    staleRefresh = pageDataCache.refresh('/api/schedules', true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const confirmedStop = dom.window.document.querySelector<HTMLButtonElement>(
+    `button[aria-label="Stop this run for ${schedule.title}"]`,
+  );
+  assert.ok(confirmedStop);
+  await act(async () => confirmedStop.click());
+  schedule = { ...schedule, activeRun: null };
+  await act(async () => {
+    releaseStop();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.equal(
+    Boolean(
+      dom.window.document.querySelector(`button[aria-label="Stop this run for ${schedule.title}"]`),
+    ),
+    false,
+  );
+  assert.equal(pageDataCache.getSnapshot<Schedule[]>('/api/schedules').data?.[0].activeRun, null);
+  let replacementRefresh: Promise<void>;
+  await act(async () => {
+    replacementRefresh = pageDataCache.refresh('/api/schedules', true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.equal(
+    Boolean(
+      dom.window.document.querySelector(`button[aria-label="Stop this run for ${schedule.title}"]`),
+    ),
+    false,
+  );
+  await act(async () => {
+    releaseSchedules();
+    await Promise.all([staleRefresh!, replacementRefresh!]);
+  });
+  assert.equal(pageDataCache.getSnapshot<Schedule[]>('/api/schedules').data?.[0].activeRun, null);
+  expectedMutations.push(`POST /api/schedules/${schedule.id}/runs/${confirmedTurnId}/stop`);
+  assert.deepEqual(mutations, expectedMutations);
+  schedule = {
+    ...schedule,
+    activeRun: { turnId: randomUUID(), status: 'running', questionMessageId: null },
+  };
+  await act(async () => pageDataCache.refresh('/api/schedules', true));
+
   const stoppedTurnId = schedule.activeRun!.turnId;
   stopWait = new Promise<void>((resolve) => (releaseStop = resolve));
   const stopButton = dom.window.document.querySelector<HTMLButtonElement>(
@@ -2574,12 +2629,23 @@ test('waiting scheduled runs open their pending question without starting anothe
     activeRun: { turnId: nextTurnId, status: 'queued', questionMessageId: null },
   };
   await act(async () => pageDataCache.refresh('/api/schedules', true));
+  await act(async () => stopButton.click());
+  assert.deepEqual(mutations, [...expectedMutations, stopMutation]);
+  scheduleWait = new Promise<void>((resolve) => (releaseSchedules = resolve));
   await act(async () => {
-    stopButton.click();
     releaseStop();
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
+  assert.equal(stopButton.disabled, false);
   assert.deepEqual(mutations, [...expectedMutations, stopMutation]);
+  await act(async () => {
+    releaseSchedules();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.equal(
+    pageDataCache.getSnapshot<Schedule[]>('/api/schedules').data?.[0].activeRun?.turnId,
+    nextTurnId,
+  );
   assert.equal(schedule.activeRun?.turnId, nextTurnId);
   assert.equal(schedule.enabled, true);
   stopFailure = true;
@@ -2587,6 +2653,7 @@ test('waiting scheduled runs open their pending question without starting anothe
     `button[aria-label="Stop this run for ${schedule.title}"]`,
   );
   assert.ok(currentStop);
+  assert.equal(currentStop.disabled, false);
   await act(async () => {
     currentStop.click();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -2597,10 +2664,13 @@ test('waiting scheduled runs open their pending question without starting anothe
   );
   assert.equal(schedule.enabled, true);
   assert.equal(mutations.length, expectedMutations.length + 2);
+  assert.equal(mutations.at(-1), `POST /api/schedules/${schedule.id}/runs/${nextTurnId}/stop`);
   schedule = { ...schedule, activeRun: null };
   await act(async () => pageDataCache.refresh('/api/schedules', true));
   assert.equal(
-    dom.window.document.querySelector(`button[aria-label="Stop this run for ${schedule.title}"]`),
-    null,
+    Boolean(
+      dom.window.document.querySelector(`button[aria-label="Stop this run for ${schedule.title}"]`),
+    ),
+    false,
   );
 });
