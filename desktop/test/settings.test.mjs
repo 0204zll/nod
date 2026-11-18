@@ -8922,6 +8922,7 @@ test('computer use binds current window content and hides password content', asy
       window('bo@example.test', '@sthird01:e2'),
       { ok: true, data: { complete: false, tree: { role: 'window' } } },
       { ok: true, data: { complete: true, tree: { role: 'window', children_count: 1 } } },
+      { ok: true, data: { complete: true, identity_unproven: true, tree: { role: 'window' } } },
     ],
   });
   const inspect = () => desktop.helper.request({ op: 'inspect', app: 'Mail', window: 'w-1' });
@@ -8932,8 +8933,58 @@ test('computer use binds current window content and hides password content', asy
   assert.notEqual(first.focus, second.focus);
   assert.notEqual(first.state, third.state);
   assert.doesNotMatch(JSON.stringify(first), /private password/);
+  assert.equal((await inspect()).incomplete, true);
+  assert.equal((await inspect()).incomplete, true);
   await assert.rejects(inspect(), /complete window/);
-  await assert.rejects(inspect(), /Part of the window is missing/);
+});
+
+test('computer use binds a long list only by the rows the step needs', async (t) => {
+  const inbox = (subjects, selected) => ({
+    ok: true,
+    data: {
+      complete: true,
+      tree: {
+        role: 'window',
+        name: 'Inbox',
+        children: [
+          { role: 'toolbar', children: [{ role: 'button', name: 'New Message' }] },
+          {
+            role: 'table',
+            children: subjects.map((name) => ({
+              role: 'row',
+              name,
+              states: name === selected ? ['selected'] : [],
+            })),
+          },
+        ],
+      },
+    },
+  });
+  const rows = (count) => Array.from({ length: count }, (_, index) => `Message ${index}`);
+  const desktop = await fakeDesktop(t, {
+    snapshot: [
+      inbox(rows(500), 'Message 7'),
+      inbox(['Just arrived', ...rows(500)], 'Message 7'),
+      inbox(rows(500), 'Message 8'),
+      { ok: true, data: { complete: true, identity_unproven: true, tree: { role: 'window' } } },
+    ],
+  });
+  const inspect = () =>
+    desktop.helper.request({
+      op: 'inspect',
+      app: 'Mail',
+      window: 'w-1',
+      control: { role: 'button', name: 'New Message' },
+    });
+  const first = await inspect();
+  const arrived = await inspect();
+  const moved = await inspect();
+  assert.equal(first.incomplete, true);
+  assert.match(JSON.stringify(first.tree), /New Message.*Message 7/);
+  assert.doesNotMatch(JSON.stringify(first.tree), /Message 8|Message 499/);
+  assert.equal(first.state, arrived.state);
+  assert.notEqual(first.state, moved.state);
+  await assert.rejects(inspect(), /complete window/);
 });
 
 test('computer use can create a first document without exposing the Apple or app menu', async (t) => {

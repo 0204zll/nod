@@ -45,7 +45,7 @@ Nod opens an app only when your words name it or ask for work that needs it. Ope
 
 Each step that can change content goes through the same [trust check](/trust/approvals/) as a connected app action. The check receives the app, window, control, proposed input, and current accessible window content. This includes existing recipients and message text, not only what Nod typed. Text entry is checked too: it can replace a selection or save at once. Only reading and moving focus run without this check.
 
-Before input, Nod reads the window again. It refuses the step if the window content or control changed after the check. It checks again after waiting to bring an app forward. Keyboard input also stays bound to the focused control. A step cannot run if the accessibility service returns an incomplete window or the window content exceeds 24,000 characters.
+Before input, Nod reads the window again. It refuses the step if the window content or control changed after the check. It checks again after waiting to bring an app forward. Keyboard input also stays bound to the focused control. In a long list, such as an inbox, the check sees only the items that hold the control, the focused item and the selected item, so new messages arriving elsewhere don't stop the step. When part of the window is left out, a send or submission runs only when your words name its recipients and content; otherwise Nod asks you. A step can't run when Nod can't confirm which control it would use.
 
 ## What Nod never does
 

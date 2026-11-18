@@ -76,6 +76,7 @@ export const computerRequestArgs = [
   'typedInApp',
   'typedInAppIncomplete',
   'replacesText',
+  'windowContextIncomplete',
 ];
 const systemKeys = new Set([
   'cmd+shift+esc',
@@ -244,7 +245,13 @@ type Control = {
 export type ComputerPrepared = Record<string, unknown> & {
   app?: Identity;
   control?: { role: string; name: string; window: string };
-  windowBinding?: { state: string; window?: string; menu?: boolean; focus?: string };
+  windowBinding?: {
+    state: string;
+    window?: string;
+    menu?: boolean;
+    focus?: string;
+    target?: { role: string; name: string };
+  };
 };
 type Refusal = IntegrationError & { notRun?: boolean };
 
@@ -459,6 +466,7 @@ export function createComputerUse(
     signal?: AbortSignal,
     focus = false,
     menu = false,
+    target?: { role: string; name: string },
   ) {
     const result = await ask(
       {
@@ -467,6 +475,7 @@ export function createComputerUse(
         ...(window ? { window } : {}),
         ...(focus ? { focus: true } : {}),
         ...(menu ? { menu: true } : {}),
+        ...(target ? { control: target } : {}),
       },
       signal,
     );
@@ -487,11 +496,13 @@ export function createComputerUse(
       );
     return {
       windowContext: redactSecretText(text),
+      ...(result.incomplete ? { windowContextIncomplete: true } : {}),
       windowBinding: {
         state: result.state,
         ...(window ? { window } : {}),
         ...(menu ? { menu: true } : {}),
         ...(focus ? { focus: String(result.focus) } : {}),
+        ...(target ? { target } : {}),
       },
     };
   }
@@ -506,6 +517,7 @@ export function createComputerUse(
       signal,
       Boolean(binding.focus),
       Boolean(binding.menu),
+      binding.target,
     );
     if (
       current.windowBinding.state !== binding.state ||
@@ -630,7 +642,10 @@ export function createComputerUse(
           ? { replacesText: holdsText(node) }
           : {}),
         ...(action !== 'COMPUTER_FOCUS'
-          ? await windowContext(found.app, chosen, signal, false, !chosen && found.menu)
+          ? await windowContext(found.app, chosen, signal, false, !chosen && found.menu, {
+              role: found.role,
+              name: found.name,
+            })
           : {}),
       };
     }

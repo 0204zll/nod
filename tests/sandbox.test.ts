@@ -1593,6 +1593,7 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
             state: createHash('sha256').update(JSON.stringify(tree)).digest('hex'),
             focus: createHash('sha256').update('synthetic-focus').digest('hex'),
             focused: [],
+            ...(request.menu ? { incomplete: true } : {}),
           };
         }
         if (request.op === 'snapshot')
@@ -1676,6 +1677,11 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
   const firstDocument = await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@smenu001:e2' });
   assert.equal(firstDocument.windowBinding?.menu, true);
   assert.doesNotMatch(String(firstDocument.windowContext), /Restart|Services/);
+  assert.equal(computer.checked('COMPUTER_PRESS', firstDocument).windowContextIncomplete, true);
+  assert.deepEqual(calls.findLast((call) => call.op === 'inspect')?.control, {
+    role: 'menuitem',
+    name: 'New',
+  });
   await computer.execute(turn, 'COMPUTER_PRESS', firstDocument);
   assert.equal(calls.at(-1)?.menu, true);
   apps[0]!.windows = windows;
