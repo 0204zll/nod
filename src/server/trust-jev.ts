@@ -53,6 +53,7 @@ const grants = {
   book: 'owner_book',
   event: 'owner_event',
   update: 'owner_update',
+  open: 'owner_open',
   settings: 'owner_settings',
   sign_in: 'owner_sign_in',
   unknown: 'owner_commitment',
@@ -254,7 +255,7 @@ export async function checkJevTrust(
     throw new Error('The trust effects are incomplete.');
   let kind = ownSettings ? 'settings' : signIn ? 'sign_in' : effect;
   if (action?.name === 'NOD_browser' && scores.unclear_read_step >= 0.5) kind = 'unknown';
-  if (opensContent) kind = 'update';
+  if (opensContent) kind = 'open';
   let read = false;
   const distribution = first.additional.effect.probabilities;
   const uncertainPrivate =

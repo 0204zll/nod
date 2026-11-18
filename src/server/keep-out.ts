@@ -12,25 +12,20 @@ export async function addKeepOut(
   limit: number,
   noun: string,
 ) {
-  const { rows } = await database.query<{ list: string[] }>(
-    `SELECT ${column} AS list FROM preferences WHERE owner_id=$1`,
-    [ownerId],
+  const saved = await database.query<{ list: string[] }>(
+    `INSERT INTO preferences(owner_id,${column}) VALUES($1,ARRAY[$2::text])
+     ON CONFLICT(owner_id) DO UPDATE SET ${column}=CASE WHEN $2::text=ANY(preferences.${column})
+       THEN preferences.${column} ELSE array_append(preferences.${column},$2::text) END
+     WHERE $2::text=ANY(preferences.${column}) OR cardinality(preferences.${column}) < $3::int
+     RETURNING ${column} AS list`,
+    [ownerId, entry, limit],
   );
-  const current = rows[0]?.list ?? [];
-  if (current.includes(entry)) return current;
-  if (current.length >= limit)
+  if (!saved.rows[0])
     throw new IntegrationError(
       `The keep-out list already has ${limit} ${noun}. The owner can remove some in Settings.`,
       409,
     );
-  const saved = await database.query<{ list: string[] }>(
-    `INSERT INTO preferences(owner_id,${column}) VALUES($1,ARRAY[$2]::text[])
-     ON CONFLICT(owner_id) DO UPDATE SET ${column}=CASE WHEN $2=ANY(preferences.${column})
-       THEN preferences.${column} ELSE array_append(preferences.${column},$2) END
-     RETURNING ${column} AS list`,
-    [ownerId, entry],
-  );
-  return saved.rows[0]!.list;
+  return saved.rows[0].list;
 }
 
 export async function removeKeepOut(
