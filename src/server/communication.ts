@@ -59,6 +59,7 @@ When withheld is present, require a notice that some details are hidden and the 
 const privateLink =
   /(?:https?:\/\/[^\s/"'<>]+)?\/(?:api\/artifacts|vault|credentials|credential-requests|payments|approvals)(?:\/|[?#])[^\s"'<>]+/gi;
 const confirmationMarkdown = unified().use(remarkParse).use(remarkGfm);
+const sentencePunctuation = /^[\p{Terminal_Punctuation}\p{Pi}\p{Pf}\p{Ps}\p{Pe}'"…]*$/u;
 
 export function publicText(value: string) {
   return redactSecretText(value).replace(privateLink, '[private link]');
@@ -103,12 +104,22 @@ function confirmationQuestion(value: string, data: unknown) {
     const index = match.index ?? 0;
     result += escape(text.slice(from, index));
     const exact = urls.find(
-      (url) =>
-        match[0].startsWith(url) &&
-        /^[?!.,;:'"\p{Pi}\p{Pf}\p{Ps}\p{Pe}。！？؟，؛،۔；：।॥]*$/u.test(match[0].slice(url.length)),
+      (url) => match[0].startsWith(url) && sentencePunctuation.test(match[0].slice(url.length)),
     );
-    result += markdownValue(exact ?? match[0]);
-    if (exact) result += escape(match[0].slice(exact.length));
+    let literal = exact ?? match[0];
+    if (!exact) {
+      let depth = 0;
+      for (const bracket of literal.matchAll(/[\p{Ps}\p{Pe}]/gu)) {
+        if (/\p{Ps}/u.test(bracket[0])) depth++;
+        else if (depth) depth--;
+        else if (sentencePunctuation.test(literal.slice(bracket.index))) {
+          literal = literal.slice(0, bracket.index);
+          break;
+        }
+      }
+    }
+    result += markdownValue(literal);
+    result += escape(match[0].slice(literal.length));
     from = index + match[0].length;
   }
   return result + escape(text.slice(from));

@@ -415,6 +415,12 @@ test('URL confirmation separates Unicode quotes and punctuation without hiding U
     ['', '。'],
     ['', '؟'],
     ['', '।'],
+    ['', '…'],
+    ['', '‽'],
+    ['', '‼'],
+    ['', '⁇'],
+    ['', '⁈'],
+    ['', '⁉'],
   ]) {
     question = `Can I use ${start}${endpoint}${end}`;
     const result = await communication.describe(proposal);
@@ -436,8 +442,8 @@ test('URL confirmation separates Unicode quotes and punctuation without hiding U
 test('URL confirmation preserves quotes, other words, and unknown destinations', async () => {
   const first = 'https://mcp.example.test/mcp';
   const second = `${first}?`;
-  const unknown = 'https://unknown.example.test/check';
-  const question = `Can I use "${second}" and ${first} for setup, then inspect ${unknown}?`;
+  const unknown = 'https://unknown.example.test/tools(v2)';
+  const question = `Can I use "${second}" and ${first} for setup, then inspect (${unknown})?`;
   let reviewed: Record<string, any> | undefined;
   const communication = createCommunication({
     pool: { query: async () => ({ rows: [] }) } as unknown as pg.Pool,
@@ -459,8 +465,7 @@ test('URL confirmation preserves quotes, other words, and unknown destinations',
   });
   assert.equal(visibleMarkdownText(result.question), question);
   assert.equal(reviewed!.text, question);
-  assert.deepEqual(reviewed!.literalValues.slice(0, 2), [second, first]);
-  assert.ok(reviewed!.literalValues.some((value: string) => value.startsWith(unknown)));
+  assert.deepEqual(reviewed!.literalValues, [second, first, unknown]);
   assert.equal(
     markdownNodes(result.question).some((node) => node.type === 'link' || node.type === 'html'),
     false,
