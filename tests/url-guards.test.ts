@@ -24,7 +24,7 @@ import { previewableUrl, publicMediaUrl } from '../src/shared/link-preview.ts';
 import { MessageQuote, MessageText } from '../src/web/components/message.tsx';
 import { connectionUrl } from '../src/web/lib/connection-url.ts';
 import { messageSetupLinks } from '../src/web/lib/message-links.ts';
-import { ownerAddress } from '../src/providers/discovered/remote.ts';
+import { ownerAddress, publicHttps } from '../src/providers/discovered/remote.ts';
 import { paymentExplanation, paymentInvitation } from '../src/runtime/communication.ts';
 import {
   escapeForwarder,
@@ -277,7 +277,7 @@ test('every redirect checks DNS again and requests use the verified address', as
   }
 });
 
-test('pinned HTTP transport sends no cookies or authorization and stops after bounded metadata', async () => {
+test('pinned HTTP transport sends no cookies or authorization and stops reading at its byte limit', async () => {
   let seenHost = '';
   const server = createServer((request, reply) => {
     seenHost = request.headers.host!;
@@ -286,6 +286,15 @@ test('pinned HTTP transport sends no cookies or authorization and stops after bo
     assert.equal(request.headers.referer, undefined);
     assert.equal(request.headers['accept-encoding'], 'identity');
     assert.ok(!request.headers.accept?.includes('image/gif'));
+    if (request.url === '/endless') {
+      reply.writeHead(200);
+      const send = () => {
+        while (!reply.destroyed && reply.write('x'.repeat(16384)));
+        if (!reply.destroyed) reply.once('drain', send);
+      };
+      send();
+      return;
+    }
     const body = `<head><title>Bounded metadata</title></head>${'x'.repeat(400000)}`;
     reply.writeHead(200, {
       'content-type': 'text/html',
@@ -307,6 +316,16 @@ test('pinned HTTP transport sends no cookies or authorization and stops after bo
     assert.equal(seenHost, `unresolvable.example:${port}`);
     assert.ok(result.body.byteLength <= 256 * 1024);
     assert.match(Buffer.from(result.body).toString(), /Bounded metadata/);
+    await assert.rejects(
+      requestPublicPreview({
+        url: new URL(`http://unresolvable.example:${port}/endless`),
+        address: '127.0.0.1',
+        signal: AbortSignal.timeout(2000),
+        maxBytes: 1024,
+        metadata: false,
+      }),
+      /too large/,
+    );
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -370,6 +389,18 @@ test('an owner-entered address binds every request and consent page to that inst
   await assert.rejects(
     ownerAddress('http://93.184.216.34')('http://93.184.216.34/mcp-server/http'),
   );
+  const signIn = ownerAddress('http://100.100.1.1:8080', publicHttps);
+  assert.equal(
+    (await signIn('http://100.100.1.1:8080/.well-known/oauth-protected-resource')).address,
+    '100.100.1.1',
+  );
+  assert.equal((await signIn('https://93.184.216.34/oauth/token')).address, '93.184.216.34');
+  for (const value of [
+    'http://93.184.216.34/oauth/token',
+    'https://192.168.1.1/oauth/token',
+    'https://100.100.1.2/oauth/token',
+  ])
+    await assert.rejects(signIn(value));
   const origin = 'http://localhost:4320';
   assert.equal(
     connectionUrl('http://localhost:5678/mcp-oauth/authorize', origin, 'http://127.0.0.1:5678'),

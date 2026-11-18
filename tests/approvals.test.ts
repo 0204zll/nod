@@ -1714,6 +1714,50 @@ test(
         await finish(declined.turnId, 'cancelled');
       });
 
+      await t.test(
+        'a browser step quoted from informal owner words runs, and uncovered steps still ask',
+        async () => {
+          const request =
+            'no brecho.example.test clica no icone de lapis do anuncio da luminaria, muda o preço p 90 e salva as alteraçoes';
+          const step = (name: string) => ({
+            website: 'https://brecho.example.test',
+            page: 'https://brecho.example.test/minha-loja/anuncios',
+            step: 'click',
+            control: [{ role: 'button', name }],
+            command: { action: 'click', selector: '@e12' },
+          });
+          const turn = await begin(request);
+          for (const because of [
+            '...clica no icone de lapis do anuncio da luminaria',
+            '…salva as alteraçoes',
+            'clica no ícone de lápis do anúncio da luminária',
+            'salva as alterações',
+          ]) {
+            aligned = () => ({ run: true, because });
+            const verdict = await trust.check(turn, 'NOD_browser', step('editar anúncio'));
+            assert.equal(verdict.confirm, false, because);
+            assert.equal(!verdict.confirm && verdict.basis.kind, 'message', because);
+          }
+          for (const because of [
+            'clica no ícone ... salva as alterações',
+            'apaga o anúncio da luminária',
+            '...',
+          ]) {
+            aligned = () => ({ run: true, because });
+            compareVerdict(await trust.check(turn, 'NOD_browser', step('apagar anúncio')), {
+              confirm: true,
+              reason: 'unrequested',
+            });
+          }
+          aligned = false;
+          compareVerdict(await trust.check(turn, 'NOD_browser', step('apagar anúncio')), {
+            confirm: true,
+            reason: 'unrequested',
+          });
+          await finish(turn.turnId, 'cancelled');
+        },
+      );
+
       await t.test('a newer chat correction before action handoff prevents the write', async () => {
         aligned = true;
         const action = 'GMAIL_SEND_EMAIL';
@@ -4243,6 +4287,64 @@ test(
         const error = await request('GET', '/api/fixture-error');
         assert.equal(error.statusCode, 500);
         assert.equal(error.body.includes('fixture-private-key'), false);
+      });
+
+      await t.test('a written no carries the owner words to the resumed turn', async () => {
+        const reply = 'No, stop this task for now';
+        replyAnswers[reply.toLowerCase()] = 'no';
+        const pending = async (channel?: string) => {
+          const turn = await begin('Synthetic paperwork comparison', { channel });
+          const id = await propose(turn, 'NOD_notification_preferences_update', {
+            notificationRule: 'Synthetic declined change',
+          });
+          await finish(turn.turnId);
+          return id;
+        };
+        const resumed = async (id: string) => {
+          const approval = await stored(id);
+          assert.equal(approval.status, 'declined');
+          return row(approval.execution_turn_id);
+        };
+        const executed = calls.length;
+        const written = await pending('telegram:fixture-decline');
+        await messages.submit(reply, [], {
+          channel: 'telegram:fixture-decline',
+          replyToMessageId: (await stored(written)).confirmation_message_id,
+        });
+        const writtenTurn = await resumed(written);
+        assert.equal(writtenTurn.source, 'resume');
+        assert.ok(writtenTurn.prompt.includes(reply), writtenTurn.prompt);
+        aligned = true;
+        const check = await trust.check(await running(writtenTurn.id), 'GMAIL_SEND_EMAIL', {
+          recipient_email: 'synthetic@example.test',
+          body: 'Synthetic body.',
+        });
+        const said = reviews.at(-1)?.userMessages as Array<{
+          text: string;
+          canAuthorize?: boolean;
+        }>;
+        assert.equal(said.find((message) => message.text === reply)?.canAuthorize, false);
+        assert.equal(check.confirm, true);
+        aligned = false;
+        await finish(writtenTurn.id, 'succeeded');
+        const clicked = await pending();
+        const record = await stored(clicked);
+        await transaction(
+          (client) =>
+            approvals.chat.accept(client, {
+              text: 'Synthetic refusal label',
+              channel: 'web',
+              threadId: record.thread_id,
+              replyToMessageId: record.confirmation_message_id,
+              clientMessageId: randomUUID(),
+              clicked: true,
+              answer: { approvalId: clicked, approved: false },
+            }),
+          db.pool,
+        );
+        assert.doesNotMatch((await resumed(clicked)).prompt, /Synthetic refusal label/);
+        assert.equal(calls.length, executed);
+        delete replyAnswers[reply.toLowerCase()];
       });
 
       await t.test(

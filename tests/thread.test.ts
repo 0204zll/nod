@@ -25,7 +25,12 @@ import {
   type FeedbackReceipt,
   type FeedbackSubmission,
 } from '../src/shared/feedback.ts';
-import { ModelRequestError, type RuntimeContext, type RuntimeResult } from '../src/ports/agent.ts';
+import {
+  ContextLimitError,
+  ModelRequestError,
+  type RuntimeContext,
+  type RuntimeResult,
+} from '../src/ports/agent.ts';
 import type { ConnectedApp } from '../src/ports/integrations.ts';
 import type { MemoryCurator } from '../src/ports/memory-curator.ts';
 import { ObjectStoreConflict, type PrivateObjectStore } from '../src/ports/object-storage.ts';
@@ -417,7 +422,6 @@ test(
     vault.registerRoutes(app);
     createAccountSession({
       accounts,
-      origin: `http://localhost:${port}`,
       localUser: { id: ownerId, name: 'You', email: null, avatarUrl: null },
       start: () => onboarding.complete(),
     }).register(app);
@@ -487,7 +491,7 @@ test(
 
     let limitReached = false;
     const interruptedText = 'Synthetic interrupted turn.';
-    const modelErrors = new Map<string, string>();
+    const modelErrors = new Map<string, string | ModelRequestError>();
     let beforeRuntimeFailure = async (_context: RuntimeContext) => {};
     let presentInterruption: NonNullable<ThreadDependencies['present']> = async () =>
       interruptedText;
@@ -602,6 +606,8 @@ test(
           return { status: 'succeeded' };
         }
         if (context.prompt === 'limit race fixture') throw new Error(spendingLimitReached);
+        if (context.prompt === 'unexpected failure fixture')
+          throw new Error('Synthetic runtime failure.');
         if (context.prompt.startsWith('session-fixture')) {
           await sessionGates.get(context.prompt);
           return { status: 'succeeded' };
@@ -693,7 +699,8 @@ test(
           stagedReads.set(context.prompt, await readFile(context.attachments[0].path, 'utf8'));
         workspaceListings.set(context.prompt, await readdir(context.workspacePath));
         const modelError = modelErrors.get(context.prompt);
-        if (modelError) throw new ModelRequestError(modelError);
+        if (modelError)
+          throw typeof modelError === 'string' ? new ModelRequestError(modelError) : modelError;
         if (context.prompt === 'runtime-failure') {
           await beforeRuntimeFailure(context);
           throw Object.assign(new Error('Synthetic runtime failure for private-fixture'), {
@@ -3196,6 +3203,29 @@ test(
           }
         },
       );
+
+      await t.test('an unexpected turn failure offers a bug report', async () => {
+        const failed = await thread.submitUserMessage('unexpected failure fixture');
+        await waitFor(settled(failed.turnId));
+        const shown = async () =>
+          (
+            await db.pool.query(
+              "SELECT presentation FROM messages WHERE turn_id=$1 AND role='assistant' AND stream_id=$2",
+              [failed.turnId, `failure:${failed.turnId}`],
+            )
+          ).rows.map((row) => row.presentation);
+        await waitFor(async () => (await shown()).length === 1);
+        const card = (await shown())[0];
+        assert.equal(card.type, 'bug-report');
+        const draft = (
+          await db.pool.query('SELECT owner_id,summary FROM feedback_drafts WHERE id=$1', [
+            card.draftId,
+          ])
+        ).rows[0];
+        assert.equal(draft.owner_id, ownerId);
+        assert.equal(draft.summary, card.summary);
+        assert.doesNotMatch(draft.summary, /Synthetic runtime failure/);
+      });
 
       await t.test('a reached spending limit pauses all but owner messages', async (t) => {
         const raced = await thread.submitUserMessage('limit race fixture');
@@ -6249,6 +6279,156 @@ test(
             ],
           );
           planAnswer = () => null;
+        },
+      );
+
+      await t.test(
+        'a successful reply clears an earlier context failure without a restart',
+        async () => {
+          await waitFor(settledThread);
+          const question = await thread.submitUserMessage('ask-question');
+          await waitFor(settled(question.turnId));
+          const prompt = 'Synthetic context failure before a successful answer';
+          modelErrors.set(prompt, new ContextLimitError('Synthetic context window exceeded.'));
+          try {
+            const failed = await thread.submitUserMessage(prompt);
+            await waitFor(settled(failed.turnId));
+            const state = (await request('GET', '/api/state')).json();
+            assert.deepEqual(state.chatRecovery, { turnId: failed.turnId });
+            const asked = state.messages.find(
+              (message: { role: string; turnId: string }) =>
+                message.role === 'assistant' && message.turnId === question.turnId,
+            );
+            assert.ok(asked);
+            const answer = await thread.submitUserMessage('Synthetic successful answer', [], {
+              replyToMessageId: asked.id,
+            });
+            await waitFor(settled(answer.turnId));
+            assert.equal(await turnStatus(answer.turnId), 'succeeded');
+            assert.equal((await request('GET', '/api/state')).json().chatRecovery, undefined);
+            assert.equal(
+              (
+                await request('POST', '/api/conversation/restart-context', {
+                  threadId: failed.threadId,
+                  turnId: failed.turnId,
+                })
+              ).statusCode,
+              409,
+            );
+          } finally {
+            modelErrors.delete(prompt);
+          }
+        },
+      );
+
+      await t.test(
+        'a context restart keeps chat, files and independent work and refuses stale requests',
+        async () => {
+          await waitFor(settledThread);
+          const threadId = (await thread.activeThread()).id;
+          const backgroundPrompt = 'Synthetic independent work during context recovery';
+          const failedPrompt = 'Synthetic chat context failure';
+          block(backgroundPrompt);
+          modelErrors.set(
+            failedPrompt,
+            new ContextLimitError('Synthetic context window exceeded.'),
+          );
+          const background = await thread.enqueueTurn(backgroundPrompt, {
+            source: 'schedule',
+            background: true,
+          });
+          try {
+            await waitFor(() => Boolean(ran(background)));
+            const held = ran(background)!;
+            const file = join(held.workspacePath, 'context-recovery.txt');
+            await writeFile(file, 'Synthetic saved work');
+            const earlierPrompt = 'Synthetic completed chat before context recovery';
+            const earlier = await thread.submitUserMessage(earlierPrompt);
+            await waitFor(settled(earlier.turnId));
+            const question = await thread.submitUserMessage('ask-question');
+            await waitFor(settled(question.turnId));
+            const failed = await thread.submitUserMessage(failedPrompt);
+            await waitFor(settled(failed.turnId));
+            assert.equal(await turnStatus(failed.turnId), 'failed');
+            assert.equal(await turnStatus(question.turnId), 'waiting');
+            await waitFor(async () =>
+              Boolean(
+                (
+                  await db.pool.query('SELECT 1 FROM messages WHERE turn_id=$1 AND stream_id=$2', [
+                    failed.turnId,
+                    `context-failure:${failed.turnId}`,
+                  ])
+                ).rowCount,
+              ),
+            );
+            const state = (await request('GET', '/api/state')).json();
+            assert.deepEqual(state.chatRecovery, { turnId: failed.turnId });
+            const messageIds = state.messages.map((message: { id: string }) => message.id);
+            const restart = (input = { threadId, turnId: failed.turnId }) =>
+              request('POST', '/api/conversation/restart-context', input);
+            assert.equal(
+              (
+                await app.inject({
+                  method: 'POST',
+                  url: '/api/conversation/restart-context',
+                  headers: { host: headers.host },
+                  payload: { threadId, turnId: failed.turnId },
+                })
+              ).statusCode,
+              401,
+            );
+            for (const input of [
+              { threadId: randomUUID(), turnId: failed.turnId },
+              { threadId, turnId: randomUUID() },
+              { threadId, turnId: background },
+            ])
+              assert.equal((await restart(input)).statusCode, 409);
+            const previousNodeEnv = process.env.NODE_ENV;
+            process.env.NODE_ENV = 'production';
+            try {
+              assert.equal((await restart()).statusCode, 200);
+            } finally {
+              if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+              else process.env.NODE_ENV = previousNodeEnv;
+            }
+            const recovered = (await request('GET', '/api/state')).json();
+            assert.equal(recovered.threadId, threadId);
+            assert.equal(recovered.chatRecovery, undefined);
+            assert.ok(
+              messageIds.every((id: string) =>
+                recovered.messages.some((message: { id: string }) => message.id === id),
+              ),
+            );
+            assert.equal((await restart()).statusCode, 409);
+            assert.equal(held.signal.aborted, false);
+            assert.equal(held.contextRestart, undefined);
+            assert.equal(await turnStatus(background), 'running');
+            assert.equal(await readFile(file, 'utf8'), 'Synthetic saved work');
+            const next = await thread.submitUserMessage('Synthetic request after context recovery');
+            await waitFor(settled(next.turnId));
+            const context = ran(next.turnId)!;
+            assert.equal(context.threadId, threadId);
+            assert.equal(context.sessionId, threadId);
+            assert.equal(context.workspacePath, held.workspacePath);
+            assert.ok(context.contextRestart);
+            assert.ok(context.history.every((message) => !message.text.includes(failedPrompt)));
+            assert.ok(context.history.every((message) => !message.text.includes(earlierPrompt)));
+            assert.equal(
+              (await request('GET', '/api/messages/search?q=Synthetic%20chat%20context%20failure'))
+                .json()
+                .some((message: { turnId: string }) => message.turnId === failed.turnId),
+              true,
+            );
+            assert.equal(
+              (await db.pool.query('SELECT archived_at FROM threads WHERE id=$1', [threadId]))
+                .rows[0].archived_at,
+              null,
+            );
+          } finally {
+            modelErrors.delete(failedPrompt);
+            release(backgroundPrompt);
+            await waitFor(settled(background));
+          }
         },
       );
 
@@ -10308,7 +10488,17 @@ test(
               assert.equal(turn.status, 'failed');
               assert.equal(presentedFailures.length, 0);
               assert.ok(shown.includes(turn.error));
+              assert.equal(
+                (
+                  await db.pool.query(
+                    "SELECT presentation FROM messages WHERE turn_id=$1 AND role='assistant' AND stream_id=$2",
+                    [submitted.turnId, `model-failure:${submitted.turnId}`],
+                  )
+                ).rows[0].presentation,
+                null,
+              );
               assert.match(shown, /Synthetic alternative connection\./);
+              assert.equal((await request('GET', '/api/state')).json().chatRecovery, undefined);
               assert.match(shown, /\]\(\/settings\/models\)/);
               assert.ok(turn.error.length <= 2000);
               assert.ok(turn.error.startsWith(prefix));
@@ -10656,7 +10846,7 @@ test(
   { skip: !process.env.TEST_DATABASE_URL, timeout: 30_000 },
   async () => {
     const { pool, ownerId, store, post, memory, close } = await memoryFixture();
-    const { state, curator } = scriptedCurator();
+    const { calls, state, curator } = scriptedCurator();
     const learning = createMemoryLearning({ pool, ownerId, memory, curator });
     const add = (area: string, slug: string, text: string) => (m: number) => ({
       op: 'add',
@@ -10684,6 +10874,17 @@ test(
         archived: [],
       });
       assert.equal(await memory.context(), `${path}: ${short}`);
+      const invented = randomUUID();
+      const asked = calls.length;
+      await assert.rejects(
+        learning.remember({ messages: [invented] }, first.sourceMessageId),
+        (error: Error) => error.message.includes(invented),
+      );
+      await assert.rejects(
+        learning.remember({ messages: [short] }, first.sourceMessageId),
+        (error: Error) => error.name !== 'ZodError' && !error.message.includes(short),
+      );
+      assert.equal(calls.length, asked);
       const reopened = createMemoryService({ pool, ownerId, store });
       assert.equal(((await reopened.read({ path })) as { text: string }).text, short);
       const detailed = 'Make progress reports detailed from now on.';
@@ -10786,6 +10987,15 @@ test(
       await remember([add('about', 'before-clear', beforeClear)], beforeClearMessage);
       assert.equal((await memory.view()).notes.length, 1);
       curator.curate = curate;
+
+      const older = await post('My synthetic library card renews in March.');
+      for (let index = 0; index < 10; index++) await post(`Synthetic filler ${index}.`);
+      const renewal = await post('Remember that renewal month.');
+      state.answer = () => ({ ops: [] });
+      await learning.remember({}, renewal.sourceMessageId);
+      assert.doesNotMatch(JSON.stringify(calls.at(-1)!.input), /renews in March/);
+      await learning.remember({ messages: [older.id] }, renewal.sourceMessageId);
+      assert.match(JSON.stringify(calls.at(-1)!.input), /renews in March/);
     } finally {
       await close();
     }
@@ -11183,6 +11393,46 @@ test(
       'submitted',
     );
     assert.deepEqual(captured, ['feedback_sent']);
+  },
+);
+
+test(
+  'bug report drafts send their stored summary once and only for their owner',
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 30_000 },
+  async (t) => {
+    const f = await feedbackFixture(t);
+    await f.pool.query(`CREATE TABLE IF NOT EXISTS feedback_drafts (
+      id uuid PRIMARY KEY, owner_id text NOT NULL, thread_id uuid NOT NULL,
+      summary text NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    const owner = await f.open();
+    const other = await f.open();
+    const id = randomUUID();
+    await f.pool.query(
+      'INSERT INTO feedback_drafts(id,owner_id,thread_id,summary) VALUES($1,$2,$3,$4)',
+      [id, owner.ownerId, randomUUID(), 'Synthetic draft summary.'],
+    );
+    const send = {
+      method: 'POST' as const,
+      url: `/api/feedback/drafts/${id}/send`,
+      payload: { reportId: null },
+    };
+    assert.equal(
+      (await other.app.inject({ method: 'GET', url: `/api/feedback/drafts/${id}` })).statusCode,
+      404,
+    );
+    assert.equal((await other.app.inject(send)).statusCode, 404);
+    assert.equal(f.state.envelopes.length, 0);
+    assert.equal((await owner.app.inject(send)).json().status, 'submitted');
+    assert.equal((await owner.app.inject(send)).json().status, 'submitted');
+    assert.equal(f.state.envelopes.length, 1);
+    assert.equal(f.state.envelopes[0]!.submissionId, id);
+    assert.equal(f.state.envelopes[0]!.feedback, 'Synthetic draft summary.');
+    assert.equal(
+      (await owner.app.inject({ method: 'GET', url: `/api/feedback/drafts/${id}` })).json().receipt
+        .status,
+      'submitted',
+    );
   },
 );
 

@@ -11,7 +11,7 @@ import type { Pool } from 'pg';
 import { Compile } from 'typebox/compile';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
-import { appConfirmation } from '../src/ports/agent.ts';
+import { appConfirmation, ContextLimitError, ModelRequestError } from '../src/ports/agent.ts';
 import type {
   Agent,
   AgentEvent,
@@ -47,6 +47,61 @@ import { sourceReadSchema } from '../src/shared/proactivity.ts';
 import { memoryObjectStore } from './fixtures/object-store.ts';
 import { createCommandRedactor, createErrorRedactor } from '../src/server/redaction.ts';
 import type { WorkspaceCommandRecord } from '../src/shared/execution.ts';
+
+test('only a terminal context failure requests a chat context restart', async (t) => {
+  for (const ending of [
+    'context',
+    'context-length',
+    'recovered',
+    'summary-access',
+    'quota',
+    'output',
+  ] as const)
+    await t.test(ending, async () => {
+      const run = () =>
+        fixture(async (_tools, emit) => {
+          emit({ type: 'message_start' });
+          if (ending === 'context-length' || ending === 'output') {
+            emit({
+              type: 'message_end',
+              status: 'incomplete',
+              contextExhausted: ending === 'context-length',
+            });
+            return;
+          }
+          emit({
+            type: 'error',
+            message:
+              ending === 'quota'
+                ? 'Synthetic quota exceeded.'
+                : 'Synthetic context window exceeded.',
+            contextExhausted: ending !== 'quota',
+          });
+          emit({ type: 'message_end', status: 'failed' });
+          if (ending === 'summary-access')
+            emit({ type: 'error', message: 'Compaction failed: HTTP 401 access denied.' });
+          if (ending === 'recovered') {
+            emit({ type: 'retry', model: 'Synthetic model', attempt: 1, attempts: 3 });
+            emit({ type: 'message_start' });
+            emit({ type: 'final', text: 'Synthetic recovered answer.' });
+            emit({ type: 'message_end', status: 'succeeded' });
+          }
+        });
+      if (ending === 'recovered') assert.equal((await run()).result.status, 'succeeded');
+      else
+        await assert.rejects(run, (error: unknown) => {
+          if (ending === 'context' || ending === 'context-length')
+            return error instanceof ContextLimitError;
+          if (ending === 'quota' || ending === 'summary-access')
+            return (
+              error instanceof ModelRequestError &&
+              !(error instanceof ContextLimitError) &&
+              error.message.includes(ending === 'quota' ? 'Synthetic quota exceeded.' : 'HTTP 401')
+            );
+          return error instanceof Error && error.constructor === Error;
+        });
+    });
+});
 
 async function fixture(
   run: (
@@ -249,62 +304,9 @@ test('command output removes whole secrets before taking a bounded tail', async 
   assert.equal(records[5]?.output, '{"name":"password","value":"[redacted]"}');
 });
 
-test('live status stays out of chat replies and removes known secrets', async () => {
-  const events: Array<{ type: string; summary: string }> = [];
-  const statuses = ['Finding flights back from Copenhagen', 'Comparing flight prices'];
-  let delegated = false;
-  const result = await fixture(
-    async (tools, emit, options) => {
-      if (options.parentRunId) {
-        assert.equal(tools.has('set_status'), false);
-        delegated = true;
-        emit({ type: 'final', text: 'The synthetic flight comparison is complete.' });
-        return;
-      }
-      const status = tools.get('set_status')!;
-      assert.ok(status.eager, 'Live status must be available before tool discovery.');
-      for (const prompt of [options.systemPrompt, options.compactInstructions?.systemPrompt])
-        assert.ok(
-          prompt?.includes(status.name),
-          'Every model context needs the status capability.',
-        );
-      await call(tools, 'set_status', { text: statuses[0] });
-      await call(tools, 'set_status', { text: statuses[1] });
-      await call(tools, 'set_status', { text: 'Checking synthetic-private-code' });
-      await assert.rejects(call(tools, 'set_status', { text: ' '.repeat(3) }));
-      await assert.rejects(call(tools, 'set_status', { text: 'x'.repeat(141) }));
-      await call(tools, 'delegate', {
-        title: 'Check synthetic flights',
-        instruction: 'Compare the two synthetic flight options.',
-      });
-      emit({ type: 'final', text: 'Two flights meet your budget.' });
-    },
-    {
-      emit: async (type, summary) => {
-        events.push({ type, summary });
-      },
-    },
-    { redactError: (text) => String(text).replaceAll('synthetic-private-code', '[redacted]') },
-  );
-  assert.equal(delegated, true);
-  assert.deepEqual(
-    events.filter(({ type }) => type === 'step').map(({ summary }) => summary),
-    [...statuses, 'Checking [redacted]'],
-  );
-  assert.deepEqual(result.replies, ['Two flights meet your budget.']);
-  assert.equal(result.result.status, 'succeeded');
-  await fixture(
-    async (tools) => {
-      assert.equal(tools.has('set_status'), false);
-    },
-    { background: true },
-  );
-});
-
 test('partial delivery continues across browser and app reads in chat and saved tasks', async () => {
   for (const task of [false, true]) {
     const delivered: string[] = [];
-    const steps: string[] = [];
     const first = 'The public plan costs EUR 12 per seat. The account price is not checked yet.';
     const final = 'Your account price is EUR 10 per seat, so keep your current plan.';
     let reads = 0;
@@ -314,7 +316,6 @@ test('partial delivery continues across browser and app reads in chat and saved 
         await call(tools, 'send_message', { text: first, intent: 'update' });
         assert.deepEqual(delivered, [first]);
         assert.equal(options.shouldStop(), false);
-        await call(tools, 'set_status', { text: 'Checking the account price' });
         await call(tools, 'apps', {
           action: 'READ_PLAN',
           args: { plan_id: 'synthetic-plan' },
@@ -343,9 +344,6 @@ test('partial delivery continues across browser and app reads in chat and saved 
         reply: async (text) => {
           delivered.push(text);
         },
-        emit: async (type, summary) => {
-          if (type === 'step') steps.push(summary);
-        },
       },
       {
         computer: fakeComputer({
@@ -359,7 +357,6 @@ test('partial delivery continues across browser and app reads in chat and saved 
     );
     assert.equal(reads, 2);
     assert.deepEqual(delivered, [first, final]);
-    assert.deepEqual(steps, ['Checking the account price']);
     assert.equal(result.status, 'succeeded');
     assert.equal(aborted, false);
   }
@@ -2515,6 +2512,42 @@ test('observer tools reject invalid read modes and incomplete saves before serve
   );
   assert.equal(reads, 4);
   assert.equal(updates, 4);
+});
+
+test('bug report actions stay out of background work without a task', async () => {
+  const managed: string[] = [];
+  const manage = async (action: string) => {
+    managed.push(action);
+    return 'ok';
+  };
+  const draft = { action: 'bug_report_draft', args: { summary: 'Synthetic failure.' } };
+  await fixture(
+    async (tools) => {
+      await assert.rejects(
+        call(tools, 'manage_personal_context', draft),
+        /only for work the owner follows/,
+      );
+    },
+    { background: true, manage },
+  );
+  assert.deepEqual(managed, []);
+  await fixture(
+    async (tools) => {
+      await call(tools, 'manage_personal_context', draft);
+    },
+    {
+      background: true,
+      manage,
+      taskContext: {
+        id: randomUUID(),
+        title: 'Synthetic task',
+        brief: 'Find the synthetic result.',
+        doneWhen: 'The result is delivered.',
+        revision: 1,
+      },
+    },
+  );
+  assert.deepEqual(managed, ['bug_report_draft']);
 });
 
 test('proactive work has no write routes and cannot send model text', async () => {

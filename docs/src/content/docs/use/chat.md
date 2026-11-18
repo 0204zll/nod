@@ -9,6 +9,8 @@ Chat is where you give Nod work, answer its questions and get the results.
 
 Nod keeps one ongoing conversation with you. The desktop app, the web app, Telegram and WhatsApp all add to that same conversation, so Nod remembers what you said in any of them.
 
+To change topics, type your new request in this conversation. There is no **New chat** control. You do not need to delete data to change topics.
+
 Nod follows your latest clear message's language, spoken or typed, including questions, confirmations and connection instructions. An explicit language request takes precedence. Only your own messages set it, never your email or other data, and before you've written anything, such as at the start of setup, Nod writes in English. Asking for an email or document in a different language applies to that output; a neutral acknowledgement such as "OK" keeps the preceding language. What Nod reads on websites, in email and in documents comes back translated. It keeps the original wording only in quotes, such as a menu or button name you need to find, with a short translation when the meaning isn't clear. Voice, region, date format and time zone are separate preferences.
 
 ## Send a message
@@ -21,7 +23,7 @@ Messages can contain up to 100,000 characters. Some emoji and symbols count as t
 
 Web and desktop chat limit text message attempts to 120 per minute and audio message attempts to 120 per minute. If you reach either limit, wait and send again.
 
-Use the formatting toolbar when you want formatted text, including underline. Code stays literal, including text that looks like a link or a code fence.
+Use the formatting toolbar when you want formatted text, including underline and links. It also formats pasted text. Code stays literal, including text that looks like a link or a code fence.
 
 - **Attach files.** Select **Attach files**, press Command+U on Mac or Ctrl+U on Windows and Linux while writing a message, paste an image or drop files anywhere in the conversation. Each file stays inside the composer while it uploads. Select it to open the same file viewer used for sent attachments, or retry or remove a failed upload. Each file can be 90 MB or smaller. Nod gets a copy in its [workspace](/use/workspace/). It sees PNG, JPEG and WebP images directly, up to 3.75 MB each and 16 MB per message, unless the model you chose can't read images.
 - **Reply to a message.** Hover over a message and select **Reply**. On touch screens or in a narrow chat, hold or right-click the bubble to open **Reply**, **React** and **Copy**. You can also focus a message and press Shift+F10. Replies show a formatted excerpt in the composer and sent reply. Select it to jump to the original message, then select **Return to where you were** to go back. To see the time inside the bottom-right corner of a bubble, hover over the message, focus one of its controls, or tap its text.
@@ -137,6 +139,10 @@ Routine activity stays in the live line. Time passing alone does not trigger ano
 ### When Nod stops
 
 Work ends with an answer, a question, or a short message saying what stopped it. A schedule, or a task Nod started on its own, also tells you by name when it fails. When you only share context, such as a routine, Nod can save it without replying.
+
+In the web and desktop apps, if Nod cannot recover from a context error, a small banner offers **Restart chat**. Select it, then send your request again. Nod starts with fresh model context. Your messages, files, saved memory, connections and independent tasks stay. Earlier messages remain available through chat search. Restart does not repeat the failed request or any action it started.
+
+The banner appears only after automatic recovery fails and the chat has stopped. It is hidden when you start another chat request. Connection, access and quota errors keep their specific error and recovery steps.
 
 In the sidebar, the Chat item shows a moving dot while Nod works and a solid dot when it's waiting for you.
 
@@ -255,11 +261,17 @@ Links stay inline in the reply. Hover over a link, or focus it with the keyboard
 
 Nod answers each request in the app you sent it from. A message from Telegram gets its reply on Telegram. Everything also appears in the chat in Nod's own app. See [Telegram and WhatsApp](/use/channels/).
 
-## Send feedback
+## Report a bug
 
-Select **Send feedback** at the top of the chat, choose **Bug**, **Idea** or **Other**, and describe what happened. The dialog names the recipient: the Nod team at n8n by default, or your server operator's configured collector.
+Select **Report bug** at the top of the chat and describe what happened. The dialog opens on **Bug**; choose **Idea** or **Other** for other feedback. The dialog names the recipient: the Nod team at n8n by default, or your server operator's configured collector.
 
-After first-time setup, a short invitation points to **Send feedback**. Dismiss it with its close button or press Escape while the invitation or feedback button is focused; it stays dismissed on that device.
+After first-time setup, a short invitation points to **Report bug**. Dismiss it with its close button or press Escape while the invitation or **Report bug** is focused; it stays dismissed on that device.
+
+When something in Nod itself fails, or you tell Nod that something in Nod isn't working, Nod drafts a bug report once with a short summary of what happened. In the app, the draft appears in chat as a card with the summary, **Include diagnostic report**, **Review** and **Send report**. One click on **Send report** sends it to the same recipient as the dialog. Nod skips this for errors from outside services, such as a missing connection, credits, an app outage or a website's own error, and in background checks.
+
+A request, task or schedule run that stops on an unexpected error outside the model connection ends with the same card, with a short fixed summary. The error itself goes in the diagnostic report, not the summary. A model connection failure links to **Settings > Models** instead.
+
+In Telegram and WhatsApp, the draft arrives as text. Reply "send" to share the summary, without a diagnostic report, since you can't review one there. To add the report, send the same draft from its card in Nod on your computer. Nod sends it only when your reply clearly asks for that, and otherwise asks you to confirm first. Nothing is sent until you click **Send report** or reply to send it.
 
 **Include diagnostic report** starts selected for every feedback category until you change it. It adds recent messages, tool inputs and results, errors, and app activity to help fix problems and improve Nod. Known secrets and recognized personal details are masked, but redaction can miss information.
 
