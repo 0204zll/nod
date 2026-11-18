@@ -1383,6 +1383,78 @@ test(
   },
 );
 
+test('WhatsApp bot mode accepts a confirmed private ID when mapping lookups miss', async (t) => {
+  type Factory = NonNullable<Parameters<typeof createWhatsAppLinkedTransport>[0]['createSocket']>;
+  const events = new EventEmitter();
+  const allowedNumber = '12025550101';
+  const lid = '77777777@lid';
+  const text = 'Fixture request';
+  const dropped: WhatsAppDrop['reason'][] = [];
+  const transport = createWhatsAppLinkedTransport({
+    mode: 'bot',
+    allowedNumber,
+    store: {
+      open: async () => ({
+        get: async () => undefined,
+        set: async () => {},
+        clear: async () => {},
+        close: async () => {},
+      }),
+    },
+    createSocket: () =>
+      ({
+        ev: events,
+        user: { id: '12025550102:1@s.whatsapp.net' },
+        signalRepository: {
+          lidMapping: {
+            getPNForLID: async () => null,
+            getLIDForPN: async () => null,
+          },
+        },
+        end: () => {},
+      }) as unknown as ReturnType<Factory>,
+    onDrop: ({ reason }) => dropped.push(reason),
+  });
+  t.after(() => transport.close());
+  await transport.pairing!();
+  events.emit('connection.update', { connection: 'open' });
+  assert.equal((await transport.pairing!()).state, 'connected');
+
+  const upsert = (id: string, remoteJid: string) => {
+    events.emit('messages.upsert', {
+      type: 'notify',
+      messages: [
+        {
+          key: { id, remoteJid, fromMe: false, addressingMode: 'lid' },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+          message: { conversation: text },
+        },
+      ],
+    });
+  };
+  const accepted: InboundMessage[] = [];
+  const accept = async (message: InboundMessage) => {
+    accepted.push(message);
+  };
+  events.emit('lid-mapping.update', { lid, pn: `${allowedNumber}@s.whatsapp.net` });
+  upsert('from-owner', lid);
+  await transport.poll!(accept);
+  const ownerDrops = dropped.join(', ') || 'none';
+
+  upsert('from-unverified-sender', '88888888@lid');
+  await transport.poll!(accept);
+  assert.deepEqual(
+    accepted.map(({ messageId, senderId, threadId, text }) => ({
+      messageId,
+      senderId,
+      threadId,
+      text,
+    })),
+    [{ messageId: 'from-owner', senderId: allowedNumber, threadId: lid, text }],
+    `Expected only the configured sender's message. Drops for that sender: ${ownerDrops}.`,
+  );
+});
+
 test('Telegram media keeps native replies and checks the sender before any download', async () => {
   const bytes = Buffer.from('synthetic image bytes');
   const requests: string[] = [];
