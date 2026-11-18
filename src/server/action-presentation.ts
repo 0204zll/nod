@@ -257,6 +257,7 @@ const tools: Record<string, string> = {
   'browser session': 'Opened a saved session',
   apps: 'Used a connected app',
   files: 'Handled local files',
+  computer: 'Used an app',
   'manage apps': 'Checked connected apps',
   'manage personal context': 'Checked schedules or memory',
   skills: 'Used a skill',
@@ -270,10 +271,27 @@ const tools: Record<string, string> = {
   'create audio': 'Made audio',
 };
 
+const computerSteps: Record<string, string> = {
+  apps: 'Checked open apps',
+  open: 'Opened the app',
+  snapshot: 'Read the window',
+  find: 'Looked for a control',
+  screenshot: 'Looked at the window',
+  press: 'Pressed a control',
+  set_value: 'Filled in a field',
+  type: 'Typed text',
+  select: 'Chose an option',
+  focus: 'Selected a field',
+  key: 'Used a shortcut',
+  keep_out: 'Kept an app out',
+};
+
 export function toolTitle(summary: string) {
   if (tools[summary]) return tools[summary];
   const browser = /^browser ([a-z_]+)$/.exec(summary)?.[1];
   if (browser) return `Browser: ${browser.replaceAll('_', ' ')}`;
+  const computer = /^computer ([a-z_]+)$/.exec(summary)?.[1];
+  if (computer) return computerSteps[computer] ?? 'Used an app';
   const server = /^mcp {2}(.+?) {2}.+$/.exec(summary)?.[1];
   return server ? `Used ${server}` : (tools[summary] ?? summary);
 }
