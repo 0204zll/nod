@@ -142,6 +142,7 @@ type VaultUse = {
   reason: 'entered' | 'picked';
 };
 type VaultOptions = {
+  signal?: AbortSignal;
   analytics?: CaptureAnalytics;
   refresh?(): void;
   onUse?(use: VaultUse, client: PoolClient): Promise<void>;
@@ -156,7 +157,7 @@ type VaultOptions = {
   ): Promise<void>;
   resume(turnId: string, client: PoolClient): Promise<void>;
   retry(turnId: string): Promise<void>;
-  inject(input: CredentialInjection): Promise<CredentialSubmission | void>;
+  inject(input: CredentialInjection, signal?: AbortSignal): Promise<CredentialSubmission | void>;
   keyStore: CredentialKeyStore;
   requestKey: Buffer;
   page?(threadId: string, step?: BrowserAction): Promise<BrowserPage>;
@@ -169,6 +170,7 @@ type VaultOptions = {
   selectSignInMethod?(
     threadId: string,
     input: { origin: string; document: string; methodId: string },
+    signal?: AbortSignal,
   ): Promise<void>;
   emailCode?(input: EmailCodeRequest, signal: AbortSignal): Promise<PrivateEmailCode | undefined>;
   icon?(origin: string): Promise<SiteIcon | null>;
@@ -206,7 +208,7 @@ type RequestRow = {
   kind: CredentialRequest['kind'];
   token_hash: string;
   status: 'pending' | 'consumed' | 'superseded' | 'retried';
-  operation_status?: 'running' | 'submitted' | 'uncertain';
+  operation_status?: 'running' | 'submitted' | 'uncertain' | 'not_entered';
   selectors: CredentialInput | MethodInput;
   flow_id: string | null;
   flow_expires_at: Date | null;
@@ -577,7 +579,7 @@ export async function createVault(pool: Pool, options: VaultOptions) {
       owner_id text PRIMARY KEY, account text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now()
     );
   `);
-  const uses = await createVaultUses(pool, owner, options.analytics);
+  const uses = await createVaultUses(pool, owner, options.analytics, options.signal);
   let keyPromise: Promise<Buffer> | undefined;
   const key = () => {
     keyPromise ??= options.keyStore
@@ -1373,6 +1375,7 @@ export async function createVault(pool: Pool, options: VaultOptions) {
       label: row.label,
       kind: row.kind,
       status: requestStatus(row),
+      ...(row.operation_status === 'not_entered' ? { notEntered: true } : {}),
     }));
   }
 
@@ -1436,6 +1439,7 @@ export async function createVault(pool: Pool, options: VaultOptions) {
       fields: row.inspection.fields,
       ...(row.kind === 'method' ? { methods: row.inspection.methods ?? [] } : {}),
       status,
+      ...(row.operation_status === 'not_entered' ? { notEntered: true } : {}),
       ...(savedEntries ? { savedEntries } : {}),
       ...(row.kind === 'password' && username ? { username } : {}),
       ...(manager ? { passwordManager: manager } : {}),
@@ -1552,6 +1556,7 @@ export async function createVault(pool: Pool, options: VaultOptions) {
       id: request?.id,
       ownerId,
       rootTurnId: root,
+      turnId: turn.turnId,
       origin: input.origin,
       kind: input.kind,
       itemId: undefined as string | undefined,
@@ -1760,19 +1765,22 @@ export async function createVault(pool: Pool, options: VaultOptions) {
             ],
           );
       },
-      perform: async () => {
-        await options.inject({
-          ...input,
-          threadId: browserOf(turn),
-          ...(input.kind === 'otp'
-            ? { code: authenticator ? authenticatorCode(authenticator) : secret.code }
-            : input.kind === 'identifier'
-              ? { username: secret.username }
-              : {
-                  username: input.usernameSelector ? secret.username : undefined,
-                  password: secret.password,
-                }),
-        });
+      perform: async (signal) => {
+        await options.inject(
+          {
+            ...input,
+            threadId: browserOf(turn),
+            ...(input.kind === 'otp'
+              ? { code: authenticator ? authenticatorCode(authenticator) : secret.code }
+              : input.kind === 'identifier'
+                ? { username: secret.username }
+                : {
+                    username: input.usernameSelector ? secret.username : undefined,
+                    password: secret.password,
+                  }),
+          },
+          signal,
+        );
         return true;
       },
       complete: async (client) => {
@@ -1961,6 +1969,7 @@ export async function createVault(pool: Pool, options: VaultOptions) {
           id: row.id,
           ownerId: owner,
           rootTurnId: row.root_turn_id,
+          turnId: row.turn_id,
           origin: row.origin,
           kind: 'method',
         },
@@ -1973,12 +1982,16 @@ export async function createVault(pool: Pool, options: VaultOptions) {
               row.id,
             ]);
           },
-          perform: () =>
-            options.selectSignInMethod!(row.browser_id ?? row.thread_id, {
-              origin: row.origin,
-              document: row.inspection.document!,
-              methodId,
-            }),
+          perform: (signal) =>
+            options.selectSignInMethod!(
+              row.browser_id ?? row.thread_id,
+              {
+                origin: row.origin,
+                document: row.inspection.document!,
+                methodId,
+              },
+              signal,
+            ),
           complete: async (client) => {
             await lockKey(client, `thread:${owner}`);
             if (
@@ -2097,7 +2110,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
     try {
       return await enterLogin(turn, ownerId, raw, { kind: 'selection', selected });
     } catch (error) {
-      if (error instanceof VaultUseError && error.statusCode === 502) throw error;
+      if (error instanceof VaultUseError && (error.statusCode === 502 || error.notEntered))
+        throw error;
       return false;
     }
   }
@@ -2150,7 +2164,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
         since,
       });
     } catch (error) {
-      if (error instanceof VaultUseError && error.statusCode === 502) throw error;
+      if (error instanceof VaultUseError && (error.statusCode === 502 || error.notEntered))
+        throw error;
       return false;
     }
   }
@@ -2160,7 +2175,7 @@ export async function createVault(pool: Pool, options: VaultOptions) {
     turnId: string,
     text: string,
     requestId: string,
-  ): Promise<{ status: 'submitted' | 'invalid' | 'unavailable' }> {
+  ): Promise<{ status: 'submitted' | 'invalid' | 'unavailable'; notEntered?: boolean }> {
     if (ownerId !== owner) return { status: 'unavailable' };
     const code = text.trim();
     if (!/^\d{4,8}$/.test(code)) return { status: 'invalid' };
@@ -2174,8 +2189,11 @@ export async function createVault(pool: Pool, options: VaultOptions) {
       if (rows.length !== 1) return { status: 'unavailable' };
       await submit(rows[0].token_hash, { code }, true);
       return { status: 'submitted' };
-    } catch {
-      return { status: 'unavailable' };
+    } catch (error) {
+      return {
+        status: 'unavailable',
+        ...(error instanceof VaultUseError && error.notEntered ? { notEntered: true } : {}),
+      };
     }
   }
 
@@ -2341,7 +2359,10 @@ export async function createVault(pool: Pool, options: VaultOptions) {
             [tokenHash(request.params.id), owner],
           );
           if (!rows[0]) throw new VaultError('Credential request not found.', 404);
-          return { status: requestStatus(rows[0]) };
+          return {
+            status: requestStatus(rows[0]),
+            ...(rows[0].operation_status === 'not_entered' ? { notEntered: true } : {}),
+          };
         },
       );
       scope.post<{ Params: { id: string } }>(
