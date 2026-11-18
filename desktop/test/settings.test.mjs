@@ -988,6 +988,7 @@ async function runningDesktop(
       status: () => status,
       notifyReady: updateReadinessNotice,
       checkUpdates: (updater, manual = true, restartReady = false) => { updates = updater; return checkForUpdates(manual, restartReady); },
+      reportUpdateStatus,
       registerFiles: () => { ${source.slice(source.indexOf('      disposeArtifactFiles = registerArtifactFileHandlers('), source.indexOf("      ipcMain.handle('nod:renderer-ready'"))} },
       quit,
       quitApp: (install = true) => { installUpdateOnQuit = install; return quitApp(); },
@@ -8537,6 +8538,13 @@ test('update failure details mask paths with spaces and keep structured reasons 
       'The update failed {"reason":"The signature is invalid.","status":403,"private":"PRIVATE_UPDATE_TOKEN"}',
     ),
     new Error('The request failed: access_token=PRIVATE_UPDATE_TOKEN'),
+    new Error('getaddrinfo ENOTFOUND private-host.example.invalid'),
+    new Error('getaddrinfo ENOTFOUND synthetic-device'),
+    new Error('connect ECONNREFUSED 192.0.2.41:443'),
+    new Error('connect ECONNREFUSED [2001:db8::41]:443'),
+    new Error('connect ECONNREFUSED ::ffff:192.0.2.41'),
+    new Error('connect ECONNREFUSED fe80::41%synthetic-device'),
+    new Error('connect ECONNREFUSED localhost:443'),
     Object.assign(new Error('The update failed.'), { code: 'PRIVATE_UPDATE_TOKEN' }),
     new Error(
       'The update failed {"code":"PRIVATE_UPDATE_TOKEN","reason":"The signature is invalid."}',
@@ -8558,13 +8566,44 @@ test('update failure details mask paths with spaces and keep structured reasons 
       ),
     );
     const message = f.handlers.get('nod:updates:status')(event).failure.message;
-    for (const privateValue of ['Synthetic', 'Owner', 'archive.zip', 'PRIVATE_UPDATE_TOKEN'])
+    for (const privateValue of [
+      'Synthetic',
+      'Owner',
+      'archive.zip',
+      'PRIVATE_UPDATE_TOKEN',
+      'private-host',
+      'example.invalid',
+      '192.0.2.41',
+      '2001:db8',
+      'fe80::41',
+      'synthetic-device',
+      'localhost',
+    ])
       assert.equal(message.includes(privateValue), false);
     if (failure.status || failure.message.includes('"status":403'))
       assert.match(message, /HTTP 403/);
     if (failure.cause || failure.message.includes('"reason"'))
       assert.match(message, /signature is invalid/);
     if (failure.code === 'EACCES') assert.match(message, /EACCES/);
+  }
+});
+
+test('update diagnostics keep the failed preparation or download step', async (t) => {
+  for (const phase of ['checking', 'preparing', 'downloading']) {
+    const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'));
+    await assert.rejects(
+      f.checkUpdates(
+        {
+          check: async () => {
+            f.reportUpdateStatus(phase);
+            throw new Error('The update request failed (HTTP 503).');
+          },
+        },
+        false,
+      ),
+    );
+    const log = await readFile(join(f.profileRoot, 'logs/startup.log'), 'utf8');
+    assert.ok(log.includes('update error phase=' + phase + ' '));
   }
 });
 

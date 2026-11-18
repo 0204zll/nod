@@ -1971,6 +1971,17 @@ async function finishEnginePreparation(pending = false) {
   return status;
 }
 
+function reportUpdateStatus(phase, progress) {
+  if (['checking', 'preparing', 'downloading'].includes(phase)) updateStep = phase;
+  const percent = Number.isFinite(progress)
+    ? Math.min(100, Math.max(0, Math.floor(progress * 100)))
+    : undefined;
+  if (phase === updatePhase && percent === updateProgress) return;
+  updatePhase = phase;
+  updateProgress = percent;
+  refreshUpdateMenu();
+}
+
 function publicUpdateStatus() {
   return {
     phase: updatePhase,
@@ -2050,6 +2061,17 @@ function updateFailureDetails(error) {
       .replace(/(?:[A-Z]:[\\/]|\\\\)[^\r\n<>"']+/gi, '<path>')
       .replace(/(?<![\w<>])\/[^/\s:'"<>][^\r\n:'"<>]*/g, '<path>')
       .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '<address>')
+      .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b(?::\d{1,5})?(?:[/?#][^\s<>"']*)?/g, '<host>')
+      .replace(
+        /\[?(?:[a-f0-9]{0,4}:){2,7}[a-f0-9]{0,4}(?:%[a-z0-9_.-]+)?\]?(?::\d{1,5})?(?:[/?#][^\s<>"']*)?/gi,
+        '<host>',
+      )
+      .replace(
+        /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}\b(?::\d{1,5})?(?:[/?#][^\s<>"']*)?/gi,
+        '<host>',
+      )
+      .replace(/\blocalhost(?::\d{1,5})?/gi, '<host>')
+      .replace(/(\b(?:ENOTFOUND|EAI_AGAIN)\s+)[^\s,;]+/g, '$1<host>')
       .replace(/[A-Za-z0-9+/_=-]{24,}/g, '<redacted>');
     parts.push(`${code}${message}${status ? ` (HTTP ${status})` : ''}`);
   }
@@ -2205,7 +2227,7 @@ async function checkForUpdates(manual = true, restartReady = false, confirmed = 
           updateFailure = { id: ++nextUpdateFailureId, phase, message };
         publishUpdateStatus();
         await updateEvent('error', {
-          phase: restarting ? 'restart' : 'check',
+          phase,
           message,
         });
         if (quitting) return;
@@ -2947,16 +2969,7 @@ else {
             else await preloadUpdateImages(assets, signal);
           },
           restart: restartForUpdate,
-          onStatus: (phase, progress) => {
-            if (['checking', 'preparing', 'downloading'].includes(phase)) updateStep = phase;
-            const percent = Number.isFinite(progress)
-              ? Math.min(100, Math.max(0, Math.floor(progress * 100)))
-              : undefined;
-            if (phase === updatePhase && percent === updateProgress) return;
-            updatePhase = phase;
-            updateProgress = percent;
-            refreshUpdateMenu();
-          },
+          onStatus: reportUpdateStatus,
         });
         if (!windows) {
           for (const name of [
