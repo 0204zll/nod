@@ -78,7 +78,10 @@ type ReturnTarget = 'apps' | 'onboarding' | 'window' | 'desktop';
 
 const catalogMs = 10 * 60_000;
 const gatewayAccessTool = 'get_n8n_gateway_access';
+const hiddenN8nTools = new Set([gatewayAccessTool, 'list_n8n_gateway_services']);
 const gatewayPathId = '6b1f7c2e-4d3a-4f8e-9c51-2a7e0d9b8f13';
+const gatewayServerName =
+  'n8n Gateway: image and video generation, web scraping and search, PDF tools';
 
 const gatewayAccessSchema = z.object({
   available: z.literal(true),
@@ -1251,7 +1254,7 @@ export async function createDiscoveredConnections(
       );
       return {
         tools: tools
-          .filter((tool) => row.service !== 'n8n' || tool.name !== gatewayAccessTool)
+          .filter((tool) => row.service !== 'n8n' || !hiddenN8nTools.has(tool.name))
           .map((tool) => redact(tool, token) as DiscoveredTool),
         ...(instructions
           ? { instructions: String(redact(instructions, token)).slice(0, 20_000) }
@@ -1561,7 +1564,7 @@ export async function createDiscoveredConnections(
                     connectionId: row.id,
                     pathId: path.id,
                     service: row.service,
-                    name: row.name,
+                    name: path.id === gatewayPathId ? gatewayServerName : row.name,
                     accountName: row.account_name,
                     ...(instructions ? { instructions } : {}),
                     tools,
