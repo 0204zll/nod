@@ -3,6 +3,7 @@ import { createHash, createHmac, randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
+import { parse as parseDomain } from 'tldts';
 import { openVaultValue, sealVaultValue } from './vault-crypto.ts';
 import { authenticatorCode } from './authenticator.ts';
 import { authenticatorKey } from '../shared/authenticator-key.ts';
@@ -390,6 +391,17 @@ export function credentialOrigin(value: string) {
       'Use only the website origin, such as https://example.com. Remove the path, query, and fragment.',
     );
   return url.origin;
+}
+
+export function credentialOrigins(value: string) {
+  const origin = credentialOrigin(value);
+  const url = new URL(origin);
+  const host = url.hostname.replace(/^www\./, '');
+  const domain = parseDomain(host, { allowPrivateDomains: true });
+  if (host.startsWith('www.') || domain.domain !== host || !(domain.isIcann || domain.isPrivate))
+    return [origin];
+  url.hostname = url.hostname === host ? `www.${host}` : host;
+  return [origin, url.origin];
 }
 
 function savedCredentialOrigin(value: string) {
@@ -1399,8 +1411,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
       const selected = chosen?.kind === 'identifier' ? chosen : undefined;
       username = await stagedUsername(selected);
       const entries = await pool.query<EntryRow>(
-        'SELECT e.* FROM vault_entries e WHERE e.owner_id=$1 AND e.origin=$2 ORDER BY e.updated_at DESC',
-        [row.owner_id, row.origin],
+        'SELECT e.* FROM vault_entries e WHERE e.owner_id=$1 AND e.origin=ANY($2::text[]) ORDER BY e.updated_at DESC',
+        [row.owner_id, credentialOrigins(row.origin)],
       );
       const matches =
         row.kind === 'password' && selected && username === undefined ? [] : entries.rows;
@@ -1613,8 +1625,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
             selected?.entry_id &&
             !(
               await client.query(
-                'SELECT id FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=$3 FOR SHARE',
-                [selected.entry_id, ownerId, input.origin],
+                'SELECT id FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=ANY($3::text[]) FOR SHARE',
+                [selected.entry_id, ownerId, credentialOrigins(input.origin)],
               )
             ).rowCount
           )
@@ -1627,8 +1639,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
             throw new VaultError('An authenticator key can only enter a verification code.', 409);
           const row = (
             await client.query<EntryRow>(
-              'SELECT * FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=$3 FOR SHARE',
-              [source.entryId, ownerId, input.origin],
+              'SELECT * FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=ANY($3::text[]) FOR SHARE',
+              [source.entryId, ownerId, credentialOrigins(input.origin)],
             )
           ).rows[0];
           if (!row) throw new VaultError('This saved login is no longer available.', 409);
@@ -1697,8 +1709,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
           if (entryId) {
             const row = (
               await client.query<EntryRow>(
-                'SELECT * FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=$3 FOR SHARE',
-                [entryId, ownerId, input.origin],
+                'SELECT * FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=ANY($3::text[]) FOR SHARE',
+                [entryId, ownerId, credentialOrigins(input.origin)],
               )
             ).rows[0];
             if (!row) throw new VaultError('No saved password is available for this website.', 404);
@@ -2062,8 +2074,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
     const root = await rootTurn(pool, turn, ownerId);
     if (!root) return undefined;
     const { rows } = await pool.query<EntryRow>(
-      'SELECT * FROM vault_entries WHERE owner_id=$1 AND origin=$2',
-      [ownerId, origin],
+      'SELECT * FROM vault_entries WHERE owner_id=$1 AND origin=ANY($2::text[])',
+      [ownerId, credentialOrigins(origin)],
     );
     if (!rows.length) return undefined;
     const credentialKey = await key();
