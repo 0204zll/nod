@@ -171,7 +171,11 @@ export function createDesktop(apps: DesktopApp[]): FakeDesktop {
       case 'inspect': {
         const app = byName(request.app);
         const window = app?.windows.find((item) => item.id === request.window);
-        if (!window) throw new Error('STALE_REF: That window is gone.');
+        const root =
+          app && request.menu
+            ? { ...menuBar(app), children: menuBar(app).children?.slice(2) }
+            : window?.root;
+        if (!root) throw new Error('STALE_REF: That window is gone.');
         const content = (node: DesktopElement): Record<string, unknown> => ({
           role: node.role,
           ...(node.secure
@@ -182,8 +186,10 @@ export function createDesktop(apps: DesktopApp[]): FakeDesktop {
                 children: (node.children ?? []).map(content),
               }),
         });
-        const tree = content(window.root);
-        return { tree, state: createHash('sha256').update(JSON.stringify(tree)).digest('hex') };
+        const tree = content(root);
+        const hash = (value: unknown) =>
+          createHash('sha256').update(JSON.stringify(value)).digest('hex');
+        return { tree, state: hash(tree), focus: hash([]), focused: [] };
       }
       case 'snapshot': {
         const id = `sfake${String(++snapshots).padStart(4, '0')}`;

@@ -244,7 +244,7 @@ type Control = {
 export type ComputerPrepared = Record<string, unknown> & {
   app?: Identity;
   control?: { role: string; name: string; window: string };
-  windowBinding?: { state: string; window: string; focus?: string };
+  windowBinding?: { state: string; window?: string; menu?: boolean; focus?: string };
 };
 type Refusal = IntegrationError & { notRun?: boolean };
 
@@ -453,9 +453,21 @@ export function createComputerUse(
     return tree;
   }
 
-  async function windowContext(app: string, window: string, signal?: AbortSignal, focus = false) {
+  async function windowContext(
+    app: string,
+    window: string | undefined,
+    signal?: AbortSignal,
+    focus = false,
+    menu = false,
+  ) {
     const result = await ask(
-      { op: 'inspect', app, window, ...(focus ? { focus: true } : {}) },
+      {
+        op: 'inspect',
+        app,
+        ...(window ? { window } : {}),
+        ...(focus ? { focus: true } : {}),
+        ...(menu ? { menu: true } : {}),
+      },
       signal,
     );
     const text = JSON.stringify(
@@ -477,7 +489,8 @@ export function createComputerUse(
       windowContext: redactSecretText(text),
       windowBinding: {
         state: result.state,
-        window,
+        ...(window ? { window } : {}),
+        ...(menu ? { menu: true } : {}),
         ...(focus ? { focus: String(result.focus) } : {}),
       },
     };
@@ -492,6 +505,7 @@ export function createComputerUse(
       binding.window,
       signal,
       Boolean(binding.focus),
+      Boolean(binding.menu),
     );
     if (
       current.windowBinding.state !== binding.state ||
@@ -606,7 +620,8 @@ export function createComputerUse(
       const node = await live(found, input.ref!, signal);
       const app = await appFor(root, found.pid!, keptOut, true, signal);
       const chosen = found.windowId ?? app.windows?.[0]?.id;
-      if (!chosen) throw new IntegrationError(`${found.app} has no open window.`, 409);
+      if (!chosen && !found.menu)
+        throw new IntegrationError(`${found.app} has no open window.`, 409);
       return {
         ...input,
         app: { bundle: found.bundle, name: found.app },
@@ -614,7 +629,9 @@ export function createComputerUse(
         ...(['COMPUTER_SET_VALUE', 'COMPUTER_TYPE'].includes(action)
           ? { replacesText: holdsText(node) }
           : {}),
-        ...(action !== 'COMPUTER_FOCUS' ? await windowContext(found.app, chosen, signal) : {}),
+        ...(action !== 'COMPUTER_FOCUS'
+          ? await windowContext(found.app, chosen, signal, false, !chosen && found.menu)
+          : {}),
       };
     }
     if (action === 'COMPUTER_KEY' && systemShortcut(input.keys!, platform))
@@ -831,7 +848,13 @@ export function createComputerUse(
             role: found.role,
             control: { role: found.role, name: found.name },
             ...(prepared.windowBinding
-              ? { window: prepared.windowBinding.window, expected: prepared.windowBinding.state }
+              ? {
+                  ...(prepared.windowBinding.window
+                    ? { window: prepared.windowBinding.window }
+                    : {}),
+                  ...(prepared.windowBinding.menu ? { menu: true } : {}),
+                  expected: prepared.windowBinding.state,
+                }
               : found.windowId
                 ? { window: found.windowId }
                 : {}),

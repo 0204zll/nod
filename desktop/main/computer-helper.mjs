@@ -79,7 +79,7 @@ function secureFocus(node) {
   );
 }
 
-function inspectResult(data) {
+function inspectResult(data, menu = false) {
   if (data.complete !== true || !data.tree || data.truncated || data.identity_unproven)
     throw new Error(
       'POLICY_DENIED: Nod could not read the complete window, so this step did not run.',
@@ -118,7 +118,18 @@ function inspectResult(data) {
           }),
     };
   };
-  const tree = walk(data.tree);
+  const tree = walk(
+    menu
+      ? {
+          ...data.tree,
+          children: data.tree.children?.slice(2),
+          children_count:
+            data.tree.children_count == null
+              ? undefined
+              : Math.max(0, data.tree.children_count - 2),
+        }
+      : data.tree,
+  );
   const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
   return { tree, state: hash(tree), focus: hash(focused), focused };
 }
@@ -266,7 +277,13 @@ export function createComputerHelper({
     check(request.app, appName, 'app'),
     ...(request.window ? ['--window-id', check(request.window, windowId, 'window')] : []),
   ];
-  const inspectArgs = (request) => ['snapshot', ...scope(request), '--max-depth', '50'];
+  const inspectArgs = (request) => [
+    'snapshot',
+    ...scope(request),
+    ...(request.menu ? ['--surface', 'menubar'] : []),
+    '--max-depth',
+    '50',
+  ];
 
   function guarded(request, args, input) {
     if (!request.expected && !request.control && !request.noSecureFocus) return run(args, input);
@@ -278,7 +295,7 @@ export function createComputerHelper({
       };
       if (request.expected || request.noSecureFocus) {
         const data = await read(inspectArgs(request));
-        const inspected = inspectResult(data);
+        const inspected = inspectResult(data, platform === 'darwin' && Boolean(request.menu));
         if (request.expected && inspected.state !== request.expected)
           throw new Error('STALE_REF: That window changed since this step was checked.');
         if (request.expectedFocus && inspected.focus !== request.expectedFocus)
@@ -654,7 +671,11 @@ export function createComputerHelper({
         return { tree: data.tree };
       }),
     inspect: async (request) => {
-      const read = async () => inspectResult(await run(inspectArgs(request)));
+      const read = async () =>
+        inspectResult(
+          await run(inspectArgs(request)),
+          platform === 'darwin' && Boolean(request.menu),
+        );
       if (!request.focus) return observe(request, read);
       const window = await windowOf(request);
       if (!window) throw new Error('STALE_REF: That window is gone.');

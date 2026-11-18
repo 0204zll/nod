@@ -8936,6 +8936,44 @@ test('computer use binds current window content and hides password content', asy
   await assert.rejects(inspect(), /Part of the window is missing/);
 });
 
+test('computer use can create a first document without exposing the Apple or app menu', async (t) => {
+  const desktop = await fakeDesktop(t, {
+    'snapshot --root': {
+      ok: true,
+      data: { complete: true, tree: { role: 'menuitem', name: 'New' } },
+    },
+    snapshot: {
+      ok: true,
+      data: {
+        complete: true,
+        tree: {
+          role: 'menu',
+          children: [
+            { role: 'menuitem', name: 'Apple', children: [{ role: 'menuitem', name: 'Restart' }] },
+            {
+              role: 'menuitem',
+              name: 'TextEdit',
+              children: [{ role: 'menuitem', name: 'Services' }],
+            },
+            { role: 'menuitem', name: 'File', children: [{ role: 'menuitem', name: 'New' }] },
+          ],
+        },
+      },
+    },
+  });
+  const inspected = await desktop.helper.request({ op: 'inspect', app: 'TextEdit', menu: true });
+  assert.doesNotMatch(JSON.stringify(inspected), /Apple|Restart|Services/);
+  await desktop.helper.request({
+    op: 'press',
+    app: 'TextEdit',
+    menu: true,
+    ref: '@sfirst01:e1',
+    expected: inspected.state,
+    control: { role: 'menuitem', name: 'New' },
+  });
+  assert.ok((await desktop.calls()).includes('click @sfirst01:e1'));
+});
+
 test('computer use checks the window again after waiting for the owner', async (t) => {
   const tree = (value) => ({
     role: 'window',

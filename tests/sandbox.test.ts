@@ -1578,10 +1578,16 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
         }
         if (request.op === 'snapshot' && request.ref)
           return {
-            tree: [...window.children, ...findings].find((node) => node.ref_id === request.ref),
+            tree: [
+              ...window.children,
+              ...findings,
+              ...menuBar.children.flatMap((node) => node.children),
+            ].find((node) => node.ref_id === request.ref),
           };
         if (request.op === 'inspect') {
-          const tree = { ...window, children: [...window.children, ...findings] };
+          const tree = request.menu
+            ? { ...menuBar, children: menuBar.children.slice(2) }
+            : { ...window, children: [...window.children, ...findings] };
           return {
             tree,
             state: createHash('sha256').update(JSON.stringify(tree)).digest('hex'),
@@ -1665,6 +1671,14 @@ test('computer use refuses blocked apps, keeps browsers view-only and acts only 
     await computer.prepare(turn, 'COMPUTER_SNAPSHOT', { pid: 11, menu: true }),
   )) as { tree: string };
   assert.doesNotMatch(menu.tree, /Restart/);
+  const windows = apps[0]!.windows;
+  apps[0]!.windows = [];
+  const firstDocument = await computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@smenu001:e2' });
+  assert.equal(firstDocument.windowBinding?.menu, true);
+  assert.doesNotMatch(String(firstDocument.windowContext), /Restart|Services/);
+  await computer.execute(turn, 'COMPUTER_PRESS', firstDocument);
+  assert.equal(calls.at(-1)?.menu, true);
+  apps[0]!.windows = windows;
   await assert.rejects(
     computer.prepare(turn, 'COMPUTER_PRESS', { ref: '@smenu001:e1' }),
     /no snapshot with that ref/,
