@@ -84,7 +84,7 @@ The checks and refusals on Windows and Linux are the same as on macOS. What diff
 - **App IDs.** Nod names apps by their program name on Windows, such as `notepad.exe`, and by their desktop ID on Linux, such as `org.gnome.TextEditor`. On Linux it opens only installed desktop apps, never a command, a terminal, or a system, settings or file manager app; an app that's already open is checked only against Nod's list. On Windows it starts only windowed programs, never a command-line tool.
 - **Windows:** Nod can read but not operate an app that runs as administrator.
 - **Linux on Wayland:** Nod can't bring a window to the front, so steps that need it don't run, and it shows only the pill, without the glow. The Ctrl+Alt+Shift+Esc shortcut may not work there; select **Stop** on the pill instead.
-- **Linux Flatpak:** Nod can't open apps from inside its sandbox. Open the app yourself, then ask again. Reading other apps from inside the sandbox hasn't been tested yet and may not work.
+- **Linux Flatpak:** computer use doesn't work in the Flatpak app yet. agent-desktop identifies the desktop's accessibility service through the host's process list, which the Flatpak sandbox hides, so it can't reach other apps ([agent-desktop issue #593](https://github.com/vercel-labs/agent-desktop/issues/593)). Settings shows this when you turn computer use on.
 
 ## Keep Nod out of an app
 

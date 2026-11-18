@@ -216,6 +216,7 @@ export function createComputerHelper({
       accessibility: data.permissions?.accessibility?.state ?? 'unknown',
       screen: data.permissions?.screen_recording?.state ?? 'unknown',
       surfaces,
+      sandboxed,
     };
   }
   let surfaces;

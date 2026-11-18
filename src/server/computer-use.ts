@@ -801,7 +801,8 @@ export function createComputerUse(
         ? ((await desktop
             .request({ op: 'permissions' }, AbortSignal.timeout(3_000))
             .catch(() => undefined)) as
-            { accessibility?: string; screen?: string; surfaces?: string[] } | undefined)
+            | { accessibility?: string; screen?: string; surfaces?: string[]; sandboxed?: boolean }
+            | undefined)
         : undefined;
     return {
       available: Boolean(desktop),
@@ -811,7 +812,8 @@ export function createComputerUse(
       permissions: {
         accessibility: permissions?.accessibility ?? 'unknown',
         screen: permissions?.screen ?? 'unknown',
-        ready: permissions ? (permissions.surfaces?.length ?? 0) > 0 : true,
+        ready: (permissions?.surfaces?.length ?? 0) > 0,
+        sandboxed: permissions?.sandboxed ?? false,
       },
     };
   }

@@ -101,7 +101,7 @@ flowchart LR
 - Nod needs `/dev/kvm`. Without hardware virtualization it refuses to start its private computer rather than fall back to slow emulation.
 - The VM files live in `~/.nod-desktop`, as on a Mac. Saved keys use your desktop's Secret Service, such as GNOME Keyring or KWallet; Nod refuses to save keys when no secret store is available.
 - Install the next release bundle to update the app. These bundles have no update repository. Nod's own update checks are off on Linux.
-- [Computer use](/connect/computer-use/), experimental here, runs the bundled agent-desktop through the desktop's AT-SPI accessibility bus. The Flatpak may talk to that bus, but reading other apps from inside the sandbox hasn't been tested yet. It can't open apps from inside the sandbox, so you open them yourself.
+- [Computer use](/connect/computer-use/) doesn't work in the Flatpak yet: agent-desktop needs the host's process list to reach the AT-SPI accessibility bus, and the sandbox hides it ([agent-desktop issue #593](https://github.com/vercel-labs/agent-desktop/issues/593)).
 - Like the Mac and Windows apps, the Flatpak can reach your home folder and external drives, so [Local files](/connect/local-files/) and saving to Downloads work. Moving files to the Trash goes through your desktop's portal service (`xdg-desktop-portal`), and saved files go to the Downloads folder your desktop names in `~/.config/user-dirs.dirs`, or your home folder without one. A normal desktop session provides both.
 
 </TabItem>

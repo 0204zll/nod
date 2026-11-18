@@ -10,7 +10,12 @@ type Status = {
   platform: string;
   enabled: boolean;
   keptOut: string[];
-  permissions: { accessibility: Permission; screen: Permission; ready: boolean };
+  permissions: {
+    accessibility: Permission;
+    screen: Permission;
+    ready: boolean;
+    sandboxed: boolean;
+  };
 };
 const path = '/api/computer-use';
 const permissionText = {
@@ -94,9 +99,9 @@ export function ComputerUseSettings() {
       {data.enabled && data.platform === 'linux' && !data.permissions.ready && (
         <section className="account-region">
           <p className="field-hint">
-            Nod can’t reach the accessibility service on this computer. On Linux, install
-            at-spi2-core, turn on assistive technologies in your desktop’s accessibility settings,
-            then sign out and back in.
+            {data.permissions.sandboxed
+              ? 'Computer use doesn’t work in the Flatpak app yet: its sandbox can’t reach other apps.'
+              : 'Nod can’t reach the accessibility service on this computer. On Linux, install at-spi2-core, turn on assistive technologies in your desktop’s accessibility settings, then sign out and back in.'}
           </p>
         </section>
       )}
