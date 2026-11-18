@@ -134,10 +134,14 @@ const fileVersion = (info: BigIntStats) =>
   createHash('sha256')
     .update([info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs].join(':'))
     .digest('hex');
-const changedRead = (path: string) =>
-  Object.assign(new IntegrationError(`${path} changed after this file read was checked.`, 409), {
-    notRun: true,
-  });
+const changedRead = (path: string, reason?: unknown) =>
+  Object.assign(
+    new IntegrationError(
+      `${path} changed after this file read was checked.${reason === undefined ? '' : ` ${reason instanceof Error ? reason.message : String(reason)}`}`,
+      409,
+    ),
+    { notRun: true },
+  );
 const keepOutLimit = 100;
 
 type Turn = { turnId: string; threadId: string };
@@ -617,8 +621,12 @@ export function createLocalFiles(
       if (opened.dev !== checked.dev || opened.ino !== checked.ino)
         throw new IntegrationError(`${path} changed while Nod was opening it.`);
       const checkVersion = async () => {
-        if (version && fileVersion(await file.stat({ bigint: true })) !== version)
-          throw changedRead(path);
+        if (!version) return;
+        if (fileVersion(await file.stat({ bigint: true })) !== version) throw changedRead(path);
+        const current = await lstat(path, { bigint: true }).catch((error: unknown) => {
+          throw changedRead(path, error);
+        });
+        if (fileVersion(current) !== version) throw changedRead(path);
       };
       await checkVersion();
       const size = opened.size;

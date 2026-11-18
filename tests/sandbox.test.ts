@@ -1122,6 +1122,75 @@ test('local file reads refuse a write that occurs before the read completes', as
   }
 });
 
+test('local file reads refuse a parent folder replacement after opening', async (t) => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'nod-read-path-race-')));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const pool = {
+    query: async () => ({ rows: [{ local_files_enabled: true, local_keep_out: [] }] }),
+  } as unknown as Pool;
+  const files = createLocalFiles(pool, 'owner', {
+    home,
+    dataRoot: join(home, 'data'),
+    available: true,
+  });
+  for (const action of ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT'] as const) {
+    for (const missing of [false, true]) {
+      const folder = join(home, `${action}-${missing}`);
+      const path = join(folder, 'note.txt');
+      await mkdir(folder);
+      await writeFile(path, 'old');
+      const checked = await files.prepare(action, { path });
+      const handle = await open(path, 'r');
+      const prototype = Object.getPrototypeOf(handle) as typeof handle;
+      const read = prototype.read;
+      await handle.close();
+      const intercepted = t.mock.method(
+        prototype,
+        'read',
+        async function (this: typeof handle, ...args: Parameters<typeof handle.read>) {
+          const result = await Reflect.apply(read, this, args);
+          const before = await this.stat({ bigint: true });
+          await rename(folder, `${folder}-old`);
+          if (!missing) {
+            await mkdir(folder);
+            await writeFile(path, 'new');
+          }
+          const after = await this.stat({ bigint: true });
+          assert.deepEqual(
+            [after.dev, after.ino, after.size, after.mtimeNs, after.ctimeNs],
+            [before.dev, before.ino, before.size, before.mtimeNs, before.ctimeNs],
+          );
+          return result;
+        },
+      );
+      try {
+        await assert.rejects(files.execute(action, checked), (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.equal((error as { notRun?: boolean }).notRun, true);
+          assert.match(error.message, /changed after this file read/);
+          if (missing) assert.match(error.message, /ENOENT/);
+          return true;
+        });
+      } finally {
+        intercepted.mock.restore();
+      }
+      assert.equal(await readFile(join(`${folder}-old`, 'note.txt'), 'utf8'), 'old');
+      if (!missing) {
+        const current = (await files.execute(action, await files.prepare(action, { path }))) as {
+          text?: string;
+          file?: { bytes: Uint8Array };
+        };
+        assert.equal(
+          action === 'LOCAL_FILES_READ'
+            ? current.text
+            : new TextDecoder().decode(current.file!.bytes),
+          'new',
+        );
+      }
+    }
+  }
+});
+
 test('local files stay in home, skip secrets and kept-out folders, and never overwrite', async () => {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'nod-local-files-')));
   const home = join(base, 'home');
