@@ -1740,6 +1740,7 @@ async function initializeApplication(
     (reply) => ledger.forOwner(() => trust.answer(reply)),
     communication.describe,
     captureAnalytics,
+    createErrorRedactor(secrets),
   );
   retireScheduleConfirmations = approvals.retireScheduleConfirmations;
   let channels: Awaited<ReturnType<typeof createChannels>> | undefined;
