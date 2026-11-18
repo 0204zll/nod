@@ -37,6 +37,8 @@ When a website offers several sign-in methods, Nod uses the method you chose or,
 
 Each method choice expires 30 minutes after Nod issues its link. If the page or control changes, Nod refuses the old choice. A result that cannot be confirmed stays **unknown** and is never replayed automatically. Select **Check sign-in result**. If you return to chat, ask Nod to inspect the website before another private entry. A used link cannot submit again. The panel follows fresh steps from the same task and browser for up to 30 minutes; a new task needs its own private link.
 
+If a browser check stops a saved login, the error keeps its safe reason and recovery step. For example, after a page script runs, Nod must reload the page before a new private entry. The previous entry cannot run again.
+
 A private form stays available while its task waits for you. It stops accepting input once used, when Nod asks for a newer one, when Nod starts on a newer message in the same conversation, or when you select **Stop**. A scheduled run or background task has its own session, so chatting with Nod never closes its form.
 
 If a newer chat message closes your form, the old link expires. Ask Nod for a new sign-in form if you still need it.
