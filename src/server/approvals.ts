@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { toUSVString } from 'node:util';
 import type { PoolClient } from 'pg';
 import { pool } from './db.ts';
 import { ownerId } from './config.ts';
@@ -18,6 +19,7 @@ import { localTimestamp } from '../shared/date-locale.ts';
 import { lockKey, locksTable } from './locks.ts';
 import { withdrawnSql } from './turn-chain.ts';
 import { afterCommit, transaction } from './transaction.ts';
+import { createErrorRedactor } from './redaction.ts';
 import type { CaptureAnalytics } from './analytics.ts';
 import type { TrustBasis } from './trust-basis.ts';
 import {
@@ -131,10 +133,15 @@ function confirmedOutcome(
         (schedule.kind === 'once' && schedule.lastRun?.scheduledFor !== schedule.runAt));
     return `The exact action confirmed by the user was executed once by the trusted worker. Do not repeat it.${resumed ? ' Continue from its result.' : ''}${paused ? ' The schedule is paused, remains in Scheduled, and can be resumed.' : ''}\n${untrustedBlock(`${legacyPause ? 'NOD_schedule_pause' : action} result`, JSON.stringify(result))}`;
   }
+  const reason =
+    error ??
+    (result && typeof result === 'object' && 'error' in result && typeof result.error === 'string'
+      ? result.error
+      : undefined);
   const failure =
-    error === undefined
+    reason === undefined
       ? ''
-      : `\n${untrustedBlock(`${action} error`, error instanceof Error ? error.message : String(error))}`;
+      : `\n${untrustedBlock(`${action} error`, reason instanceof Error ? reason.message : String(reason))}`;
   return status === 'uncertain' || status === 'executing'
     ? `The action the user confirmed failed or was interrupted and will not be retried. Its outcome is uncertain, so check the app before trying it again. Do not report it as done.${failure}`
     : `The action the user confirmed did not run, so nothing was done. Do not report it as done.${failure}`;
@@ -280,7 +287,18 @@ export async function createApprovals(
     signal?: AbortSignal,
   ) => Promise<string | ApprovalPresentation>,
   analytics?: CaptureAnalytics,
+  redact: (text: string) => string = createErrorRedactor([]),
 ) {
+  const failureReason = (error: unknown) =>
+    Array.from(
+      toUSVString(
+        redact(
+          (error instanceof Error ? error.message : String(error)) || 'The action failed.',
+        ).replaceAll('\0', '\uFFFD'),
+      ),
+    )
+      .slice(0, 4000)
+      .join('');
   const changed = (
     status: 'asked' | 'approved' | 'declined' | 'executed' | 'expired' | 'uncertain',
     action: string,
@@ -747,12 +765,13 @@ export async function createApprovals(
         );
       })().then(
         () => undefined,
-        (error: unknown) => ({ error }),
+        (error: unknown) => ({ error: failureReason(error) }),
       );
       signal.throwIfAborted();
-      await client.query('UPDATE approvals SET status=$2 WHERE id=$1', [
+      await client.query('UPDATE approvals SET status=$2,result=$3 WHERE id=$1', [
         selected.id,
         refused ? 'expired' : 'executing',
+        refused ? JSON.stringify({ error: refused.error }) : null,
       ]);
       return { ...selected, refused };
     });
@@ -815,7 +834,7 @@ export async function createApprovals(
           }))
           .catch((error: unknown) => ({
             status: notRun(error) ? ('expired' as const) : ('uncertain' as const),
-            error,
+            error: failureReason(error),
           }));
     if (!approval.refused)
       await pool.query(
@@ -823,7 +842,9 @@ export async function createApprovals(
         [
           approval.id,
           outcome.status,
-          outcome.status === 'completed' ? JSON.stringify(outcome.result) : null,
+          JSON.stringify(
+            outcome.status === 'completed' ? outcome.result : { error: outcome.error },
+          ),
           ownerId,
         ],
       );

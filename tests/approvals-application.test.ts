@@ -9,6 +9,8 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import pg from 'pg';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import type { MemoryCurator } from '../src/ports/memory-curator.ts';
 import type { AgentToolResult } from '../src/ports/agent.ts';
 import type { MessagingTransport } from '../src/ports/messaging.ts';
@@ -25,6 +27,7 @@ import { createChannels } from '../src/server/channels.ts';
 import type { AppState, Task } from '../src/shared/contracts.ts';
 import type { WorkUsageResponse } from '../src/shared/models.ts';
 import { mergeMessages } from '../src/web/lib/chat-messages.ts';
+import { ApprovalCard, ApprovalChoiceCard } from '../src/web/components/action-card.tsx';
 
 function syntheticConfirmation(input: Record<string, unknown>) {
   const data = input.data as {
@@ -156,6 +159,8 @@ test(
     const executedApps: string[] = [];
     const draftReadArgs: Array<Record<string, unknown>> = [];
     const uploads: string[] = [];
+    let uploadFailure: Error | undefined;
+    let uploadAttempts = 0;
     const workspaceFiles = new Map<string, Uint8Array>();
     const browserActs: Array<Record<string, unknown>> = [];
     const injected: CredentialInput[] = [];
@@ -547,6 +552,8 @@ test(
             appSessions++;
             const session = await integrationFixture.provider.createSession(...args);
             session.upload = async (_action, file) => {
+              uploadAttempts++;
+              if (uploadFailure) throw uploadFailure;
               uploads.push(Buffer.from(file.bytes).toString());
               return { name: file.name, mimetype: file.mimeType, s3key: randomUUID() };
             };
@@ -3677,6 +3684,81 @@ test(
           assert.equal(sends(), before + 1);
         },
       );
+      await t.test(
+        'a failed approved attachment upload keeps its safe reason on the original card',
+        async (t) => {
+          t.after(() => {
+            uploadFailure = undefined;
+            workspaceFiles.delete('failed-report.pdf');
+          });
+          const sends = () =>
+            integrationFixture.writes.filter((write) => write.action === 'GMAIL_SEND_EMAIL').length;
+          const beforeSends = sends();
+          const beforeAttempts = uploadAttempts;
+          const beforeUploads = uploads.length;
+          workspaceFiles.set('failed-report.pdf', Buffer.from('%PDF-1.7 synthetic failed report'));
+          const held = await propose(
+            'GMAIL_SEND_EMAIL',
+            {
+              recipient_email: 'collector@example.test',
+              subject: 'Synthetic failed report',
+              body: 'Synthetic attachment.',
+              attachment: { workspaceFile: 'failed-report.pdf', mimeType: 'application/pdf' },
+            },
+            'apps',
+          );
+          const [card] = await approvalsFor(held);
+          assert.equal(card.status, 'pending');
+          assert.equal(uploadAttempts, beforeAttempts);
+          uploadFailure = new Error(
+            'The attachment upload failed (HTTP 503): synthetic provider unavailable; api_key=PRIVATE_UPLOAD_CANARY',
+          );
+          const clicked = {
+            text: 'Send',
+            replyToMessageId: card.confirmation_message_id,
+            clientMessageId: randomUUID(),
+            approvalAnswer: { approvalId: card.id, approved: true },
+          };
+          const approved = await request('POST', '/api/messages', clicked);
+          assert.equal(approved.statusCode, 200, approved.body);
+          await waitFor(approved.json().turnId, 'succeeded');
+          const saved = (await approvalsFor(held))[0];
+          assert.equal(saved.status, 'expired');
+          assert.equal(uploadAttempts, beforeAttempts + 1);
+          assert.equal(uploads.length, beforeUploads);
+          assert.equal(sends(), beforeSends);
+          for (let read = 0; read < 2; read++) {
+            const response = await request(
+              'GET',
+              '/api/messages/around/' + card.confirmation_message_id,
+            );
+            assert.equal(response.statusCode, 200, response.body);
+            const message = response
+              .json()
+              .find((item: { id: string }) => item.id === card.confirmation_message_id);
+            assert.equal(message.approval.id, card.id);
+            assert.equal(message.approval.state, 'expired');
+            assert.match(message.approval.failure ?? '', /HTTP 503/);
+            assert.match(message.approval.failure, /synthetic provider unavailable/);
+            assert.equal(saved.result.error, message.approval.failure);
+            assert.doesNotMatch(JSON.stringify({ saved, message }), /PRIVATE_UPLOAD_CANARY/);
+            for (const Component of [ApprovalCard, ApprovalChoiceCard]) {
+              const html = renderToStaticMarkup(
+                createElement(Component, {
+                  approval: message.approval,
+                  children: 'Synthetic attachment approval',
+                }),
+              );
+              assert.match(html, /Not run/);
+              assert.match(html, /HTTP 503/);
+              assert.doesNotMatch(html, /PRIVATE_UPLOAD_CANARY/);
+            }
+          }
+          assert.equal(uploadAttempts, beforeAttempts + 1);
+          assert.equal(sends(), beforeSends);
+        },
+      );
+
       await t.test(
         'sign-in method selection needs exact-origin consent before binding controls',
         async () => {
