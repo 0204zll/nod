@@ -138,13 +138,15 @@ export function createComputerOverlay({ onStop, focusSelf }) {
     if (call !== latest) return;
     const framed = !background && !wayland;
     if (!framed) placeAtTop();
-    else
-      place({
+    else {
+      const rounded = {
         x: Math.round(bounds.x),
         y: Math.round(bounds.y),
         width: Math.round(bounds.width),
         height: Math.round(bounds.height),
-      });
+      };
+      place(process.platform === 'win32' ? screen.screenToDipRect(null, rounded) : rounded);
+    }
     const text = background
       ? `Nod is working in ${app}`
       : waiting
