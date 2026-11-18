@@ -69,6 +69,19 @@ function visibleMarkdownText(markdown: string) {
     .join('');
 }
 
+function renderedCodeValues(markdown: string) {
+  type Node = DefaultTreeAdapterMap['node'];
+  const text = (node: Node): string =>
+    'value' in node ? node.value : 'childNodes' in node ? node.childNodes.map(text).join('') : '';
+  const values: string[] = [];
+  const visit = (node: Node) => {
+    if ('tagName' in node && node.tagName === 'code') values.push(text(node));
+    if ('childNodes' in node) node.childNodes.forEach(visit);
+  };
+  visit(parseFragment(renderToStaticMarkup(createElement(MessageText, { text: markdown }))));
+  return values;
+}
+
 test('cancellation approval shows distinct approval and refusal controls', () => {
   type Node = DefaultTreeAdapterMap['node'];
   const label = (node: Node): string => {
@@ -307,6 +320,150 @@ test('confirmation review keeps visible line and paragraph breaks', async () => 
       node.childNodes.map((child) => ('value' in child ? child.value : child.nodeName)),
     ),
     [['Can I submit the request?', 'br', 'Amount: 12 EUR.'], ['Recipient: Synthetic Recipient.']],
+  );
+});
+
+test('URL confirmations keep exact destinations separate from sentence punctuation', async (t) => {
+  const cases = [
+    ['NOD_vault_allow', 'https://portal.example.test'],
+    ['CONNECTED_MCP_CALL', 'http://127.0.0.1:8765/mcp'],
+    ['CONNECTED_MCP_CALL', 'https://mcp.example.test/tools(v2)'],
+    ['CONNECTED_MCP_CALL', 'https://mcp.example.test/mcp?'],
+    ['CONNECTED_MCP_CALL', 'https://mcp.example.test/mcp.'],
+    ['CONNECTED_MCP_CALL', 'https://mcp.example.test/mcp,'],
+    ['CONNECTED_MCP_CALL', 'https://mcp.example.test/mcp)'],
+    ['CONNECTED_MCP_CALL', 'http://[::1]:8765/mcp?mode=read&v=2'],
+    ['CONNECTED_MCP_CALL', 'https://mcp.example.test/`version`'],
+  ] as const;
+  for (const [action, endpoint] of cases) {
+    await t.test(`${action}: ${endpoint}`, async () => {
+      let draftEndpoint: string = endpoint;
+      let reviews = 0;
+      const proposal: ApprovalDescription = {
+        turn: { threadId: 'synthetic-thread', turnId: 'synthetic-turn' },
+        action: action,
+        args:
+          action === 'NOD_vault_allow'
+            ? { origin: endpoint, kind: 'sign_in' }
+            : { server: 'synthetic', tool: 'setup', arguments: {} },
+        details: { account: { endpoint }, relatedEndpoint: endpoint.replace(/[?.,)]$/, '') },
+      };
+      const original = structuredClone(proposal);
+      const communication = createCommunication({
+        pool: { query: async () => ({ rows: [] }) } as unknown as pg.Pool,
+        ownerId: 'synthetic-owner',
+        review: async (_instructions, input) => {
+          const request = input as Record<string, any>;
+          assert.deepEqual(request.data.args, proposal.args);
+          if (request.purpose === 'confirmation_review') {
+            reviews++;
+            return request.text === `Can I use ${endpoint}?` &&
+              JSON.stringify(request.literalValues) === JSON.stringify([endpoint])
+              ? { valid: true }
+              : { valid: false, reason: 'The question names a different destination.' };
+          }
+          return { text: `Can I use ${draftEndpoint}?`, action: 'Continue' };
+        },
+      });
+      const result = await communication.describe(proposal);
+      assert.deepEqual(renderedCodeValues(result.question), [endpoint]);
+      assert.equal(visibleMarkdownText(result.question), `Can I use ${endpoint}?`);
+      for (const changed of [
+        endpoint
+          .replace('example.test', 'example.test.evil.test')
+          .replace('127.0.0.1', '127.0.0.2')
+          .replace('[::1]', '[::2]'),
+        `${endpoint}${endpoint.includes('?') ? '&' : '?'}mode=other`,
+      ]) {
+        draftEndpoint = changed;
+        await assert.rejects(communication.describe(proposal), /different destination/);
+      }
+      assert.equal(reviews, 5);
+      assert.deepEqual(proposal, original);
+    });
+  }
+});
+
+test('URL confirmation separates Unicode quotes and punctuation without hiding URL syntax', async () => {
+  const endpoint = 'https://mcp.example.test/mcp';
+  let question = '';
+  let reviewed: Record<string, any> | undefined;
+  const communication = createCommunication({
+    pool: { query: async () => ({ rows: [] }) } as unknown as pg.Pool,
+    ownerId: 'synthetic-owner',
+    review: async (_instructions, input) => {
+      const request = input as Record<string, any>;
+      if (request.purpose === 'confirmation_review') {
+        reviewed = request;
+        return { valid: true };
+      }
+      return { text: question, action: 'Continue' };
+    },
+  });
+  const proposal = {
+    turn: { threadId: 'synthetic-thread', turnId: 'synthetic-turn' },
+    action: 'CONNECTED_MCP_CALL',
+    args: { tool: 'setup' },
+    details: { account: { endpoint } },
+  };
+  for (const [start, end] of [
+    ['“', '”?'],
+    ['«', '»?'],
+    ['「', '」?'],
+    ['（', '）？'],
+    ['', '？'],
+    ['', '。'],
+    ['', '؟'],
+    ['', '।'],
+  ]) {
+    question = `Can I use ${start}${endpoint}${end}`;
+    const result = await communication.describe(proposal);
+    assert.equal(visibleMarkdownText(result.question), question);
+    assert.equal(reviewed!.text, question);
+    assert.deepEqual(renderedCodeValues(result.question), [endpoint]);
+    assert.deepEqual(reviewed!.literalValues, [endpoint]);
+  }
+  for (const suffix of ['/', '&', '#', '@', '%']) {
+    question = `Can I use ${endpoint}${suffix}?`;
+    const result = await communication.describe(proposal);
+    assert.equal(visibleMarkdownText(result.question), question);
+    assert.equal(reviewed!.text, question);
+    assert.deepEqual(renderedCodeValues(result.question), [`${endpoint}${suffix}?`]);
+    assert.deepEqual(reviewed!.literalValues, [`${endpoint}${suffix}?`]);
+  }
+});
+
+test('URL confirmation preserves quotes, other words, and unknown destinations', async () => {
+  const first = 'https://mcp.example.test/mcp';
+  const second = `${first}?`;
+  const unknown = 'https://unknown.example.test/check';
+  const question = `Can I use "${second}" and ${first} for setup, then inspect ${unknown}?`;
+  let reviewed: Record<string, any> | undefined;
+  const communication = createCommunication({
+    pool: { query: async () => ({ rows: [] }) } as unknown as pg.Pool,
+    ownerId: 'synthetic-owner',
+    review: async (_instructions, input) => {
+      const request = input as Record<string, any>;
+      if (request.purpose === 'confirmation_review') {
+        reviewed = request;
+        return { valid: true };
+      }
+      return { text: question, action: 'Continue' };
+    },
+  });
+  const result = await communication.describe({
+    turn: { threadId: 'synthetic-thread', turnId: 'synthetic-turn' },
+    action: 'CONNECTED_MCP_CALL',
+    args: { server: 'synthetic', tool: 'setup', arguments: {} },
+    details: { account: { endpoint: first }, otherEndpoint: second },
+  });
+  assert.equal(visibleMarkdownText(result.question), question);
+  assert.equal(reviewed!.text, question);
+  assert.deepEqual(reviewed!.literalValues.slice(0, 2), [second, first]);
+  assert.ok(reviewed!.literalValues.some((value: string) => value.startsWith(unknown)));
+  assert.equal(
+    markdownNodes(result.question).some((node) => node.type === 'link' || node.type === 'html'),
+    false,
   );
 });
 

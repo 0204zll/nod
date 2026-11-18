@@ -4571,6 +4571,155 @@ test(
           }
         },
       );
+      await t.test('sign-in approval preserves its exact displayed origin', async () => {
+        const origin = 'https://bank.example.test';
+        const input = {
+          origin,
+          label: 'Synthetic bank',
+          kind: 'method',
+          methods: [{ label: 'Continue with Identity', selector: '@identity' }],
+          message: 'Choose a sign-in method.',
+        };
+        const before = methodBindings;
+        allowMethodBrowser = true;
+        confirmationModel = (request) => {
+          const data = request.data as { action: string; args: { origin: string } };
+          assert.equal(data.action, 'NOD_vault_allow');
+          assert.equal(data.args.origin, origin);
+          return request.purpose === 'confirmation_review'
+            ? {
+                valid:
+                  request.text === `Can I use ${origin}?` &&
+                  JSON.stringify(request.literalValues) === JSON.stringify([origin]),
+              }
+            : { text: `Can I use ${origin}?`, action: 'Use saved sign-in' };
+        };
+        try {
+          const held = await propose('Choose sign-in', input, 'sign_in');
+          const [card] = await approvalsFor(held);
+          assert.equal(card.action, 'NOD_vault_allow');
+          assert.deepEqual(card.args, { origin, kind: 'sign_in' });
+          assert.equal(methodBindings, before);
+          repeatAfterConfirm = { tool: 'sign_in', action: 'Choose sign-in', args: input };
+          const response = await request('POST', '/api/messages', {
+            text: 'Yes',
+            replyToMessageId: card.confirmation_message_id,
+            approvalAnswer: { approvalId: card.id, approved: true },
+          });
+          assert.equal(response.statusCode, 200, response.body);
+          await waitFor(response.json().turnId, 'waiting|succeeded');
+          assert.equal((await approvalsFor(held))[0].status, 'completed');
+          assert.equal(methodBindings, before + 1);
+          const form = (
+            await pool.query(
+              'SELECT origin,kind,status FROM credential_requests WHERE turn_id=$1',
+              [response.json().turnId],
+            )
+          ).rows[0];
+          assert.deepEqual(form, { origin, kind: 'method', status: 'pending' });
+        } finally {
+          confirmationModel = undefined;
+          allowMethodBrowser = false;
+          repeatAfterConfirm = undefined;
+        }
+      });
+      await t.test('MCP approval preserves the saved endpoint and dispatches once', async () => {
+        const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+        const { StreamableHTTPServerTransport } =
+          await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
+        let calls = 0;
+        const server = createServer(async (incoming, outgoing) => {
+          const mcp = new McpServer({ name: 'synthetic-readiness', version: '1' });
+          mcp.registerTool(
+            'readiness_check',
+            { description: 'Check the synthetic service.' },
+            async () => {
+              calls++;
+              return { content: [{ type: 'text', text: 'Synthetic service is ready.' }] };
+            },
+          );
+          const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+          outgoing.on('close', () => void transport.close());
+          await mcp.connect(transport);
+          await transport.handleRequest(incoming, outgoing);
+        });
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+        const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}/tools(v2)`;
+        let connection:
+          | { id: string; service: string; paths: Array<{ id: string; endpoint: string }> }
+          | undefined;
+        try {
+          const started = await request('POST', '/api/apps/mcp', {
+            name: 'Synthetic readiness',
+            endpoint,
+            auth: 'bearer',
+          });
+          assert.equal(started.statusCode, 200, started.body);
+          const completed = await request(
+            'POST',
+            `/api/apps/discovery/${started.json().id}/complete`,
+            { token: 'synthetic-readiness-token', accountName: 'Synthetic readiness' },
+          );
+          assert.equal(completed.statusCode, 200, completed.body);
+          connection = (
+            await pool.query(
+              'SELECT id,service,paths FROM discovered_connections WHERE owner_id=$1 AND name=$2',
+              [ownerId, 'Synthetic readiness'],
+            )
+          ).rows[0];
+          assert.ok(connection);
+          assert.equal(connection.paths[0]!.endpoint, endpoint);
+          confirmationModel = (input) => {
+            const data = input.data as {
+              action: string;
+              details: { account: { endpoint: string } };
+            };
+            assert.equal(data.action, 'CONNECTED_MCP_CALL');
+            assert.equal(data.details.account.endpoint, endpoint);
+            return input.purpose === 'confirmation_review'
+              ? {
+                  valid:
+                    input.text === `Can I check ${endpoint}?` &&
+                    JSON.stringify(input.literalValues) === JSON.stringify([endpoint]),
+                }
+              : { text: `Can I check ${endpoint}?`, action: 'Check service' };
+          };
+          const args = {
+            connectionId: connection.id,
+            pathId: connection.paths[0]!.id,
+            tool: 'readiness_check',
+            input: {},
+          };
+          const held = await propose('CONNECTED_MCP_CALL', args, 'apps');
+          const [card] = await approvalsFor(held);
+          assert.equal(card.status, 'pending');
+          assert.deepEqual(card.args, args);
+          assert.equal(calls, 0);
+          repeatAfterConfirm = { action: 'CONNECTED_MCP_CALL', args };
+          const response = await request('POST', '/api/messages', {
+            text: 'Yes',
+            replyToMessageId: card.confirmation_message_id,
+            approvalAnswer: { approvalId: card.id, approved: true },
+          });
+          assert.equal(response.statusCode, 200, response.body);
+          await waitFor(response.json().turnId, 'succeeded');
+          const saved = (await approvalsFor(held))[0];
+          assert.equal(saved.status, 'completed');
+          assert.match(JSON.stringify(saved.result), /Synthetic service is ready/);
+          assert.equal(calls, 1);
+          assert.deepEqual(saved.args, args);
+        } finally {
+          confirmationModel = undefined;
+          repeatAfterConfirm = undefined;
+          if (connection)
+            await request(
+              'POST',
+              `/api/apps/${connection.service}/accounts/${connection.id}/disconnect`,
+            );
+          server.closeAllConnections();
+          await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+      });
       await t.test('Stop cancels private entry in running and waiting turns', async () => {
         const origin = 'https://bank.example.test';
         const input = {
