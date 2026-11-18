@@ -66,7 +66,7 @@ Each action goes through the same [trust check](/trust/approvals/) as an app act
 
 Nod never deletes a file outright. When it replaces or edits a file, the previous version goes to the Trash from its own place, so **Put Back** returns it there; if the Trash step fails, nothing changes. Nod marks files it writes, edits or copies from its workspace as downloaded when the system allows it, so macOS and Windows check them before they open.
 
-If the file changes before Nod finishes an approved read, the read stops with an error. A new read checks the file again and asks for approval when your words do not cover it. A read approved in an older Nod version may also stop and need a fresh check. Nod does not repeat a read you refused, or one whose outcome is uncertain, in the same request.
+If the file changes before Nod finishes an approved read or copy to Nod, the action stops with an error. A new read or copy checks the file again and asks for approval when your words do not cover it. A read or copy approved in an older Nod version may also stop and need a fresh check. Nod does not repeat a read or copy you refused, or one whose outcome is uncertain, in the same request.
 
 ## Limits
 
