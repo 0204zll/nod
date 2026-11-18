@@ -91,6 +91,7 @@ export function createWhatsAppLinkedTransport(options: {
   let expiry: ReturnType<typeof setTimeout> | undefined;
   let attempt = 0;
   let linkedAt = 0;
+  let allowedLid: string | undefined;
   let state: ChannelLinkStatus = { state: 'connecting' };
   const lifetime = new AbortController();
   const pairingId = randomUUID();
@@ -195,12 +196,12 @@ export function createWhatsAppLinkedTransport(options: {
     const jid = message.key.remoteJid;
     if (!jid || message.key.participant || !/^\d+(?::\d+)?@(s\.whatsapp\.net|lid)$/.test(jid))
       return 'unsupported_chat';
+    const normalizedJid = jidNormalizedUser(jid);
     let phone = numberOf(jid);
     if (!phone && jid.endsWith('@lid')) {
       phone =
         options.mode === 'self-chat'
-          ? jidNormalizedUser(jid) ===
-            jidNormalizedUser(auth.creds.me?.lid ?? current.user?.lid ?? '')
+          ? normalizedJid === jidNormalizedUser(auth.creds.me?.lid ?? current.user?.lid ?? '')
             ? ownNumber()
             : undefined
           : numberOf(message.key.remoteJidAlt);
@@ -208,12 +209,14 @@ export function createWhatsAppLinkedTransport(options: {
         phone = numberOf(
           await current.signalRepository.lidMapping.getPNForLID(jid).catch(() => null),
         );
-      if (!phone && options.mode === 'bot' && options.allowedNumber) {
+      const allowedNumber = options.allowedNumber;
+      if (!phone && options.mode === 'bot' && allowedNumber) {
         const lid = await current.signalRepository.lidMapping
-          .getLIDForPN(`${options.allowedNumber}@s.whatsapp.net`)
+          .getLIDForPN(`${allowedNumber}@s.whatsapp.net`)
           .catch(() => false as const);
         if (lid === false) return 'lid_lookup_failed';
-        if (lid && jidNormalizedUser(lid) === jidNormalizedUser(jid)) phone = options.allowedNumber;
+        if (lid ? jidNormalizedUser(lid) === normalizedJid : normalizedJid === allowedLid)
+          phone = allowedNumber;
       }
     }
     if (!phone || !channel.allowedSenderIds.includes(phone))
@@ -221,7 +224,7 @@ export function createWhatsAppLinkedTransport(options: {
     if (options.mode === 'self-chat') {
       if (phone !== ownNumber() || !message.key.fromMe) return 'self_chat_mismatch';
     } else if (message.key.fromMe) return 'from_me';
-    return { phone, jid: jidNormalizedUser(jid) };
+    return { phone, jid: normalizedJid };
   }
   function attachment(message: WAMessage): MessagingAttachment[] {
     const content = normalizeMessageContent(message.message);
@@ -427,6 +430,16 @@ export function createWhatsAppLinkedTransport(options: {
       },
     });
     socket = current;
+    allowedLid = undefined;
+    if (options.mode === 'bot' && options.allowedNumber)
+      current.ev.on('lid-mapping.update', ({ lid, pn }) => {
+        if (closed || halted || socket !== current || !/^\d+(?::\d+)?@lid$/.test(lid)) return;
+        const phone = numberOf(pn);
+        if (!phone) return;
+        const jid = jidNormalizedUser(lid);
+        if (phone === options.allowedNumber) allowedLid = jid;
+        else if (allowedLid === jid) allowedLid = undefined;
+      });
     current.ev.on('creds.update', (update) => {
       if (closed || halted || socket !== current) return;
       Object.assign(auth.creds, update);

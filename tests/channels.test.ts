@@ -1388,7 +1388,12 @@ test('WhatsApp bot mode accepts a confirmed private ID when mapping lookups miss
   const events = new EventEmitter();
   const allowedNumber = '12025550101';
   const lid = '77777777@lid';
+  const otherLid = '88888888@lid';
   const text = 'Fixture request';
+  let lookupPhone: string | null = null;
+  let lookupLid: string | null = null;
+  const getPNForLID = t.mock.fn(async (_lid: string) => lookupPhone);
+  const getLIDForPN = t.mock.fn(async (_pn: string) => lookupLid);
   const dropped: WhatsAppDrop['reason'][] = [];
   const transport = createWhatsAppLinkedTransport({
     mode: 'bot',
@@ -1405,12 +1410,7 @@ test('WhatsApp bot mode accepts a confirmed private ID when mapping lookups miss
       ({
         ev: events,
         user: { id: '12025550102:1@s.whatsapp.net' },
-        signalRepository: {
-          lidMapping: {
-            getPNForLID: async () => null,
-            getLIDForPN: async () => null,
-          },
-        },
+        signalRepository: { lidMapping: { getPNForLID, getLIDForPN } },
         end: () => {},
       }) as unknown as ReturnType<Factory>,
     onDrop: ({ reason }) => dropped.push(reason),
@@ -1436,12 +1436,21 @@ test('WhatsApp bot mode accepts a confirmed private ID when mapping lookups miss
   const accept = async (message: InboundMessage) => {
     accepted.push(message);
   };
-  events.emit('lid-mapping.update', { lid, pn: `${allowedNumber}@s.whatsapp.net` });
-  upsert('from-owner', lid);
+  upsert('before-mapping', lid);
   await transport.poll!(accept);
-  const ownerDrops = dropped.join(', ') || 'none';
+  assert.equal(accepted.length, 0);
+  assert.deepEqual(dropped, ['sender_unmatched']);
+  assert.deepEqual(getPNForLID.mock.calls[0]?.arguments, [lid]);
+  assert.deepEqual(getLIDForPN.mock.calls[0]?.arguments, [`${allowedNumber}@s.whatsapp.net`]);
 
-  upsert('from-unverified-sender', '88888888@lid');
+  events.emit('lid-mapping.update', {
+    lid: '77777777:3@lid',
+    pn: `${allowedNumber}:2@s.whatsapp.net`,
+  });
+  events.emit('lid-mapping.update', { lid: otherLid, pn: '12025550103@s.whatsapp.net' });
+  upsert('from-owner', lid);
+  upsert('from-other-number', otherLid);
+  upsert('from-unverified-sender', '99999999@lid');
   await transport.poll!(accept);
   assert.deepEqual(
     accepted.map(({ messageId, senderId, threadId, text }) => ({
@@ -1451,8 +1460,22 @@ test('WhatsApp bot mode accepts a confirmed private ID when mapping lookups miss
       text,
     })),
     [{ messageId: 'from-owner', senderId: allowedNumber, threadId: lid, text }],
-    `Expected only the configured sender's message. Drops for that sender: ${ownerDrops}.`,
   );
+
+  for (const [phone, privateId] of [
+    ['12025550103@s.whatsapp.net', null],
+    [null, '99999999@lid'],
+  ]) {
+    lookupPhone = phone;
+    lookupLid = privateId;
+    upsert('with-conflicting-lookup', lid);
+    await transport.poll!(accept);
+  }
+  lookupPhone = lookupLid = null;
+  events.emit('lid-mapping.update', { lid, pn: '12025550103@s.whatsapp.net' });
+  upsert('after-reassignment', lid);
+  await transport.poll!(accept);
+  assert.equal(accepted.length, 1);
 });
 
 test('Telegram media keeps native replies and checks the sender before any download', async () => {
