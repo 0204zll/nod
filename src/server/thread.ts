@@ -33,6 +33,7 @@ import {
   withdrawnSql,
   workKindSql,
   workOriginSql,
+  taskMessageSql,
 } from './turn-chain.ts';
 import { dataRoot, databaseUrl, ownerId } from './config.ts';
 import { delta, refresh, working } from './events.ts';
@@ -92,7 +93,13 @@ const running = new Map<string, AbortController>();
 const inflight = new Set<Promise<void>>();
 let stopping = false;
 let nextStop = new AbortController();
-export const stopSignal = () => nextStop.signal;
+let chatStop = new AbortController();
+const chatIntakes = new WeakMap<AbortSignal, AbortSignal>();
+export const stopSignal = () => {
+  const signal = AbortSignal.any([nextStop.signal]);
+  chatIntakes.set(signal, chatStop.signal);
+  return signal;
+};
 
 export type TurnSource = 'user' | 'schedule' | 'event' | 'resume' | 'task';
 export const ownerStarted = (turn = 'u') => `${turn}.source IN ('user','task','resume')`;
@@ -115,6 +122,7 @@ interface EnqueueTurnOptions {
   client?: PoolClient;
 }
 interface SubmitUserMessageOptions {
+  chatClearedAt?: string | null;
   threadId?: string;
   sourceId?: string;
   channel?: string;
@@ -599,16 +607,73 @@ export function createUserMessageService(
   };
 }
 
+async function repliesOutsideChat(
+  database: Pool | PoolClient,
+  threadId: string,
+  messageId: string | undefined,
+) {
+  if (!messageId) return false;
+  return Boolean(
+    (
+      await database.query(
+        `SELECT 1 FROM messages m LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id AND u.thread_id=m.thread_id
+         LEFT JOIN turns mt ON mt.id=m.turn_id AND mt.owner_id=m.owner_id
+         LEFT JOIN messages parent ON parent.id=m.reply_to_message_id AND parent.owner_id=m.owner_id AND parent.thread_id=m.thread_id
+         LEFT JOIN turns pt ON pt.id=parent.turn_id AND pt.owner_id=parent.owner_id
+     WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.hidden_at IS NULL AND (
+       EXISTS(SELECT 1 FROM tasks t JOIN turns current ON current.id=t.turn_id AND current.owner_id=t.owner_id AND current.thread_id=m.thread_id
+         WHERE t.owner_id=$2 AND t.session_id<>$3
+         AND ${taskMessageSql})
+       OR (u.session_id<>$3 AND u.status='waiting' AND u.waiting_reason IN ('question','approval')
+         AND NOT ${laterSupersedingTurnSql}
+         AND m.id=(SELECT q.id FROM messages q WHERE q.owner_id=$2 AND q.turn_id=u.id
+           AND q.role='assistant' AND q.hidden_at IS NULL ORDER BY q.created_at DESC,q.id DESC LIMIT 1)))`,
+        [messageId, ownerId, threadId],
+      )
+    ).rowCount,
+  );
+}
+
+export async function messageIntakeSignal(
+  arrival: AbortSignal,
+  input: Pick<SubmitUserMessageOptions, 'threadId' | 'replyToMessageId' | 'chatClearedAt'>,
+  database: Pool | PoolClient = pool,
+) {
+  const chat = chatIntakes.get(arrival);
+  if (!chat && input.chatClearedAt === undefined) return undefined;
+  const threadId = input.threadId ?? (await activeThread(database)).id;
+  if (await repliesOutsideChat(database, threadId, input.replyToMessageId)) return undefined;
+  if (input.chatClearedAt !== undefined) {
+    const current = await database.query<{ current: boolean }>(
+      'SELECT chat_cleared_at IS NOT DISTINCT FROM $3::timestamptz AS current FROM threads WHERE id=$1 AND owner_id=$2',
+      [threadId, ownerId, input.chatClearedAt],
+    );
+    if (current.rows[0]?.current === false) throw clearedIntakeError();
+  }
+  chat?.throwIfAborted();
+  return chat;
+}
+
+const clearedIntakeError = () =>
+  Object.assign(httpError('This message was cancelled when the chat was cleared.', 409), {
+    code: 'chat_cleared',
+    retryable: true,
+  });
+
 async function readAnswer(
   text: string,
   hasAttachments: boolean,
   options: SubmitUserMessageOptions,
   confirmAction?: ConfirmAction,
+  arrival = options.stopSignal,
 ) {
+  if (!confirmAction) return undefined;
+  const threadId = options.threadId ?? (await activeThread(pool)).id;
+  if (arrival) await messageIntakeSignal(arrival, { ...options, threadId });
   return confirmAction?.answer({
     text,
     channel: options.channel ?? 'web',
-    threadId: options.threadId ?? (await activeThread(pool)).id,
+    threadId,
     replyToMessageId: options.replyToMessageId,
     seenMessageId: options.seenMessageId,
     hasAttachments,
@@ -659,7 +724,7 @@ export async function submitUserMessage(
       ? options.approvalAnswer
       : options.client
         ? options.answer
-        : await readAnswer(text, confirmation.hasAttachments, options, confirmAction);
+        : await readAnswer(text, confirmation.hasAttachments, options, confirmAction, stop);
   let inserted = false;
   const markInserted = () => {
     inserted = true;
@@ -706,6 +771,7 @@ export async function submitUserMessage(
       ).rows[0];
       if (prior) return { threadId: thread.id, turnId: prior.id, messageId: prior.message_id };
     }
+    await messageIntakeSignal(stop, { ...options, threadId: thread.id }, client);
     await assertReplyTarget(client, thread.id, options.replyToMessageId);
     let choiceQuestion: { id: string; session_id: string; background: boolean } | undefined;
     if (options.questionAnswer !== undefined) {
@@ -1006,6 +1072,66 @@ export async function restartChatContext(threadId: string, turnId: string) {
   }, pool);
   refresh();
   return { ok: true };
+}
+
+export const chatClearedMessage =
+  'Started a fresh chat. Your tasks, files, accounts and memory are still here. Previous messages are available in search.';
+
+export async function clearChatContext(
+  expectedThreadId: string | undefined,
+  messageId: string,
+  options: { channel?: string; client?: PoolClient; acknowledge?: boolean } = {},
+): Promise<SubmitUserMessageResult> {
+  const channel = options.channel ?? 'web';
+  const clear = async (client: PoolClient) => {
+    const thread = await lockThread(client);
+    if (expectedThreadId !== undefined && expectedThreadId !== thread.id)
+      throw httpError('This conversation changed. Reload it before starting a fresh chat.', 409);
+    const previous = (
+      await client.query(
+        'SELECT m.owner_id,m.thread_id,m.turn_id,u.source_id,u.channel FROM messages m LEFT JOIN turns u ON u.id=m.turn_id WHERE m.id=$1',
+        [messageId],
+      )
+    ).rows[0];
+    if (previous) {
+      if (
+        previous.owner_id !== ownerId ||
+        previous.thread_id !== thread.id ||
+        previous.source_id !== `clear:${messageId}` ||
+        previous.channel !== channel
+      )
+        throw httpError('This message ID was already used for another request.', 409);
+      return { threadId: thread.id, turnId: previous.turn_id as string, messageId };
+    }
+    afterCommit(client, () => {
+      const previous = chatStop;
+      chatStop = new AbortController();
+      previous.abort(clearedIntakeError());
+    });
+    await cancelTurns(client, thread.id, { sessionId: thread.id });
+    const turnId = randomUUID();
+    await client.query(
+      `INSERT INTO turns(id,owner_id,thread_id,session_id,source,source_id,message_id,prompt,channel,status,finished_at)
+       VALUES($1,$2,$3,$3,'user',$4,$5,'/clear',$6,'succeeded',now())`,
+      [turnId, ownerId, thread.id, `clear:${messageId}`, messageId, channel],
+    );
+    await client.query(
+      'UPDATE threads SET chat_restarted_at=clock_timestamp(),chat_cleared_at=clock_timestamp(),updated_at=now() WHERE id=$1 AND owner_id=$2',
+      [thread.id, ownerId],
+    );
+    await client.query(
+      "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,created_at) VALUES($1,$2,$3,$4,'user','/clear',clock_timestamp())",
+      [messageId, ownerId, thread.id, turnId],
+    );
+    if (options.acknowledge !== false)
+      await client.query(
+        "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,created_at) VALUES($1,$2,$3,$4,'assistant',$5,clock_timestamp())",
+        [randomUUID(), ownerId, thread.id, turnId, chatClearedMessage],
+      );
+    afterCommit(client, refresh);
+    return { threadId: thread.id, turnId, messageId };
+  };
+  return options.client ? clear(options.client) : cancellationTransaction(clear, pool);
 }
 
 export async function reactToAssistantMessage(

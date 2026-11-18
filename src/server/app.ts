@@ -37,8 +37,10 @@ import {
   reactToAssistantMessage,
   resetThread,
   restartChatContext,
+  clearChatContext,
   resumeAfterHandoff,
   stopSignal,
+  messageIntakeSignal,
   stopThread,
   submitUserMessage,
 } from './thread.ts';
@@ -342,10 +344,16 @@ export async function createApp(dependencies: AppDependencies = {}) {
   app.get('/api/configuration', async () => publicConfiguration());
   app.get('/api/state', async () => {
     const thread = await activeThread(pool);
+    const cleared = (
+      await pool.query<{ at: string | null }>(
+        `SELECT to_char(chat_cleared_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at FROM threads WHERE id=$1 AND owner_id=$2`,
+        [thread.id, ownerId],
+      )
+    ).rows[0]?.at;
     const messageRows = pool.query(
-      `SELECT ${messageFields} FROM (SELECT m.* FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND ${chatMessageSql} ORDER BY date_trunc('milliseconds',m.created_at) DESC,m.id DESC LIMIT 151) m
+      `SELECT ${messageFields} FROM (SELECT m.* FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND m.created_at>=COALESCE($3::timestamptz,'-infinity') AND ${chatMessageSql} ORDER BY date_trunc('milliseconds',m.created_at) DESC,m.id DESC LIMIT 151) m
          LEFT JOIN messages target ON target.id=m.reply_to_message_id AND target.owner_id=m.owner_id AND target.hidden_at IS NULL ORDER BY date_trunc('milliseconds',m.created_at),m.id`,
-      [ownerId, thread.id],
+      [ownerId, thread.id, cleared ?? null],
     );
     const hiddenMetadata = messageRows.then(({ rows }) =>
       pool.query<{ count: number; ids: string[]; visibleIds: string[] }>(
@@ -400,6 +408,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
     const planning = dependencies.planningTasks?.();
     return {
       threadId: thread.id,
+      ...(cleared ? { chatClearedAt: cleared } : {}),
       ...(recovery ? { chatRecovery: recovery } : {}),
       tasks: await dependencies.taskLedger?.(),
       hasEarlierMessages,
@@ -489,7 +498,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
     const rows = await pool.query(
       `SELECT ${messageFields} FROM messages m
       LEFT JOIN messages target ON target.id=m.reply_to_message_id AND target.owner_id=m.owner_id AND target.hidden_at IS NULL
-      WHERE m.owner_id=$1 AND m.thread_id=$4 AND m.hidden_at IS NULL AND ${chatMessageSql} AND ($2::timestamptz IS NULL OR date_trunc('milliseconds',m.created_at) < $2 OR (date_trunc('milliseconds',m.created_at) = $2 AND $3::uuid IS NOT NULL AND m.id < $3))
+      WHERE m.owner_id=$1 AND m.thread_id=$4 AND m.hidden_at IS NULL AND m.created_at>=COALESCE((SELECT chat_cleared_at FROM threads WHERE id=$4 AND owner_id=$1),'-infinity') AND ${chatMessageSql} AND ($2::timestamptz IS NULL OR date_trunc('milliseconds',m.created_at) < $2 OR (date_trunc('milliseconds',m.created_at) = $2 AND $3::uuid IS NOT NULL AND m.id < $3))
       ORDER BY date_trunc('milliseconds',m.created_at) DESC,m.id DESC LIMIT 61`,
       [ownerId, query.before ?? null, query.beforeId ?? null, thread.id],
     );
@@ -553,6 +562,20 @@ export async function createApp(dependencies: AppDependencies = {}) {
       )
       .parse(request.body);
     const clientMessageId = input.clientMessageId ?? randomUUID();
+    if (
+      input.text.trim().toLowerCase() === '/clear' &&
+      (!input.questionAnswer ||
+        ('custom' in input.questionAnswer && input.questionAnswer.custom === true)) &&
+      !input.approvalAnswer &&
+      !input.verificationRequestId
+    ) {
+      if (input.attachmentIds.length)
+        throw Object.assign(new Error('Send /clear as a text message without attachments.'), {
+          statusCode: 400,
+        });
+      return clearChatContext(input.threadId, clientMessageId);
+    }
+    const signal = await messageIntakeSignal(arrival, input);
     const verification =
       (input.questionAnswer && !('custom' in input.questionAnswer)) || input.approvalAnswer
         ? undefined
@@ -560,6 +583,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
             ...input,
             clientMessageId,
             channel: 'web',
+            signal,
           });
     if (verification) return verification;
     if (input.verificationRequestId)
@@ -589,6 +613,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
         replyQuote: input.replyQuote,
         seenMessageId: input.seenMessageId,
         threadId: input.threadId,
+        chatClearedAt: input.chatClearedAt,
         clientMessageId,
         questionAnswer: input.questionAnswer,
         approvalAnswer: input.approvalAnswer,
