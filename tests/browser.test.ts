@@ -6565,6 +6565,29 @@ test('chat retires reply targets without losing drafts or duplicating ambiguous 
         assert.equal(requests[3].text, draft);
         assert.ok(document.querySelector('[data-message-id="' + committed.clientMessageId + '"]'));
         assert.equal(document.querySelector('[role="alert"]'), null);
+        await act(async () => root.unmount());
+        committed = null;
+        saveDraft(null);
+        state = { ...state, hiddenMessageIds: [], messages };
+        root = createRoot(document.getElementById('root'));
+        await render();
+        await settle(hasDraft);
+        await reply(ids[0]);
+        await submit();
+        await settle(() => requests.length === 5);
+        await act(async () => releases.at(-1).reject(new TypeError('Synthetic ordinary reply response lost')));
+        await settle(() => hasDraft() && document.querySelector('.composer-reply'));
+        state = { ...state, messages: [], chatClearedAt: '2026-10-26T12:02:00.000000Z' };
+        await render();
+        await settle(() => hasDraft() && !document.querySelector('.composer-reply'));
+        await submit();
+        await settle(() => requests.length === 6);
+        assert.equal(requests[5].replyToMessageId, undefined);
+        assert.notEqual(requests[5].clientMessageId, requests[4].clientMessageId);
+        assert.equal(requests[5].chatClearedAt, state.chatClearedAt);
+        await act(async () => releases.at(-1).resolve(Response.json({
+          messageId: requests[5].clientMessageId, turnId: 'synthetic-fresh-chat-turn',
+        })));
       } finally {
         await act(async () => root.unmount());
         dom.window.close();
