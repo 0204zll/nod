@@ -605,7 +605,7 @@ export function Chat({
     if (previous && !previous.replyId) {
       if (previous.recording) recordingIds.current.delete(recordingSource(previous.recording));
       retry.current = null;
-    }
+    } else if (previous) retry.current = { ...previous, warned: true };
   }, [threadId, state.chatClearedAt]);
   if (hiddenHistory.current.threadId !== threadId)
     hiddenHistory.current = { threadId, count: hiddenCount, epoch: 0, oldest: null };
