@@ -1151,6 +1151,114 @@ test('local file reads refuse a write that occurs before the read completes', as
   }
 });
 
+test('local file opening failures return no bytes and permit a fresh read', async (t) => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'nod-read-open-race-')));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const path = join(home, 'note.txt');
+  const target = join(home, 'other.txt');
+  await writeFile(target, 'other private content');
+  const pool = {
+    query: async () => ({ rows: [{ local_files_enabled: true, local_keep_out: [] }] }),
+  } as unknown as Pool;
+  const files = createLocalFiles(pool, 'owner', {
+    home,
+    dataRoot: join(home, 'data'),
+    available: true,
+  });
+  const handle = await open(target, 'r');
+  const prototype = Object.getPrototypeOf(handle) as typeof handle;
+  const read = prototype.read;
+  await handle.close();
+  let reads = 0;
+  let closes = 0;
+  t.mock.method(
+    prototype,
+    'read',
+    function (this: typeof handle, ...args: Parameters<typeof read>) {
+      reads++;
+      return Reflect.apply(read, this, args);
+    },
+  );
+  const originalOpen = fs.open;
+  for (const action of ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT'] as const) {
+    for (const race of [
+      'removed',
+      'symlink',
+      'replaced',
+      'open failure',
+      'stat failure',
+      'version failure',
+    ]) {
+      await writeFile(path, 'old');
+      const checked = await files.prepare(action, { path });
+      const failure = Object.assign(new Error('EIO: synthetic file opening failed'), {
+        code: 'EIO',
+        statusCode: 503,
+      });
+      let restoreStat = () => {};
+      let restoreClose = () => {};
+      let opened = false;
+      const intercepted = t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+        if (args[0] !== path) return Reflect.apply(originalOpen, fs, args);
+        if (race === 'open failure') throw failure;
+        if (['removed', 'symlink', 'replaced'].includes(race)) await rm(path);
+        if (race === 'symlink') await symlink(target, path);
+        if (race === 'replaced') await writeFile(path, 'replacement');
+        const file = await Reflect.apply(originalOpen, fs, args);
+        opened = true;
+        const originalClose = file.close;
+        const close = t.mock.method(file, 'close', async () => {
+          closes++;
+          return Reflect.apply(originalClose, file, []);
+        });
+        restoreClose = () => close.mock.restore();
+        if (race === 'stat failure' || race === 'version failure') {
+          const originalStat = file.stat;
+          const stat = t.mock.method(
+            file,
+            'stat',
+            async (...args: Parameters<typeof file.stat>) => {
+              if (race === 'stat failure' || args[0]?.bigint) throw failure;
+              return Reflect.apply(originalStat, file, args);
+            },
+          );
+          restoreStat = () => stat.mock.restore();
+        }
+        return file;
+      });
+      syncBuiltinESMExports();
+      reads = 0;
+      const closesBefore = closes;
+      try {
+        await assert.rejects(files.execute(action, checked), (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.equal((error as { notRun?: boolean }).notRun, true);
+          if (race.endsWith('failure')) {
+            assert.equal(error, failure);
+            assert.equal(failure.code, 'EIO');
+            assert.equal(failure.statusCode, 503);
+          }
+          return true;
+        });
+        assert.equal(reads, 0);
+        assert.equal(closes, closesBefore + Number(opened));
+      } finally {
+        restoreStat();
+        restoreClose();
+        intercepted.mock.restore();
+        syncBuiltinESMExports();
+      }
+      await rm(path, { force: true });
+      await writeFile(path, 'fresh');
+      const result = (await files.execute(action, await files.prepare(action, { path }))) as {
+        text?: string;
+        file?: { bytes: Uint8Array };
+      };
+      assert.equal(result.text ?? Buffer.from(result.file!.bytes).toString(), 'fresh');
+    }
+  }
+});
+
 test('local file reads refuse a parent folder replacement after opening', async (t) => {
   const home = await realpath(await mkdtemp(join(tmpdir(), 'nod-read-path-race-')));
   t.after(() => rm(home, { recursive: true, force: true }));

@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import fs from 'node:fs/promises';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
@@ -5379,6 +5381,70 @@ test(
             }
         },
       );
+      await t.test(
+        'a failed approved file open permits a fresh read in the same request',
+        async () => {
+          const folder = await mkdtemp(join(localHome, 'failed-open-'));
+          for (const action of ['read', 'import']) {
+            const path = join(folder, `${action}.txt`);
+            await writeFile(path, 'Original synthetic bytes');
+            const text = `Open the synthetic file ${randomUUID()}`;
+            const opening = await propose(action, { path }, 'files', text);
+            const [approval] = await approvalsFor(opening);
+            const originalOpen = fs.open;
+            let failed = false;
+            const intercepted = t.mock.method(
+              fs,
+              'open',
+              async (...args: Parameters<typeof fs.open>) => {
+                if (args[0] === path && !failed) {
+                  failed = true;
+                  await writeFile(path, 'Current synthetic bytes');
+                  throw Object.assign(new Error('EIO: synthetic file open failed'), {
+                    statusCode: 503,
+                  });
+                }
+                return Reflect.apply(originalOpen, fs, args);
+              },
+            );
+            syncBuiltinESMExports();
+            const beforeFiles = new Set(workspaceFiles.keys());
+            try {
+              asked.add(text);
+              repeatAfterConfirm = { tool: 'files', action, args: { path } };
+              const accepted = await request('POST', '/api/messages', {
+                text: 'Yes',
+                replyToMessageId: approval.confirmation_message_id,
+                approvalAnswer: { approvalId: approval.id, approved: true },
+              });
+              assert.equal(accepted.statusCode, 200, accepted.body);
+              const resumed = accepted.json().turnId;
+              await waitFor(resumed, 'succeeded');
+              const [saved] = await approvalsFor(opening);
+              assert.equal(failed, true);
+              assert.equal(saved.status, 'expired');
+              assert.match(saved.result.error, /EIO: synthetic file open failed/);
+              assert.doesNotMatch(JSON.stringify(saved.result), /synthetic bytes/);
+              assert.equal(repeatAfterConfirm, undefined);
+              if (action === 'read')
+                assert.match(JSON.stringify(results.get(resumed)), /Current synthetic bytes/);
+              else {
+                const imported = [...workspaceFiles.keys()].filter((key) => !beforeFiles.has(key));
+                assert.equal(imported.length, 1);
+                assert.equal(
+                  Buffer.from(workspaceFiles.get(imported[0]!)!).toString(),
+                  'Current synthetic bytes',
+                );
+              }
+              assert.deepEqual(await approvalsFor(resumed), []);
+            } finally {
+              repeatAfterConfirm = undefined;
+              intercepted.mock.restore();
+              syncBuiltinESMExports();
+            }
+          }
+        },
+      );
       await t.test('confirmed local reads observe edits in the same request', async () => {
         await request('PATCH', '/api/preferences', { localFilesEnabled: true });
         const folder = await mkdtemp(join(localHome, 'reread-'));
@@ -5427,17 +5493,22 @@ test(
           await writeFile(path, contents);
           let draftPath = path;
           let reviews = 0;
+          let reviewedArgs: { path: string; version: string } | undefined;
           confirmationModel = (input) => {
-            const data = input.data as { action: string; args: { path: string } };
+            const data = input.data as { action: string; args: { path: string; version: string } };
             assert.ok(['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT'].includes(data.action));
-            assert.deepEqual(data.args, { path });
+            assert.equal(data.args.path, path);
+            assert.match(data.args.version, /^[a-f0-9]{64}$/);
+            assert.deepEqual(Object.keys(data.args).sort(), ['path', 'version']);
             const operation = data.action === 'LOCAL_FILES_READ' ? 'read' : 'import';
             if (input.purpose === 'confirmation_review') {
+              assert.deepEqual(data.args, reviewedArgs);
               reviews++;
               return input.text === `Can I ${operation} ${path}?`
                 ? { valid: true }
                 : { valid: false, reason: 'The question names a different path.' };
             }
+            reviewedArgs = structuredClone(data.args);
             return { text: `Can I ${operation} ${draftPath}?`, action: 'Open file' };
           };
           try {
@@ -5446,7 +5517,7 @@ test(
               const opening = await propose(action, { path }, 'files');
               const [approval] = await approvalsFor(opening);
               assert.equal(approval.status, 'pending');
-              assert.deepEqual(approval.args, { path });
+              assert.deepEqual(approval.args, reviewedArgs);
               assert.doesNotMatch(JSON.stringify(results.get(opening)), /Synthetic next action/);
               assert.deepEqual([...workspaceFiles.keys()], [...before]);
               const response = await request('POST', '/api/messages', {

@@ -613,9 +613,15 @@ export function createLocalFiles(
   }
 
   async function readFile(path: string, limit: number, version?: string, complete = false) {
-    const checked = await maybeLstat(path);
-    if (!checked?.isFile()) throw new IntegrationError(`${path} is not a file.`);
-    const file = await open(path, constants.O_RDONLY | noFollow | noBlock);
+    const fail = (error: unknown): never => {
+      throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
+        notRun: true,
+      });
+    };
+    const checked = await lstat(path).catch(fail);
+    if (!checked.isFile()) fail(new IntegrationError(`${path} is not a file.`));
+    const file = await open(path, constants.O_RDONLY | noFollow | noBlock).catch(fail);
+    let readStarted = false;
     try {
       const opened = await file.stat();
       if (opened.dev !== checked.dev || opened.ino !== checked.ino)
@@ -639,9 +645,13 @@ export function createLocalFiles(
           { notRun: true },
         );
       const length = Math.min(size, limit);
+      readStarted = true;
       const { buffer, bytesRead } = await file.read(Buffer.alloc(length), 0, length, 0);
       await checkVersion();
       return { size, bytes: buffer.subarray(0, bytesRead) };
+    } catch (error) {
+      if (!readStarted) fail(error);
+      throw error;
     } finally {
       await file.close();
     }
