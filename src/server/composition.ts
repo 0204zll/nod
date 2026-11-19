@@ -2462,7 +2462,7 @@ async function initializeApplication(
       },
       speech,
       audioReplies: async () => (await speechPreferences.get()).speechReply,
-      manage: async (turn, action, args, { admit, ...provenance }) => {
+      manage: async (turn, action, args, { admit, signal, ...provenance }) => {
         if (action === 'prepared_list')
           return untrustedBlock('prepared work', JSON.stringify(await proactivity.prepared(args)));
         if (action === 'prepared_update') {
@@ -2489,9 +2489,10 @@ async function initializeApplication(
             );
           if (draft.sent) return { status: 'already_sent', receipt: draft.sent };
           const input = { draftId: draft.id, summary: draft.summary };
-          const verdict = await trust.check(turn, 'NOD_bug_report_send', input);
+          const verdict = await trust.check(turn, 'NOD_bug_report_send', input, signal);
           return approvals.request(turn, 'NOD_bug_report_send', input, {
             ...provenance,
+            signal,
             allowed: !verdict.confirm,
             ...(verdict.confirm ? {} : { basis: verdict.basis }),
             expectedChatRevision: verdict.chatRevision,
@@ -2501,9 +2502,10 @@ async function initializeApplication(
         }
         if (action === 'limits_update') {
           const input = limitsInput.parse(args);
-          const verdict = await trust.check(turn, 'NOD_limits_update', input);
+          const verdict = await trust.check(turn, 'NOD_limits_update', input, signal);
           return approvals.request(turn, 'NOD_limits_update', input, {
             ...provenance,
+            signal,
             allowed: !verdict.confirm,
             ...(verdict.confirm ? {} : { basis: verdict.basis }),
             expectedChatRevision: verdict.chatRevision,
@@ -2563,11 +2565,12 @@ async function initializeApplication(
               ...(rule === undefined ? {} : { currentNotificationRule: rule }),
               ...(rules === undefined ? {} : { currentRules: rules }),
             },
-            undefined,
+            signal,
             prepared,
           );
           return approvals.request(turn, `NOD_${action}`, input, {
             ...provenance,
+            signal,
             allowed: !verdict.confirm,
             ...(verdict.confirm ? {} : { basis: verdict.basis }),
             expectedChatRevision: verdict.chatRevision,
@@ -2605,9 +2608,10 @@ async function initializeApplication(
             turnId: turn.turnId,
             ownerRooted: origin?.source === 'user',
           });
-          const verdict = await trust.check(turn, `NOD_${action}`, input);
+          const verdict = await trust.check(turn, `NOD_${action}`, input, signal);
           return approvals.request(turn, `NOD_${action}`, input, {
             ...provenance,
+            signal,
             allowed: !verdict.confirm,
             ...(verdict.confirm ? {} : { basis: verdict.basis }),
             expectedChatRevision: verdict.chatRevision,

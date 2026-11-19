@@ -274,7 +274,11 @@ export interface ThreadDependencies {
     turn: TurnRef,
     action: string,
     args: Record<string, unknown>,
-    provenance: { sourceMessageId: string | null; admit?: (asks: boolean) => Promise<void> },
+    provenance: {
+      sourceMessageId: string | null;
+      signal: AbortSignal;
+      admit?: (asks: boolean) => Promise<void>;
+    },
   ) => Promise<unknown>;
 }
 
@@ -2438,7 +2442,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
           : value;
       }),
       manage: fenced((action, args, admit) =>
-        dependencies.manage(ref, action, args, { sourceMessageId, admit }),
+        dependencies.manage(ref, action, args, { sourceMessageId, signal, admit }),
       ),
       task:
         dependencies.task &&
