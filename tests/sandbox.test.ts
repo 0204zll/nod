@@ -16,6 +16,7 @@ import {
   rename,
   rm,
   symlink,
+  truncate,
   utimes,
   writeFile,
 } from 'node:fs/promises';
@@ -47,6 +48,7 @@ import { prepareLocalDirectories } from '../scripts/local-database.ts';
 import { createSandbox } from '../src/providers/pi/sandbox.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createLocalFiles, localFileRules } from '../src/server/local-files.ts';
+import { fileBytes } from '../src/shared/files.ts';
 import type { Pool } from 'pg';
 
 if (process.env.NOD_TEST_WORKSPACE_IMAGE)
@@ -1238,6 +1240,59 @@ test('local file version checks keep the cause of a failed path check', async (t
         }
       }
     }
+  }
+});
+
+test('local imports reject changed and oversized files before reading bytes', async (t) => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'nod-import-size-')));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const path = join(home, 'note.txt');
+  await writeFile(path, 'old');
+  const pool = {
+    query: async () => ({ rows: [{ local_files_enabled: true, local_keep_out: [] }] }),
+  } as unknown as Pool;
+  const files = createLocalFiles(pool, 'owner', {
+    home,
+    dataRoot: join(home, 'data'),
+    available: true,
+  });
+  const checked = await files.prepare('LOCAL_FILES_IMPORT', { path });
+  const handle = await open(path, 'r');
+  const prototype = Object.getPrototypeOf(handle) as typeof handle;
+  const read = prototype.read;
+  await handle.close();
+  let reads = 0;
+  const intercepted = t.mock.method(
+    prototype,
+    'read',
+    function (this: typeof handle, ...args: Parameters<typeof handle.read>) {
+      reads++;
+      return Reflect.apply(read, this, args);
+    },
+  );
+  try {
+    await truncate(path, fileBytes + 1);
+    await assert.rejects(files.execute('LOCAL_FILES_IMPORT', checked), {
+      statusCode: 409,
+      notRun: true,
+    });
+    const oversized = await files.prepare('LOCAL_FILES_IMPORT', { path });
+    await assert.rejects(files.execute('LOCAL_FILES_IMPORT', oversized), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Files up to .* MB can be copied/);
+      assert.equal((error as { notRun?: boolean }).notRun, true);
+      return true;
+    });
+    assert.equal(reads, 0);
+    await writeFile(path, 'new');
+    const current = (await files.execute(
+      'LOCAL_FILES_IMPORT',
+      await files.prepare('LOCAL_FILES_IMPORT', { path }),
+    )) as { file: { bytes: Uint8Array } };
+    assert.equal(new TextDecoder().decode(current.file.bytes), 'new');
+    assert.equal(reads, 1);
+  } finally {
+    intercepted.mock.restore();
   }
 });
 

@@ -612,7 +612,7 @@ export function createLocalFiles(
     );
   }
 
-  async function readFile(path: string, limit: number, version?: string) {
+  async function readFile(path: string, limit: number, version?: string, complete = false) {
     const checked = await maybeLstat(path);
     if (!checked?.isFile()) throw new IntegrationError(`${path} is not a file.`);
     const file = await open(path, constants.O_RDONLY | noFollow | noBlock);
@@ -633,6 +633,11 @@ export function createLocalFiles(
       };
       await checkVersion();
       const size = opened.size;
+      if (complete && size > limit)
+        throw Object.assign(
+          new IntegrationError(`Files up to ${limit / 1024 / 1024} MB can be copied.`),
+          { notRun: true },
+        );
       const length = Math.min(size, limit);
       const { buffer, bytesRead } = await file.read(Buffer.alloc(length), 0, length, 0);
       await checkVersion();
@@ -789,9 +794,7 @@ export function createLocalFiles(
     }
     if (action === 'LOCAL_FILES_IMPORT') {
       const path = await target(input.path);
-      if (((await maybeLstat(path))?.size ?? 0) > fileBytes)
-        throw new IntegrationError(`Files up to ${fileBytes / 1024 / 1024} MB can be copied.`);
-      const { size, bytes } = await readFile(path, fileBytes, input.version);
+      const { size, bytes } = await readFile(path, fileBytes, input.version, true);
       const name = nodePath.basename(path);
       const file: IntegrationFile = { name, mimeType: fileMimeType(name), bytes };
       return { path, size, file };
