@@ -358,6 +358,113 @@ test('browser wording keeps material command facts for steps other than clicks',
   }
 });
 
+test('HTTP confirmations describe the verified request without exposing the transport wrapper', async () => {
+  const url = 'https://api.example.test/v2/signals?label=Caf%C3%A9&route=one%2Ftwo';
+  for (const method of ['GET', 'POST'] as const) {
+    const body = { label: 'Synthetic record', count: 2 };
+    const request = { method, url, ...(method === 'POST' ? { body } : {}) };
+    const proposal: ApprovalDescription = {
+      turn: { threadId: 'synthetic-thread', turnId: 'synthetic-turn' },
+      action: 'CONNECTED_HTTP',
+      args: {
+        connectionId: 'synthetic-private-connection',
+        pathId: 'synthetic-private-path',
+        method,
+        path: '/signals?label=Caf%C3%A9&route=one%2Ftwo',
+        body: method === 'GET' ? { ignored: 'synthetic-ignored-body' } : body,
+      },
+      details: {
+        account: {
+          name: 'Synthetic API',
+          identity: 'Synthetic account',
+          method: 'http',
+          endpoint: 'https://api.example.test/v2',
+        },
+        request,
+        verifiedBinding: 'synthetic-private-binding',
+      },
+    };
+    const saved = structuredClone(proposal);
+    let calls = 0;
+    const communication = createCommunication({
+      pool: { query: async () => ({ rows: [] }) } as unknown as pg.Pool,
+      ownerId: 'synthetic-owner',
+      review: async (_instructions, input) => {
+        calls++;
+        const current = input as Record<string, any>;
+        assert.equal(current.data.action, 'HTTP request');
+        assert.deepEqual(current.data.args, request);
+        assert.deepEqual(current.data.details, {
+          account: { name: 'Synthetic API', identity: 'Synthetic account' },
+        });
+        assert.doesNotMatch(
+          JSON.stringify(current),
+          /CONNECTED_HTTP|synthetic-private|synthetic-ignored-body/,
+        );
+        if (current.purpose === 'confirmation_review') {
+          assert.ok(visibleMarkdownText(current.text).includes(url));
+          assert.ok(visibleMarkdownText(current.text).includes(method));
+          return { valid: true };
+        }
+        if (current.data.args.body) current.data.args.body.label = 'Changed by the writer';
+        return {
+          text: `Can I make the ${method} request to ${url}?`,
+          action: 'Make request',
+        };
+      },
+    });
+    await communication.describe(proposal);
+    assert.equal(calls, 2);
+    assert.deepEqual(proposal, saved);
+  }
+});
+
+test('HTTP confirmation requests hide secrets and report incomplete details', async () => {
+  let calls = 0;
+  const communication = createCommunication({
+    pool: { query: async () => ({ rows: [] }) } as unknown as pg.Pool,
+    ownerId: 'synthetic-owner',
+    review: async (_instructions, input) => {
+      const current = input as Record<string, any>;
+      calls++;
+      assert.equal(current.data.action, 'HTTP request');
+      assert.equal(current.data.args.body.label, 'Synthetic record');
+      assert.equal(current.data.args.body.password, '[redacted]');
+      assert.ok(current.withheld.includes('args.url'));
+      assert.ok(current.withheld.includes('args.body.password'));
+      assert.doesNotMatch(JSON.stringify(current), /synthetic-query-secret|synthetic-body-secret/);
+      return current.purpose === 'confirmation_review'
+        ? { valid: true }
+        : {
+            text: 'Can I make this POST request? Some details are hidden. This description is incomplete.',
+            action: 'Make request',
+          };
+    },
+  });
+  await communication.describe({
+    turn: { threadId: 'synthetic-thread', turnId: 'synthetic-turn' },
+    action: 'CONNECTED_HTTP',
+    args: {},
+    details: {
+      request: {
+        method: 'POST',
+        url: 'https://api.example.test/records?token=synthetic-query-secret&limit=2',
+        body: { label: 'Synthetic record', password: 'synthetic-body-secret' },
+      },
+    },
+  });
+  assert.equal(calls, 2);
+  await assert.rejects(
+    communication.describe({
+      turn: { threadId: 'synthetic-thread', turnId: 'synthetic-turn' },
+      action: 'CONNECTED_HTTP',
+      args: {},
+    }),
+    /no verified request details/,
+  );
+  assert.equal(calls, 2);
+});
+
 test('browser upload wording omits the private workspace path', async () => {
   const command = {
     action: 'upload',

@@ -4015,6 +4015,227 @@ test(
         },
       );
       await t.test(
+        'HTTP confirmations describe the exact request and bind it to the selected account',
+        async () => {
+          const { createAppGrantVault } = await import('../src/server/vault-app-grants.ts');
+          const calls: Array<{ method: string; url: string; body: string }> = [];
+          const server = createServer(async (incoming, outgoing) => {
+            const chunks: Buffer[] = [];
+            for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
+            assert.equal(incoming.headers.authorization, 'Bearer synthetic-http-context-token');
+            calls.push({
+              method: incoming.method!,
+              url: incoming.url!,
+              body: Buffer.concat(chunks).toString(),
+            });
+            outgoing.setHeader('content-type', 'application/json');
+            outgoing.end(JSON.stringify({ value: 'Synthetic signals' }));
+          });
+          await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+          const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+          const connectionId = randomUUID();
+          const pathId = randomUUID();
+          const paths = [
+            { id: pathId, kind: 'http', endpoint: `${origin}/v2`, auth: 'bearer', local: true },
+          ];
+          const route = '/signals?label=Caf%C3%A9&route=one%2Ftwo';
+          const url = `${origin}/v2${route}`;
+          const wording: Array<Record<string, any>> = [];
+          let expected: Record<string, unknown>;
+          let duringWording: (() => Promise<void>) | undefined;
+          try {
+            await pool.query(
+              'INSERT INTO discovered_connections(id,owner_id,service,name,account_name,paths) VALUES($1,$2,$3,$4,$5,$6)',
+              [
+                connectionId,
+                ownerId,
+                'http-context-fixture',
+                'Synthetic HTTP API',
+                'Synthetic account',
+                JSON.stringify(paths),
+              ],
+            );
+            const grants = await createAppGrantVault(pool, {
+              ownerId,
+              keyStore: {
+                id: 'fixture',
+                configured: true,
+                getKey: async () => Buffer.alloc(32, 7),
+              },
+            });
+            await grants.put(connectionId, 'synthetic-http-context-token');
+            confirmationModel = async (input) => {
+              const current = input as Record<string, any>;
+              wording.push(structuredClone(current));
+              if (duringWording) {
+                const change = duringWording;
+                duringWording = undefined;
+                await change();
+              }
+              if (current.purpose === 'confirmation_review')
+                return current.data.action === 'HTTP request'
+                  ? { valid: true }
+                  : {
+                      valid: false,
+                      reason: 'The proposed operation is a raw connected HTTP wrapper.',
+                    };
+              return {
+                text: `Can I make the ${expected.method} request to ${url}?`,
+                action: 'Make request',
+              };
+            };
+            for (const method of ['GET', 'POST'] as const) {
+              const body = { label: 'Synthetic record', count: 2 };
+              expected = { method, url, ...(method === 'POST' ? { body } : {}) };
+              const args = {
+                connectionId,
+                pathId,
+                method,
+                path: route,
+                body: method === 'GET' ? { ignored: 'synthetic-ignored-body' } : body,
+              };
+              const before = calls.length;
+              wording.length = 0;
+              const held = await propose('CONNECTED_HTTP', args, 'apps');
+              const [card] = await approvalsFor(held);
+              assert.equal(card.status, 'pending');
+              assert.deepEqual(card.args, args);
+              assert.equal(typeof card.details.verifiedBinding, 'string');
+              assert.equal(calls.length, before);
+              assert.deepEqual(
+                wording.map((input) => input.purpose),
+                ['confirmation', 'confirmation_review'],
+              );
+              for (const input of wording) {
+                assert.equal(input.data.action, 'HTTP request');
+                assert.deepEqual(input.data.args, expected);
+                assert.doesNotMatch(
+                  JSON.stringify(input),
+                  /synthetic-http-context-token|verifiedBinding|connectionId|pathId|synthetic-ignored-body/,
+                );
+              }
+              const question = await confirmationFor(card);
+              assert.ok(question.includes(method));
+              assert.ok(question.includes('/v2/signals'));
+              assert.ok(question.includes(String((server.address() as { port: number }).port)));
+              const response = await request('POST', '/api/messages', {
+                text: 'Yes',
+                replyToMessageId: card.confirmation_message_id,
+                approvalAnswer: { approvalId: card.id, approved: true },
+              });
+              assert.equal(response.statusCode, 200, response.body);
+              await waitFor(response.json().turnId, 'succeeded');
+              assert.equal((await approvalsFor(held))[0].status, 'completed');
+              const saved = await request(
+                'GET',
+                `/api/messages/around/${card.confirmation_message_id}`,
+              );
+              assert.equal(saved.statusCode, 200, saved.body);
+              const message = saved
+                .json()
+                .find((item: { id: string }) => item.id === card.confirmation_message_id);
+              assert.equal(message.approval.state, 'done');
+              assert.equal(message.text, question);
+              const html = renderToStaticMarkup(
+                createElement(ApprovalCard, {
+                  approval: message.approval,
+                  children: message.text,
+                }),
+              );
+              assert.ok(html.includes('/v2/signals'));
+              assert.ok(html.includes(method));
+              assert.doesNotMatch(html, /CONNECTED_HTTP|synthetic-http-context-token/);
+              assert.deepEqual(
+                calls.slice(before).map((call) => ({
+                  ...call,
+                  body: call.body ? JSON.parse(call.body) : undefined,
+                })),
+                [{ method, url: `/v2${route}`, body: method === 'GET' ? undefined : body }],
+              );
+              const repeated = await request('POST', '/api/messages', {
+                text: 'Yes',
+                replyToMessageId: card.confirmation_message_id,
+                approvalAnswer: { approvalId: card.id, approved: true },
+              });
+              assert.equal(repeated.statusCode, 409, repeated.body);
+              assert.equal(calls.length, before + 1);
+            }
+            expected = { method: 'GET', url };
+            const nextArgs = () => ({ connectionId, pathId, method: 'GET', path: route });
+            for (const reason of ['rebind', 'legacy', 'stop']) {
+              const held = await propose('CONNECTED_HTTP', nextArgs(), 'apps');
+              const [card] = await approvalsFor(held);
+              if (reason === 'rebind')
+                await pool.query('UPDATE discovered_connections SET paths=$2 WHERE id=$1', [
+                  connectionId,
+                  JSON.stringify([{ ...paths[0], endpoint: `${origin}/replacement` }]),
+                ]);
+              else if (reason === 'legacy')
+                await pool.query(
+                  "UPDATE approvals SET details=details-'verifiedBinding' WHERE id=$1",
+                  [card.id],
+                );
+              else assert.equal((await request('POST', '/api/thread/stop')).statusCode, 200);
+              const response = await request('POST', '/api/messages', {
+                text: 'Yes',
+                replyToMessageId: card.confirmation_message_id,
+                approvalAnswer: { approvalId: card.id, approved: true },
+              });
+              if (reason === 'stop') assert.equal(response.statusCode, 409, response.body);
+              else {
+                assert.equal(response.statusCode, 200, response.body);
+                await waitFor(response.json().turnId, 'succeeded|failed');
+                const [expired] = await approvalsFor(held);
+                assert.equal(expired.status, 'expired');
+                assert.match(
+                  JSON.stringify(expired.result),
+                  reason === 'rebind' ? /connected account changed/ : /no saved account binding/,
+                );
+              }
+              assert.equal(calls.length, 2);
+              await pool.query('UPDATE discovered_connections SET paths=$2 WHERE id=$1', [
+                connectionId,
+                JSON.stringify(paths),
+              ]);
+            }
+            duringWording = async () => {
+              await pool.query(
+                'UPDATE discovered_connections SET account_id=gen_random_uuid() WHERE id=$1',
+                [connectionId],
+              );
+            };
+            const prompt = `Synthetic HTTP account change ${randomUUID()}`;
+            plans.set(prompt, { tool: 'apps', action: 'CONNECTED_HTTP', args: nextArgs() });
+            const changed = await request('POST', '/api/messages', { text: prompt });
+            assert.equal(changed.statusCode, 200, changed.body);
+            await waitFor(changed.json().turnId, 'succeeded|failed');
+            assert.equal(duringWording, undefined);
+            assert.deepEqual(await approvalsFor(changed.json().turnId), []);
+            const changedTurn = (
+              await pool.query('SELECT error FROM turns WHERE id=$1', [changed.json().turnId])
+            ).rows[0];
+            assert.match(
+              JSON.stringify(results.get(changed.json().turnId)) ?? changedTurn.error,
+              /connected account changed before confirmation/,
+            );
+            assert.equal(calls.length, 2);
+          } finally {
+            confirmationModel = undefined;
+            await pool.query('DELETE FROM vault_app_grants WHERE owner_id=$1 AND id=$2', [
+              ownerId,
+              connectionId,
+            ]);
+            await pool.query('DELETE FROM discovered_connections WHERE owner_id=$1 AND id=$2', [
+              ownerId,
+              connectionId,
+            ]);
+            server.closeAllConnections();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+          }
+        },
+      );
+
+      await t.test(
         'MCP confirmations use the selected tool definition and exact input',
         async () => {
           const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');

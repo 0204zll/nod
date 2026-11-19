@@ -248,8 +248,21 @@ export function createCommunication(options: {
     signal?: AbortSignal,
   ): Promise<ApprovalPresentation> {
     signal?.throwIfAborted();
-    const args = { ...proposal.args };
+    let action = proposal.action;
+    let args = { ...proposal.args };
     const details = { ...proposal.details };
+    if (action === 'CONNECTED_HTTP') {
+      const request = details.request;
+      if (!request || typeof request !== 'object' || Array.isArray(request))
+        throw new Error('The HTTP confirmation has no verified request details.');
+      action = 'HTTP request';
+      args = structuredClone(request as Record<string, unknown>);
+      delete details.request;
+      if (details.account && typeof details.account === 'object') {
+        const account = details.account as Record<string, unknown>;
+        details.account = { name: account.name, identity: account.identity };
+      }
+    }
     for (const key of ['connectionId', 'pathId']) {
       delete args[key];
       delete details[key];
@@ -276,7 +289,7 @@ export function createCommunication(options: {
         proposal.turn.threadId,
         'confirmation',
         {
-          action: proposal.action,
+          action,
           args,
           ...(Object.keys(details).length ? { details } : {}),
           ...(proposal.work ? { work: proposal.work } : {}),

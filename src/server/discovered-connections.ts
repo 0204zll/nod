@@ -1579,13 +1579,29 @@ export async function createDiscoveredConnections(
     if (current !== JSON.stringify([row.account_id, row.paths]) || current !== expectedBinding)
       throw Object.assign(error('This connected account changed.', 409), { notRun: true });
   }
-  async function approvalDetails(args: Record<string, unknown>, signal?: AbortSignal) {
+  async function approvalDetails(
+    action: 'CONNECTED_HTTP' | 'CONNECTED_MCP_CALL',
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) {
+    args = structuredClone(args);
     signal?.throwIfAborted();
-    const { row, call } = await selected('CONNECTED_MCP_CALL', args);
-    if (call.kind !== 'mcp') throw error('Choose an MCP access path.');
+    const { row, call } = await selected(action, args);
     const verifiedBinding = JSON.stringify([row.account_id, row.paths]);
     await assertBinding(row);
     signal?.throwIfAborted();
+    const account = { name: row.name, identity: row.account_name };
+    if (call.kind === 'http')
+      return {
+        account,
+        request: {
+          method: call.method,
+          url: call.url,
+          ...(call.method !== 'GET' && args.body !== undefined ? { body: args.body } : {}),
+        },
+        verifiedBinding,
+      };
+    if (call.kind !== 'mcp') throw error('Choose an MCP access path.');
     const { tools } = await catalog(row, call.path, signal);
     await assertBinding(row);
     signal?.throwIfAborted();
@@ -1594,8 +1610,7 @@ export async function createDiscoveredConnections(
       throw error('The selected MCP tool is unavailable in this connection’s tool list.', 409);
     return {
       account: {
-        name: row.name,
-        identity: row.account_name,
+        ...account,
         method: call.path.kind,
         endpoint: call.path.endpoint,
       },
