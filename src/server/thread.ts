@@ -2466,7 +2466,12 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
           ? undefined
           : async () => {
               if (signal.aborted) throw turnStopped();
-              if (await dependencies.spendingLimit?.()) return [];
+              try {
+                if (await dependencies.spendingLimit?.()) return [];
+              } catch (error) {
+                logFailure('queued_message_limit_failed', error, { threadId, turnId });
+                return [];
+              }
               const taken = await takeQueuedMessages(turnId, turn.session_id, turn.channel);
               if (taken.length) {
                 sourceMessageId = taken.at(-1)!.id;
