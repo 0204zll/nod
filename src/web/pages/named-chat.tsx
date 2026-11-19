@@ -183,7 +183,7 @@ export function DraftChat({
               const chat = await api<Task>('/api/chats', {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ about: value }),
+                body: JSON.stringify({}),
               });
               await refresh();
               onCreated(chat, { id: crypto.randomUUID(), text: value, attachments });
