@@ -1055,10 +1055,13 @@ async function initializeApplication(
   });
   const memoryRecall = createMemoryRecall({ pool, ownerId, memory, curator });
   const writingStyle = createWritingStyleLearning({ memory, curator });
+  let channels: Awaited<ReturnType<typeof createChannels>> | undefined;
   const communication = createCommunication({
     pool,
     ownerId,
     review,
+    canDeliverLiteral: (channel, text, literal) =>
+      channels?.canDeliverLiteral(channel, text, literal) ?? false,
     preferences: async () =>
       (await memory.load()).entries
         .filter(
@@ -1910,7 +1913,6 @@ async function initializeApplication(
     (input, signal) => ledger.forOwner(() => trust.classifyRepeatedAction(input, signal)),
   );
   retireScheduleConfirmations = approvals.retireScheduleConfirmations;
-  let channels: Awaited<ReturnType<typeof createChannels>> | undefined;
   const reactions = createAgentReactionService({
     pool,
     ownerId,
@@ -2356,6 +2358,7 @@ async function initializeApplication(
     wake = adapters.model.configured,
     replyChannel?: string,
   ) => reactToAssistantMessage(messageId, reaction, wake, userMessages, replyChannel);
+  let startThreadConsumers: (() => Promise<void>) | undefined;
   if (options.workers !== false) {
     if (options.heartbeat !== false) await triage.initializeHeartbeat();
     await initializeMemoryLearning({
@@ -2363,7 +2366,7 @@ async function initializeApplication(
       consumers,
       run: () => analytics.withSystemWork(ownerId, 'memory_learning', learning.run),
     });
-    await startThreadWorkers({
+    startThreadConsumers = startThreadWorkers.bind(undefined, {
       present: communication.present,
       taskChecks: tasks.resumeDue,
       analytics: captureAnalytics,
@@ -3484,6 +3487,7 @@ async function initializeApplication(
       void observeChannels();
     }
   }
+  await startThreadConsumers?.();
   await onboardingSuggestions.initialize();
   if (adapters.model.configured)
     void admission.run(integrations.resumeWritingStyle)?.catch(() => {});
