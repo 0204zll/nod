@@ -510,6 +510,7 @@ async function runningDesktop(
     quitAndInstall = () => assert.fail('No update should install.'),
     startWindowsInstall = () => assert.fail('No Windows update should install.'),
     exit = () => {},
+    installerRunning = () => false,
     displays = [{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }],
   } = {},
 ) {
@@ -693,6 +694,7 @@ async function runningDesktop(
     Date: Object.assign(class extends Date {}, { now }),
     setTimeout,
     clearTimeout,
+    macInstallerRunning: installerRunning,
     fetch: async (resource, options) => {
       if (String(resource) === `${posthogHost.host}/i/v0/e/`) {
         nativeAnalytics.push(JSON.parse(options.body));
@@ -988,6 +990,8 @@ async function runningDesktop(
       status: () => status,
       notifyReady: updateReadinessNotice,
       checkUpdates: (updater, manual = true, restartReady = false) => { updates = updater; return checkForUpdates(manual, restartReady); },
+      setMacInstallerBusy: (busy) => { macInstallerBusy = busy; refreshUpdateMenu(); },
+      monitorMacInstaller: () => waitForMacInstaller(),
       reportUpdateStatus,
       registerFiles: () => { ${source.slice(source.indexOf('      disposeArtifactFiles = registerArtifactFileHandlers('), source.indexOf("      ipcMain.handle('nod:renderer-ready'"))} },
       quit,
@@ -7401,6 +7405,44 @@ test('retrying a failed manual refresh checks again instead of restarting an old
   assert.equal(selections, 3);
   assert.equal(updater.ready.version, '0.4.1');
   assert.equal(prompts, 2);
+});
+
+test('the startup installer monitor disables update actions until ShipIt exits', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let installerRunning = true;
+  let checks = 0;
+  const updater = {
+    ready: undefined,
+    async check() {
+      checks++;
+      this.ready = { version: '0.2.0' };
+      return this.ready;
+    },
+  };
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
+    installerRunning: async () => installerRunning,
+    prompt: () => ({ response: 1 }),
+  });
+  await f.checkUpdates(updater, false);
+  assert.equal(checks, 1);
+  assert.equal(f.updateMenu.enabled, true);
+  assert.equal(f.restartMenu.enabled, true);
+  f.setMacInstallerBusy(true);
+  const monitoring = f.monitorMacInstaller();
+  await new Promise(setImmediate);
+  assert.equal(f.updateMenu.enabled, false);
+  assert.equal(f.restartMenu.enabled, false);
+  assert.equal(f.updateMenu.label, 'Waiting for update installer…');
+  const checking = f.checkUpdates(updater);
+  await new Promise(setImmediate);
+  assert.equal(checks, 1);
+  installerRunning = false;
+  t.mock.timers.tick(5_000);
+  await Promise.all([monitoring, checking]);
+  assert.equal(checks, 2);
+  assert.equal(f.updateMenu.enabled, true);
+  assert.equal(f.restartMenu.enabled, true);
+  assert.equal(f.updateMenu.label, 'Check for Updates…');
 });
 
 test('automatic update checks retry failures sooner and return to the normal interval', async (t) => {
