@@ -992,6 +992,7 @@ export function Chat({
           showQuestion={!task.questionMessageId || askedInCard.has(task.questionMessageId)}
           onOpen={(path) => onOpenChat?.(path)}
           onReply={task.status === 'needs_you' ? () => replyToChat(task) : undefined}
+          onChanged={() => void refresh()}
         />
       </div>
     </div>

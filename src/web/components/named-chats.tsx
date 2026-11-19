@@ -62,9 +62,9 @@ const stateLabels: Record<NonNullable<ChatState>, string> = {
   failed: 'failed',
 };
 
-function PinMark() {
+function KeepMark() {
   return (
-    <svg className="chat-pin" viewBox="0 0 24 24" role="img" aria-label="Pinned">
+    <svg className="chat-pin" viewBox="0 0 24 24" role="img" aria-label="Kept">
       <path d="M9 4h6l-1 6 3 3H7l3-3-1-6Zm3 9v7" />
     </svg>
   );
@@ -126,7 +126,7 @@ function ChatMenu({
               run(changeChat(chat.id, { pinned: !chat.pinned }));
             }}
           >
-            {chat.pinned ? 'Unpin' : 'Pin'}
+            {chat.pinned ? 'Don’t keep' : 'Keep'}
           </ActionMenuItem>
           {active && (
             <ActionMenuItem
@@ -234,7 +234,7 @@ export function ChatList({
           <ChatAvatar name={chat.name} state={state} />
           <span className="chat-row-name">{chat.name}</span>
           <span className="chat-row-meta">
-            {chat.pinned && <PinMark />}
+            {chat.pinned && <KeepMark />}
             {time}
           </span>
           <span className={`chat-row-line${state === 'working' && !draft ? ' chat-live' : ''}`}>
@@ -331,6 +331,7 @@ export function ChatCard({
   showQuestion = true,
   onOpen,
   onReply,
+  onChanged,
 }: {
   chat: NamedChat;
   live?: Activity;
@@ -338,8 +339,11 @@ export function ChatCard({
   showQuestion?: boolean;
   onOpen(path: string): void;
   onReply?(): void;
+  onChanged?(): void;
 }) {
   const state = chatState(chat);
+  const [keeping, setKeeping] = useState(false);
+  const [keepError, setKeepError] = useState('');
   const now = useNow(state === 'working');
   const open = (event: MouseEvent) => {
     if (!plain(event)) return;
@@ -373,6 +377,7 @@ export function ChatCard({
         {chat.name}
       </a>
       <span className="chat-card-meta">
+        {chat.pinned && <KeepMark />}
         {meta}
         {working && <ChevronRight size={14} aria-hidden="true" />}
       </span>
@@ -393,7 +398,30 @@ export function ChatCard({
             Open {chat.name}
             <ChevronRight size={15} aria-hidden="true" />
           </a>
+          {finished && !chat.pinned && !chat.archivedAt && onChanged && (
+            <button
+              type="button"
+              className="chat-button chat-button-quiet"
+              disabled={keeping}
+              onClick={() => {
+                setKeeping(true);
+                setKeepError('');
+                void changeChat(chat.id, { pinned: true })
+                  .then(onChanged)
+                  .catch((cause) => setKeepError(errorMessage(cause)))
+                  .finally(() => setKeeping(false));
+              }}
+            >
+              <KeepMark />
+              Keep {chat.name}
+            </button>
+          )}
         </div>
+      )}
+      {keepError && (
+        <p className="chat-card-error" role="alert">
+          {keepError}
+        </p>
       )}
     </article>
   );
@@ -540,7 +568,7 @@ export function ChatHeader({
         )}
         {subtitle && <p role={error ? 'alert' : undefined}>{subtitle}</p>}
       </div>
-      {chat?.pinned && <PinMark />}
+      {chat?.pinned && <KeepMark />}
       <div className="chat-header-tools" ref={toolsRef} />
       {chat && (
         <ChatMenu

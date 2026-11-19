@@ -37,7 +37,8 @@ In your chat with Nod, each chat is one card. While it works, a turning ring on 
 | Keep a subject in one place      | Select **New chat** and write your first message. It names the chat.                  |
 | Answer a chat's question         | Select **Reply** on its card, or answer inside the chat.                              |
 | Send related work                | Ask Nod. It sends the work to the chat that already exists.                           |
-| Rename, pin or archive           | Use the chat's menu in the sidebar or at the top right of the chat.                   |
+| Keep a chat in the list          | Select **Keep** on its card when it finishes, or in its menu.                         |
+| Rename or archive                | Use the chat's menu in the sidebar or at the top right of the chat.                   |
 | See steps, activity or the model | Open the chat's menu and select **Details**.                                          |
 | Find an older or archived chat   | Select **Earlier** under the chat list. Open an archived chat and select **Restore**. |
 | Search one chat                  | Open the chat, then search. Results come from that chat only.                         |
@@ -51,7 +52,7 @@ Nod sends new work to the chat whose role covers it. A second hiring request goe
 
 Each new request in a finished chat stands alone. An earlier message in that chat can give Nod context, but it cannot approve a new action.
 
-A pinned chat stays in the list. Other chats leave it a day after they finish and move to **Earlier**. When a reply arrives only in a chat while Nod is in the background, the browser notification opens that chat.
+A chat you keep stays in the list, and Nod gives it new work that fits its role. Nod never keeps a chat on its own. Other chats leave the list a day after they finish and move to **Earlier**. When a reply arrives only in a chat while Nod is in the background, the browser notification opens that chat.
 
 Chats are part of Nod web and desktop. Telegram and WhatsApp keep one conversation: reply to a chat's message there to continue it.
 

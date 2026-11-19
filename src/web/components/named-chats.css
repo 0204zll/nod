@@ -422,7 +422,8 @@
     'avatar name meta'
     'avatar line line'
     'body body body'
-    'actions actions actions';
+    'actions actions actions'
+    'error error error';
   align-items: center;
   column-gap: 14px;
   padding: 14px 16px 14px 14px;
@@ -525,6 +526,28 @@
 }
 .chat-button:hover {
   background: color-mix(in srgb, var(--foreground) 13%, transparent);
+}
+.chat-button-quiet {
+  background: transparent;
+  color: var(--muted-foreground);
+}
+.chat-button-quiet:hover {
+  color: var(--foreground);
+}
+.chat-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.chat-card-error {
+  position: relative;
+  z-index: 1;
+  grid-area: error;
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--destructive);
+}
+.chat-card-meta .chat-pin {
+  margin-right: 2px;
 }
 .chat-button-primary,
 .chat-button-primary:hover {
