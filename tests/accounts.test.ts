@@ -1201,10 +1201,14 @@ test('pure decision checks bind the evaluated model, preserve target checks and 
   source = 'message:0';
   input.action.name = 'send_email';
   probabilities = {};
-  served = 'perplexity/pplx-decider-v1.3';
-  assert.equal(await allowed(), undefined);
-  served = undefined;
-  assert.equal(await allowed(), undefined);
+  for (const returnedModel of ['perplexity/pplx-decider-v1.3', undefined]) {
+    served = returnedModel;
+    await assert.rejects(allowed(), {
+      code: 'decision_model_mismatch',
+      reviewRequired: true,
+      reviewUnavailable: true,
+    });
+  }
   served = 'perplexity/pplx-decider-v1.2-20261016';
   omit = 'targets';
   await assert.rejects(allowed());

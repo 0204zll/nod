@@ -55,6 +55,8 @@ import { MessageText } from '../src/web/components/message.tsx';
 import { createE2eCurators } from '../scripts/e2e-curators.ts';
 import { createIntegrationFixture } from '../scripts/e2e-fixtures.ts';
 import { createPiMemoryCurator } from '../src/providers/pi/memory-curator.ts';
+import { createDecisionModel } from '../src/providers/decisions.ts';
+import { appTools, appToolArgs } from '../src/server/app-reads.ts';
 import { captureOwnerInstructions } from '../src/server/owner-instructions.ts';
 import { createIntegrations } from '../src/server/integrations.ts';
 import { createChatSdkTransport } from '../src/providers/chat-sdk/index.ts';
@@ -3552,6 +3554,120 @@ test(
                 await finish(turn.turnId, 'cancelled');
               }
             }
+        },
+      );
+
+      await t.test(
+        'an unverified Perplexity model cannot create a generic send approval',
+        async () => {
+          const expected = 'perplexity/pplx-decider-v1.2-20261016';
+          const [tool] = appTools(
+            {
+              tools: {
+                GMAIL_SEND_EMAIL: {
+                  description: 'Send a synthetic message.',
+                  inputSchema: {
+                    type: 'object',
+                    properties: { recipient_email: { type: 'string' } },
+                    additionalProperties: false,
+                  },
+                },
+              },
+            },
+            'synthetic-connection',
+          );
+          const readArgs = appToolArgs(
+            tool,
+            { recipient_email: 'recipient@example.test' },
+            'synthetic-connection',
+          );
+          for (const served of [expected, 'perplexity/pplx-decider-v1.3', undefined]) {
+            const turn = await begin('Prepare the synthetic message and show it before sending.');
+            const before = calls.length;
+            let checks = 0;
+            const checker = createTrust({
+              pool: db.pool,
+              ownerId,
+              review: async () => assert.fail('The decision check cannot switch to an LLM.'),
+              decisions: createDecisionModel({
+                resolve: async () => ({
+                  provider: 'openrouter',
+                  key: 'synthetic-decision-key',
+                  model: 'perplexity/pplx-decider-v1.2',
+                }),
+                fetch: async (_url, init) => {
+                  checks++;
+                  const request = JSON.parse(String(init?.body));
+                  return Response.json({
+                    model: served,
+                    answers: Object.fromEntries(
+                      Object.entries(request.questions).map(([name, value]) => {
+                        const question = value as { criteria: Record<string, string> };
+                        const choice = name === 'trust' ? 'ask' : String(name === 'readOnly');
+                        return [
+                          name,
+                          {
+                            type: 'choice',
+                            choice,
+                            probabilities: Object.fromEntries(
+                              Object.keys(question.criteria).map((key) => [
+                                key,
+                                Number(key === choice),
+                              ]),
+                            ),
+                          },
+                        ];
+                      }),
+                    ),
+                    usage: { input_tokens: 100 },
+                  });
+                },
+              }),
+            });
+            try {
+              const proposed = async () => {
+                const args = {
+                  page: 'https://mail.example.test/compose',
+                  control: { name: 'Send' },
+                };
+                const verdict = await checker.check(turn, 'NOD_browser', args);
+                assert.equal(verdict.confirm, true);
+                return approved.request(turn, 'NOD_browser', args, {
+                  allowed: false,
+                  expectedChatRevision: verdict.chatRevision,
+                  validate: verdict.validate,
+                });
+              };
+              if (served === expected) {
+                await proposed();
+                assert.equal((await proposal(turn.turnId)).status, 'pending');
+              } else {
+                await assert.rejects(
+                  proposed(),
+                  (error) =>
+                    Object(error).code === 'decision_model_mismatch' &&
+                    String(error).includes(expected),
+                );
+                assert.equal(await proposal(turn.turnId), undefined);
+              }
+              assert.equal(
+                await checker.readOnly(
+                  tool.action,
+                  readArgs,
+                  { description: tool.description, inputSchema: tool.schema },
+                  AbortSignal.timeout(1000),
+                ),
+                served === expected,
+              );
+              assert.equal(checks, 2);
+              assert.equal(calls.length, before);
+            } finally {
+              await db.pool.query("UPDATE approvals SET status='expired' WHERE turn_id=$1", [
+                turn.turnId,
+              ]);
+              await finish(turn.turnId, 'cancelled');
+            }
+          }
         },
       );
 

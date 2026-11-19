@@ -278,6 +278,8 @@ Nod can use a decision model to check action permission, read confirmation repli
 
 ### Select the action checker
 
+Perplexity answers must identify the required model version before Nod uses them to check permission, decide if an action only reads or read your reply. A missing or different version fails the check.
+
 Set `NOD_TRUST_MODEL` in the server configuration, then [apply the change](/deploy/configuration/#how-settings-work).
 
 | Value      | Action permission, strict app reads, and confirmation replies             |

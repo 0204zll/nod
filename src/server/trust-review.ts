@@ -156,9 +156,12 @@ export function createTrustReview(options: {
     }
     if (decisions.configured === false)
       return question ? undefined : { run: false, reviewRequired: true, reviewUnavailable: true };
+    const decider = 'perplexity/pplx-decider-v1.2';
+    const requiredVersion = 'perplexity/pplx-decider-v1.2-20261016';
     const gate = question ? undefined : trustDecision(input as TrustWords);
     const policy = instructions.replace(/^Reply with only JSON\..*\n/m, '');
     let jev: DecisionSelection | undefined;
+    let selected: DecisionSelection | undefined;
     const request: DecisionRequest = {
       instructions: gate ? '' : instructions,
       input: gate ? trustFacts(input as Parameters<typeof trustFacts>[0]) : input,
@@ -178,7 +181,9 @@ export function createTrustReview(options: {
       {
         ...request,
         forModel: (selection: DecisionSelection) => {
-          if (!isJev(selection)) return request;
+          selected = selection;
+          if (!isJev(selection))
+            return selection.model === decider ? { ...request, includeModel: true } : request;
           jev = selection;
           const jevInput = gate ? jevRequest(input as Parameters<typeof jevRequest>[0]) : undefined;
           return jevInput
@@ -202,6 +207,22 @@ export function createTrustReview(options: {
       signal,
     );
     signal?.throwIfAborted();
+    const servedModel = (
+      answer as
+        { model?: { provider?: unknown; requested?: unknown; served?: unknown } } | undefined
+    )?.model;
+    if (
+      (selected?.model === decider || servedModel?.requested === decider) &&
+      (servedModel?.requested !== decider ||
+        servedModel?.served !== requiredVersion ||
+        (selected && (selected.model !== decider || servedModel?.provider !== selected.provider)))
+    )
+      throw Object.assign(
+        new Error(
+          `The trust decision response did not match the selected Perplexity model. Required version: ${requiredVersion}.`,
+        ),
+        { code: 'decision_model_mismatch' },
+      );
     if (answer && typeof answer === 'object' && (answer as { refused?: unknown }).refused === true)
       return question ? undefined : { run: false, reviewRequired: true, reviewUnavailable: true };
     if (
@@ -268,7 +289,6 @@ export function createTrustReview(options: {
         ? (answer as {
             trust?: unknown;
             choice?: unknown;
-            model?: { requested?: string; served?: string };
             additional?: {
               permission?: { permission?: unknown; choice?: unknown };
               preparation?: { preparation?: unknown };
@@ -309,11 +329,6 @@ export function createTrustReview(options: {
       if (probability(scope) === undefined || scope?.choice !== true)
         return { run: false, decision: answer };
     }
-    if (
-      details?.model?.requested === 'perplexity/pplx-decider-v1.2' &&
-      details.model.served !== 'perplexity/pplx-decider-v1.2-20261016'
-    )
-      return { run: false, decision: answer };
     for (const name of [
       'constraints',
       'time',

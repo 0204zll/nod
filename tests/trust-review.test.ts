@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createTrustReview, ClearedMessageReviewError } from '../src/server/trust-review.ts';
 import type { ModelReview } from '../src/ports/decisions.ts';
+import { createDecisionModel } from '../src/providers/decisions.ts';
 
 const input = {
   userMessages: [
@@ -389,4 +390,172 @@ test('a complete typed review clearance keeps ordinary approval for missing perm
     additional.draftReviewClear_0 = { choice: false, probability: 1 };
     assert.equal(Object(await review('', checked)).reviewRequired, true);
   }
+});
+
+test('Perplexity review clearance requires its fixed served model before every return path', async (t) => {
+  const expected = 'perplexity/pplx-decider-v1.2-20261016';
+  for (const path of ['grant', 'scope', 'rule'])
+    for (const served of [expected, 'perplexity/pplx-decider-v1.3', undefined])
+      await t.test(`${path}: ${served ?? 'missing served model'}`, async () => {
+        let calls = 0;
+        const decisions = createDecisionModel({
+          resolve: async () => ({
+            provider: 'openrouter',
+            key: 'synthetic-decision-key',
+            model: 'perplexity/pplx-decider-v1.2',
+          }),
+          fetch: async (_url, init) => {
+            calls++;
+            const request = JSON.parse(String(init?.body));
+            assert.equal(request.provider.allow_fallbacks, false);
+            return Response.json({
+              model: served,
+              answers: Object.fromEntries(
+                Object.entries(request.questions).map(([name, value]) => {
+                  const question = value as { criteria: Record<string, string> };
+                  const choice =
+                    name === 'trust'
+                      ? path === 'rule'
+                        ? 'rule'
+                        : 'message:1'
+                      : String(
+                          name === 'permission' ||
+                            (name === 'scope' && path !== 'scope') ||
+                            name === 'draftReviewClear_0',
+                        );
+                  return [
+                    name,
+                    {
+                      type: 'choice',
+                      choice,
+                      probabilities: Object.fromEntries(
+                        Object.keys(question.criteria).map((key) => [key, Number(key === choice)]),
+                      ),
+                    },
+                  ];
+                }),
+              ),
+              usage: { input_tokens: 100 },
+            });
+          },
+        });
+        const review = createTrustReview({
+          decisions,
+          review: async () => assert.fail('The decision check cannot switch to an LLM.'),
+        });
+        const checked = {
+          ...input,
+          action: {
+            name: 'NOD_browser',
+            arguments: { page: 'https://mail.example.test/compose', control: { name: 'Send' } },
+          },
+          ...(path === 'rule' ? { userRules: 'Ask before sending a synthetic message.' } : {}),
+          messageDrafts: [
+            {
+              draftId: null,
+              connectionId: 'synthetic-connection',
+              target: {},
+              messages: [],
+              unavailable: true,
+            },
+          ],
+        };
+        if (served === expected)
+          assert.equal(Object(await review('', checked)).run, path === 'grant');
+        else
+          await assert.rejects(
+            review('', checked),
+            (error) =>
+              Object(error).code === 'decision_model_mismatch' &&
+              Object(error).reviewRequired === true &&
+              Object(error).reviewUnavailable === true &&
+              String(error).includes(expected),
+          );
+        assert.equal(calls, 1);
+      });
+});
+
+test('a selected Perplexity action check cannot lose its response binding', async () => {
+  const requested = 'perplexity/pplx-decider-v1.2';
+  const served = 'perplexity/pplx-decider-v1.2-20261016';
+  for (const model of [
+    undefined,
+    { provider: 'openai', requested, served },
+    { provider: 'openrouter', requested: 'synthetic-other-model', served },
+    { requested, served },
+  ]) {
+    const review = createTrustReview({
+      review: async () => assert.fail('The decision check cannot switch to an LLM.'),
+      decisions: {
+        check: async (request) => {
+          request.forModel?.({ provider: 'openrouter', model: requested });
+          return {
+            choice: 'message:1',
+            probability: 1,
+            additional: { messageReview: { choice: false, probability: 1 } },
+            model,
+          };
+        },
+      },
+    });
+    await assert.rejects(
+      review('', input),
+      (error) =>
+        Object(error).code === 'decision_model_mismatch' &&
+        Object(error).reviewRequired === true &&
+        Object(error).reviewUnavailable === true,
+    );
+  }
+});
+
+test('Perplexity read and reply classifications require the fixed served model', async () => {
+  const expected = 'perplexity/pplx-decider-v1.2-20261016';
+  for (const name of ['readOnly', 'answer'])
+    for (const served of [expected, 'perplexity/pplx-decider-v1.3', undefined]) {
+      const choices =
+        name === 'readOnly'
+          ? [
+              { value: true, description: 'This action only reads.' },
+              { value: false, description: 'This action changes data.' },
+            ]
+          : [
+              { value: 'yes', description: 'The owner approves.' },
+              { value: 'no', description: 'The owner refuses.' },
+            ];
+      const review = createTrustReview({
+        review: async () => assert.fail('The decision check cannot switch to an LLM.'),
+        decisions: createDecisionModel({
+          resolve: async () => ({
+            provider: 'openrouter',
+            key: 'synthetic-decision-key',
+            model: 'perplexity/pplx-decider-v1.2',
+          }),
+          fetch: async () =>
+            Response.json({
+              model: served,
+              answers: {
+                [name]: {
+                  type: 'choice',
+                  choice: String(choices[0].value),
+                  probabilities: Object.fromEntries(
+                    choices.map(({ value }, index) => [String(value), Number(index === 0)]),
+                  ),
+                },
+              },
+              usage: { input_tokens: 100 },
+            }),
+        }),
+      });
+      if (served === expected) {
+        const result = Object(
+          await review('', input, undefined, { name, choices, minProbability: 0.99 }),
+        );
+        assert.equal(result[name], choices[0].value);
+        assert.equal(result.choice, choices[0].value);
+      } else
+        await assert.rejects(
+          review('', input, undefined, { name, choices, minProbability: 0.99 }),
+          (error) => Object(error).code === 'decision_model_mismatch',
+        );
+    }
 });
