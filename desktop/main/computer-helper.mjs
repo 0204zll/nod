@@ -125,6 +125,7 @@ function inspectResult(data, menu = false, target) {
   const focus = (node, path = []) => {
     if (node.states?.includes('focused') && !['window', 'dialog'].includes(node.role))
       focused.push({ path, role: node.role ?? '', name: secure(node) ? '' : (node.name ?? '') });
+    if (secure(node)) return;
     node.children?.forEach((child, index) => focus(child, [...path, index]));
   };
   const walk = (node) => {

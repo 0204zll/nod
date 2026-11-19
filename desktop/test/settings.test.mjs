@@ -8910,6 +8910,7 @@ test('computer use binds current window content and hides password content', asy
             name: 'private password label',
             value: 'private password value',
             states: ['secure'],
+            children: [{ role: 'text', name: 'private password child', states: ['focused'] }],
           },
         ],
       },
