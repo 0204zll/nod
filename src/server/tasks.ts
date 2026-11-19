@@ -151,6 +151,7 @@ function failure(message: string, statusCode = 400) {
 }
 
 function status(row: Row): TaskStatus {
+  if (row.state === 'done' && row.name && row.turn_status === 'running') return 'working';
   if (row.state !== 'open') return row.state;
   if (row.turn_status === 'queued') return 'queued';
   if (row.turn_status === 'running') return 'working';
@@ -212,7 +213,8 @@ export function createTasks(options: {
            WHERE t.owner_id=$1 AND ($2::uuid IS NULL OR t.id=$2) AND ($3 OR t.state='open')
              AND ($4::uuid IS NULL OR u.thread_id=$4)
          )
-         SELECT t.id,t.title,t.done_when,t.now_text,t.result,t.state,t.waiting_for,t.next_check,
+         SELECT t.id,CASE WHEN t.name IS NOT NULL AND EXISTS(SELECT 1 FROM turns w WHERE w.owner_id=t.owner_id
+             AND w.message_id=t.source_message_id AND w.withdrawn) THEN t.name ELSE t.title END AS title,t.done_when,t.now_text,t.result,t.state,t.waiting_for,t.next_check,
            t.message_id,t.steps,t.step_index,t.revision,t.applied_revision,
            t.created_at,t.updated_at,t.closed_at,COALESCE((SELECT r.status FROM turns r WHERE r.owner_id=t.owner_id AND r.session_id=t.session_id AND r.status='running'),u.status) AS turn_status,
            EXISTS(SELECT 1 FROM turns n WHERE n.owner_id=u.owner_id AND n.thread_id=u.thread_id
@@ -566,7 +568,7 @@ export function createTasks(options: {
                LEFT JOIN turns r ON r.id=a.turn_id AND r.owner_id=a.owner_id
                WHERE m.id=$3 AND m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL
                  AND m.reply_to_message_id IS NULL AND m.approval_answer IS NULL AND NOT ${withdrawnSql('m')}
-                 AND a.hidden_at IS NULL
+                 AND a.hidden_at IS NULL AND (NOT a.chat_only OR a.turn_id=$4)
                  AND a.created_at>m.created_at - interval '24 hours'
                  AND (a.created_at,a.id)<(m.created_at,m.id)
                  AND CASE WHEN u.channel='web' THEN NOT ${reactionReplySql('a')}
@@ -781,7 +783,10 @@ export function createTasks(options: {
           pinned: request.pinned,
         });
         await client.query(
-          'UPDATE tasks SET source_message_id=$3,message_id=$4 WHERE id=$1 AND owner_id=$2',
+          `WITH earlier AS (SELECT message_id FROM tasks WHERE id=$1 AND owner_id=$2),
+             moved AS (UPDATE tasks SET source_message_id=$3,message_id=$4 WHERE id=$1 AND owner_id=$2)
+           UPDATE messages m SET hidden_at=now() FROM earlier
+           WHERE m.id=earlier.message_id AND m.owner_id=$2 AND m.id IS DISTINCT FROM $4::uuid AND m.hidden_at IS NULL`,
           [id, ownerId, sourceMessageId, messageId],
         );
         const child = await enqueueTurn(source.text, {
@@ -1157,7 +1162,17 @@ export function createTasks(options: {
         const name = change.name === undefined ? chat.name : chatName(change.name);
         if (change.name !== undefined || change.archived === false)
           await assertChatNameFree(client, ownerId, thread.id, name, id);
-        if (change.archived && chat.state === 'open')
+        if (
+          change.archived &&
+          (chat.state === 'open' ||
+            (
+              await client.query(
+                `SELECT 1 FROM turns u WHERE u.owner_id=$1 AND u.session_id=$2
+                   AND (u.status IN ('queued','running') OR (${waitingTurnSql('u')})) LIMIT 1`,
+                [ownerId, id],
+              )
+            ).rowCount)
+        )
           throw Object.assign(
             failure(`${chat.name} is still working. Stop it before you archive it.`, 409),
             { code: 'chat_active' },

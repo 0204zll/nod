@@ -2345,6 +2345,7 @@ test(
           const next = 'Now find a synthetic copywriter for the named chat fixture.';
           let chat: Task | undefined;
           let reuse: Promise<unknown> | undefined;
+          let writing: string | undefined;
           let record: { chat: { id: string }; messages: Array<{ text: string }> } | undefined;
           inspectObserver = async (context) => {
             if (context.prompt === prompt && !context.background) {
@@ -2402,6 +2403,7 @@ test(
               status: 'done',
               result: 'Synthetic chat result',
             });
+            writing ??= (await tasks.read()).find(({ id }) => id === chat!.id)?.status;
             await context.reply(`Synthetic chat answer: ${context.prompt}`);
             return { status: 'succeeded' };
           };
@@ -2434,6 +2436,8 @@ test(
           assert.ok(reported.every(({ chat_only }) => chat_only === true));
           const listed = (await tasks.read()).find(({ id }) => id === chat!.id);
           assert.equal(listed?.result, 'Synthetic chat result');
+          assert.equal(writing, 'working');
+          assert.equal(listed?.status, 'done');
           assert.equal(listed?.lastReply, `Synthetic chat answer: ${prompt}`);
 
           await db.pool.query("UPDATE tasks SET next_check=now()+interval '1 day' WHERE id=$1", [

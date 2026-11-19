@@ -203,7 +203,7 @@ export async function reviveChat(
 export interface ChatRequest {
   title: string;
   doneWhen: string;
-  brief?: string;
+  brief: string;
   now?: string;
   steps?: string[];
   waitingFor?: unknown[];
@@ -216,6 +216,7 @@ export function ownerChatRequest(text: string, name: string): ChatRequest {
   return {
     title: [...line].slice(0, 160).join('') || name,
     doneWhen: 'This request is answered in the chat.',
+    brief: `The owner wrote this request in their ${name} chat.`,
   };
 }
 
@@ -228,7 +229,7 @@ export async function restartChatRequest(
 ) {
   await reviveChat(client, ownerId, threadId, chatId);
   await client.query(
-    `UPDATE tasks SET title=$3,done_when=$4,brief=COALESCE($5,brief),now_text=$6,steps=$7,step_index=0,
+    `UPDATE tasks SET title=$3,done_when=$4,brief=$5,now_text=$6,steps=$7,step_index=0,
        waiting_for=$8,next_check=$9,result='',pinned=pinned OR $10,request_started_at=now(),updated_at=now()
      WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL`,
     [
@@ -236,7 +237,7 @@ export async function restartChatRequest(
       ownerId,
       request.title,
       request.doneWhen,
-      request.brief ?? null,
+      request.brief,
       request.now ?? '',
       JSON.stringify(request.steps ?? []),
       JSON.stringify(request.waitingFor ?? []),

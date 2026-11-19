@@ -57,7 +57,7 @@ export function createHistorySearch({
            SELECT m.created_at,m.id FROM messages m WHERE m.id=$2 AND m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}${inChat('m')}
            UNION ALL
            (SELECT m.created_at,m.id FROM turns u JOIN messages m ON m.turn_id=u.id AND m.owner_id=u.owner_id AND m.thread_id=u.thread_id
-            WHERE u.id=$2 AND u.owner_id=$1 AND ${activeThreadSql('u')} AND m.hidden_at IS NULL
+            WHERE u.id=$2 AND u.owner_id=$1 AND ${activeThreadSql('u')}${inChat('u')} AND m.hidden_at IS NULL
             ORDER BY m.created_at,m.id LIMIT 1)),
          hit AS (SELECT created_at,id FROM target LIMIT 1),
          nearby AS (

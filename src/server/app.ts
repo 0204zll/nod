@@ -79,7 +79,8 @@ const messageFields = `m.id,m.role,m.text,CASE WHEN m.role='user' THEN m.display
      (SELECT json_build_object('kind','schedule','id',r.id,'title',r.title) FROM schedule_runs r WHERE r.owner_id=m.owner_id AND r.turn_id=w.session_id LIMIT 1))
      FROM turns w WHERE w.id=m.turn_id AND w.owner_id=m.owner_id) END AS "work",
  (SELECT k.id FROM turns w JOIN tasks k ON k.owner_id=w.owner_id AND k.id=(to_jsonb(w)->>'task_id')::uuid
-   WHERE w.id=m.turn_id AND w.owner_id=m.owner_id AND to_jsonb(k)->>'name' IS NOT NULL) AS "chatId",
+   WHERE (w.id=m.turn_id OR w.message_id=m.id) AND w.owner_id=m.owner_id AND to_jsonb(k)->>'name' IS NOT NULL
+   ORDER BY w.created_at DESC,w.id DESC LIMIT 1) AS "chatId",
  NOT m.chat_only AS "inMain",
  CASE WHEN target.id IS NULL OR ${reactionReplySql('target')} THEN NULL ELSE json_build_object('id',target.id,'role',target.role,'text',COALESCE(m.reply_quote,''),'isQuote',m.reply_quote IS NOT NULL) END AS "replyTo"`;
 const visibleMessageSql = `NOT ${reactionReplySql('m')}`;
