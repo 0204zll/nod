@@ -7259,11 +7259,11 @@ test('chat shows pending sends and active work before a model step', async () =>
         assert.ok(!document.querySelector('.thinking').textContent.includes('**'));
         assert.ok(!document.querySelector('.thinking').textContent.includes('hotel'));
         const history = document.querySelector('.thinking details');
-        assert.equal(history.open, true);
+        assert.equal(history.open, false);
         assert.deepEqual(Array.from(history.querySelectorAll('ol > li'), entry => entry.textContent), ['Read the synthetic report']);
         assert.equal(document.querySelector('[role="status"] [role="status"]'), null);
         await act(async () => history.querySelector('summary').click());
-        await settle(() => !history.open);
+        await settle(() => history.open);
         await render({ streams: { 'synthetic-stream': 'Synthetic partial result' } });
         assert.equal(document.querySelector('.thinking').hidden, true);
         assert.equal(document.querySelector('.thinking details'), history);
@@ -7271,11 +7271,11 @@ test('chat shows pending sends and active work before a model step', async () =>
         await render();
         assert.equal(document.querySelector('.thinking').hidden, false);
         assert.equal(document.querySelector('.thinking details'), history);
-        assert.equal(history.open, false);
+        assert.equal(history.open, true);
         assert.equal(document.querySelector('.thinking .live-line-current').textContent, 'Checking the return journey');
         state = { ...state, activity: [{ ...activity, turnId: 'synthetic-next-turn', recent }] };
         await render();
-        assert.equal(document.querySelector('.thinking details').open, true);
+        assert.equal(document.querySelector('.thinking details').open, false);
         state = { ...state, activity: [] };
         await render();
         assert.equal(Boolean(document.querySelector('.thinking')), false);
