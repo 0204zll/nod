@@ -201,6 +201,7 @@ test('confirmation repairs rejected wording against the unchanged saved action',
 test('local file confirmation reviews the visible path and rejects a different path', async (t) => {
   for (const path of [
     '/Users/tester/Second Brain/CLAUDE.md',
+    '/Users/tester/Documents/synthetic_notes [draft] (v2) #*1*.md',
     String.raw`C:\Users\tester\Documents\wiki\Projetos.md`,
     '/home/tester/Documents/GTD/20 Actions/Next Actions.md',
   ]) {
