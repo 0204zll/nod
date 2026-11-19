@@ -78,6 +78,7 @@ const inlineChars = 40_000;
 const imageBudget = 16 * 1024 * 1024;
 const imageTypes = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const parentTools = new Set([
+  'computer',
   'sign_in',
   'pay',
   'browser_session',
@@ -100,6 +101,7 @@ const parallelTools = new Set([
 const orderedTools = new Set([
   'apps',
   'files',
+  'computer',
   'manage_personal_context',
   'skills',
   'read_source',
@@ -121,6 +123,7 @@ const delimitedTools = new Set([
   'proactive_issue',
   'apps',
   'files',
+  'computer',
   'delegate',
   'browser',
   'browser_session',
@@ -403,9 +406,37 @@ export function createAgentRuntime(dependencies: {
         server.name,
       ]),
     );
+    const computerApps = new Map<string, string>();
+    const refSnapshot = (ref: unknown) => /^@?([^:\s]+):/.exec(String(ref ?? ''))?.[1];
+    const learnComputerApps = (params: unknown, output: unknown) => {
+      const { action, pid } = (params ?? {}) as { action?: unknown; pid?: unknown };
+      const found = (output ?? {}) as {
+        apps?: { pid?: unknown; bundle?: unknown; name?: unknown }[];
+        pid?: unknown;
+        bundle?: unknown;
+        name?: unknown;
+      };
+      for (const app of action === 'apps' ? (found.apps ?? []) : action === 'open' ? [found] : [])
+        if (typeof app.name === 'string') {
+          computerApps.set(`pid:${app.pid}`, app.name);
+          computerApps.set(`bundle:${app.bundle}`, app.name);
+        }
+      const app = computerApps.get(`pid:${pid}`);
+      if (app && (action === 'snapshot' || action === 'find'))
+        for (const [, snapshot] of JSON.stringify(output ?? '').matchAll(/@([a-z0-9]+):e\d/gi))
+          computerApps.set(`ref:${snapshot}`, app);
+    };
     const appName = (name: string, params: unknown) => {
       if (name.startsWith('mcp__')) return servers.get(name.split('__')[1]);
       if (name === 'files') return 'local files';
+      if (name === 'computer') {
+        const { pid, bundle, ref } = (params ?? {}) as Record<string, unknown>;
+        return (
+          computerApps.get(`ref:${refSnapshot(ref)}`) ??
+          computerApps.get(`pid:${pid}`) ??
+          computerApps.get(`bundle:${bundle}`)
+        );
+      }
       if (name !== 'apps') return undefined;
       const { action, args } = (params ?? {}) as {
         action?: unknown;
@@ -472,9 +503,9 @@ export function createAgentRuntime(dependencies: {
         }
         const id = randomUUID();
         const started = performance.now();
-        const app = appName(name, params);
         const eventLabel =
-          name === 'browser' && typeof (params as { action?: unknown })?.action === 'string'
+          (name === 'browser' || name === 'computer') &&
+          typeof (params as { action?: unknown })?.action === 'string'
             ? `${label} ${(params as { action: string }).action}`
             : label;
         const redactCommand = name === 'bash' ? dependencies.redactCommand : undefined;
@@ -483,16 +514,18 @@ export function createAgentRuntime(dependencies: {
           redactCommand && typeof commandLine === 'string'
             ? redactCommand(commandLine).slice(0, 4000)
             : undefined;
-        const event = (record?: WorkspaceCommandRecord) => ({
-          execution: source,
-          callId: id,
-          ...(browserTools.has(name) && sites.has(source.browserId)
-            ? { site: sites.get(source.browserId) }
-            : app
-              ? { site: app }
-              : {}),
-          ...(record && command !== undefined ? { command: record } : {}),
-        });
+        const event = (record?: WorkspaceCommandRecord) => {
+          const site =
+            browserTools.has(name) && sites.has(source.browserId)
+              ? sites.get(source.browserId)
+              : appName(name, params);
+          return {
+            execution: source,
+            callId: id,
+            ...(site ? { site } : {}),
+            ...(record && command !== undefined ? { command: record } : {}),
+          };
+        };
         const end = (fields: {
           status: 'succeeded' | 'failed' | 'cancelled';
           output?: unknown;
@@ -526,6 +559,7 @@ export function createAgentRuntime(dependencies: {
           assertActive();
           const output = await untilAborted(execute(), signal);
           signal.throwIfAborted();
+          if (name === 'computer') learnComputerApps(params, output);
           if (
             name === 'send_message' &&
             (params as { intent?: unknown } | null)?.intent === 'final'
@@ -575,6 +609,7 @@ export function createAgentRuntime(dependencies: {
               name,
               result,
               name === 'apps' ||
+                name === 'computer' ||
                 name === 'read_source' ||
                 name === 'proactive_issue' ||
                 name === 'codemode' ||

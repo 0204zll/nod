@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { computerInternalArgs, isComputerAction } from './computer-use.ts';
 import type { Nodes } from 'mdast';
 import remarkGfm from 'remark-gfm';
 import remarkParse from 'remark-parse';
@@ -375,6 +376,7 @@ export function createCommunication(options: {
       delete args[key];
       delete details[key];
     }
+    if (isComputerAction(proposal.action)) for (const key of computerInternalArgs) delete args[key];
     if (proposal.action === 'NOD_browser') {
       delete args.target;
       if (args.step === 'click') delete args.command;

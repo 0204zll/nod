@@ -205,6 +205,7 @@ export interface ThreadDependencies {
   accountProfile?: () => Promise<RuntimeContext['account']>;
   connectedApps?: () => Promise<NonNullable<RuntimeContext['connectedApps']>>;
   localFiles?: boolean;
+  computerUse?: boolean;
   mcpServers?: () => Promise<NonNullable<RuntimeContext['mcpServers']>>;
   memoryContext?: () => Promise<RuntimeContext['memory']>;
   recall?: (
@@ -1847,7 +1848,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       [ownerId, turn.session_id, turn.id],
     ),
     pool.query(
-      'SELECT time_zone,locale,hour_cycle,notification_rule,rules,quiet_hours_enabled,quiet_start,quiet_end FROM preferences WHERE owner_id=$1',
+      'SELECT time_zone,locale,hour_cycle,notification_rule,rules,quiet_hours_enabled,quiet_start,quiet_end,computer_use FROM preferences WHERE owner_id=$1',
       [ownerId],
     ),
     dependencies.accountProfile?.().catch(() => undefined),
@@ -1918,6 +1919,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       ...(learnedSkills?.length ? { learnedSkills } : {}),
       ...(connectedApps ? { connectedApps } : {}),
       ...(dependencies.localFiles ? { localFiles: true } : {}),
+      ...(dependencies.computerUse && preference?.computer_use ? { computerUse: true } : {}),
       ...(mcpServers?.length ? { mcpServers } : {}),
     },
   };

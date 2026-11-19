@@ -19,6 +19,7 @@ import { localTimestamp } from '../shared/date-locale.ts';
 import { lockKey, locksTable } from './locks.ts';
 import { withdrawnSql } from './turn-chain.ts';
 import { afterCommit, transaction } from './transaction.ts';
+import { computerRequestArgs, isComputerAction } from './computer-use.ts';
 import { createErrorRedactor } from './redaction.ts';
 import type { CaptureAnalytics } from './analytics.ts';
 import type { TrustBasis } from './trust-basis.ts';
@@ -368,6 +369,12 @@ export async function createApprovals(
     if (!encoded) throw new Error('The action has no arguments to save.');
     const snapshot = JSON.parse(encoded) as Record<string, unknown>;
     const fileObservation = action === 'LOCAL_FILES_READ' || action === 'LOCAL_FILES_IMPORT';
+    const ignored = fileObservation
+      ? ['version']
+      : isComputerAction(action)
+        ? computerRequestArgs
+        : [];
+    const loose = ignored.length > 0;
     let details = options.details ? JSON.stringify(options.details) : undefined;
     turn = { ...turn };
     const allowed = options.allowed === true;
@@ -536,13 +543,13 @@ export async function createApprovals(
       const previousAction = async () =>
         (background
           ? await client.query(
-              "SELECT * FROM approvals WHERE turn_id=ANY($1::uuid[]) AND owner_id=$2 AND action=$3 AND (args=$4::jsonb OR ($5::boolean AND status<>'completed' AND args-'version'=$4::jsonb-'version')) AND status<>'expired' ORDER BY ($5::boolean AND status='completed'),id LIMIT 1",
-              [chain.map((item) => item.id), ownerId, action, snapshot, fileObservation],
+              "SELECT * FROM approvals WHERE turn_id=ANY($1::uuid[]) AND owner_id=$2 AND action=$3 AND (args=$4::jsonb OR ($5::boolean AND status<>'completed' AND args-$6::text[]=$4::jsonb-$6::text[])) AND status<>'expired' ORDER BY ($5::boolean AND status='completed'),id LIMIT 1",
+              [chain.map((item) => item.id), ownerId, action, snapshot, loose, ignored],
             )
           : await client.query(
               `SELECT * FROM approvals WHERE thread_id=$1 AND owner_id=$2 AND action=$4
                AND ((source_message_id=$3 AND args=$5::jsonb)
-                 OR ($6::boolean AND status<>'completed' AND args-'version'=$5::jsonb-'version'
+                 OR ($6::boolean AND status<>'completed' AND args-$9::text[]=$5::jsonb-$9::text[]
                    AND (source_message_id=$3 OR source_message_id=ANY($7::uuid[])
                      OR (source_message_id IS NULL AND turn_id=ANY($8::uuid[])))))
                AND status<>'expired' ORDER BY ($6::boolean AND status='completed'),id LIMIT 1`,
@@ -552,13 +559,14 @@ export async function createApprovals(
                 authorMessageId,
                 action,
                 snapshot,
-                fileObservation,
+                loose,
                 steering
                   ? []
                   : chain
                       .filter((item) => item.source === 'user' && item.message_id)
                       .map((item) => item.message_id),
                 steering ? [] : chain.map((item) => item.id),
+                ignored,
               ],
             )
         ).rows[0];
@@ -578,7 +586,7 @@ export async function createApprovals(
           ownerId,
         ]);
         afterCommit(client, () => changed('expired', action, current.source));
-        previous = fileObservation ? await previousAction() : undefined;
+        previous = loose ? await previousAction() : undefined;
       }
       if (previous) {
         if (previous.status !== 'completed')
