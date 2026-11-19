@@ -163,6 +163,9 @@ function status(row: Row): TaskStatus {
   return 'needs_you';
 }
 
+const shown = (task: Task): Task =>
+  task.name && task.result.length > chatResultLimit ? { ...task, result: '' } : task;
+
 function taskFacts(task: Task, detail: boolean) {
   const index = task.stepIndex ?? 0;
   return {
@@ -324,7 +327,7 @@ export function createTasks(options: {
         doneWhen: task.doneWhen,
         status: task.status,
         now: task.now,
-        result: task.result,
+        result: shown(task).result,
         question: task.question,
         waitingFor: task.waitingFor,
         nextCheck: task.nextCheck,
@@ -979,7 +982,7 @@ export function createTasks(options: {
         turn.turnId,
         async () => {
           const settled = await client.query(
-            `UPDATE tasks t SET state='done',result=CASE WHEN t.name IS NULL THEN $3 ELSE '' END,closed_at=now(),updated_at=now()
+            `UPDATE tasks t SET state='done',result=$3,closed_at=now(),updated_at=now()
              FROM turns u WHERE u.id=$1 AND u.owner_id=$2 AND t.id=u.task_id AND t.owner_id=u.owner_id
                AND t.state='open' AND t.applied_revision=t.revision AND t.waiting_for='[]'::jsonb
                AND (t.next_check IS NULL OR t.next_check<=now())`,
@@ -1085,7 +1088,7 @@ export function createTasks(options: {
   }
 
   function registerRoutes(app: FastifyInstance) {
-    app.get('/api/tasks', () => read(pool, { closed: true }));
+    app.get('/api/tasks', async () => (await read(pool, { closed: true })).map(shown));
     app.patch<{ Params: { id: string } }>('/api/tasks/:id', async (request) => {
       const id = z.uuid().parse(request.params.id);
       const { title } = z
@@ -1382,9 +1385,9 @@ export function createTasks(options: {
     context,
     resolveReply,
     chatCommand,
-    read: (thread?: string) => read(pool, { closed: true, thread }),
+    read: async (thread?: string) => (await read(pool, { closed: true, thread })).map(shown),
     ledger: async (thread?: string) =>
-      (await read(pool, { closed: true, thread })).filter((task) => !task.archivedAt),
+      (await read(pool, { closed: true, thread })).filter((task) => !task.archivedAt).map(shown),
     chatStart,
     resumeDue,
     wakeDue,
