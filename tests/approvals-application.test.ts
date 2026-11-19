@@ -2403,147 +2403,167 @@ test(
         },
       );
 
-      await t.test(
-        'a proactive read the checker would hold asks nobody and reads nothing',
-        async () => {
-          const previous = await application.triage.getPreferences();
-          const previousCheckCost = checkCost;
-          const previousDecisionCost = replyCost;
-          checkCost = 0;
-          replyCost = 0;
-          const prompt = 'Synthetic source read check ' + randomUUID();
-          plans.set(prompt, {
-            tool: 'read_source',
-            action: 'read',
-            args: { sourceId: 'fixture:notes', ids: ['record/1'] },
-          });
-          try {
-            await application.triage.updatePreferences({
-              notificationRule: '',
-              rules: '',
-              proactivePaused: false,
-            });
-            const turnId = await enqueueTurn(prompt, {
-              source: 'event',
-              background: true,
-              proactive: true,
-            });
-            let status = '';
-            for (let attempt = 0; attempt < 300; attempt++) {
-              status = (await pool.query('SELECT status FROM turns WHERE id=$1', [turnId])).rows[0]
-                .status;
-              if (status === 'succeeded' || status === 'failed') break;
-              await delay(20);
-            }
-            assert.ok(['succeeded', 'failed'].includes(status));
-            assert.ok(
-              fallbackChecks.some(
-                (input) => Object(Object(input).action).name === 'NOD_read_source',
-              ),
-            );
-            assert.deepEqual(await approvalsFor(turnId), []);
-            assert.equal(sourceReads, 0);
-          } finally {
-            checkCost = previousCheckCost;
-            replyCost = previousDecisionCost;
-            await application.triage.updatePreferences(previous);
-          }
-        },
-      );
-      await t.test(
-        'a proactive app read runs only what the read-only check calls a read',
-        async () => {
-          const previous = await application.triage.getPreferences();
-          const connection = (
-            await pool.query(
-              "SELECT id FROM app_connections WHERE owner_id=$1 AND slug='gmail' AND NOT revoked",
-              [ownerId],
-            )
-          ).rows[0];
-          const sourceId = `connections:${connection.id}`;
-          const schema = (field: string) => ({
-            type: 'object',
-            properties: { [field]: { type: 'string' } },
-            additionalProperties: false,
-          });
-          toolSearch = {
-            GMAIL_FETCH_EMAILS: { description: 'Read messages.', inputSchema: schema('query') },
-            GMAIL_SEND_EMAIL: {
-              description: 'Send a message.',
-              inputSchema: schema('recipient_email'),
+      {
+        const automaticDue = application.proactivity.due;
+        application.proactivity.due = async () => undefined;
+        try {
+          await t.test(
+            'a proactive read the checker would hold asks nobody and reads nothing',
+            async () => {
+              const previous = await application.triage.getPreferences();
+              const previousCheckCost = checkCost;
+              const previousDecisionCost = replyCost;
+              checkCost = 0;
+              replyCost = 0;
+              const prompt = 'Synthetic source read check ' + randomUUID();
+              plans.set(prompt, {
+                tool: 'read_source',
+                action: 'read',
+                args: { sourceId: 'fixture:notes', ids: ['record/1'] },
+              });
+              try {
+                await application.triage.updatePreferences({
+                  notificationRule: '',
+                  rules: '',
+                  proactivePaused: false,
+                });
+                const turnId = await enqueueTurn(prompt, {
+                  source: 'event',
+                  background: true,
+                  proactive: true,
+                });
+                let status = '';
+                for (let attempt = 0; attempt < 300; attempt++) {
+                  status = (await pool.query('SELECT status FROM turns WHERE id=$1', [turnId]))
+                    .rows[0].status;
+                  if (status === 'succeeded' || status === 'failed') break;
+                  await delay(20);
+                }
+                assert.ok(['succeeded', 'failed'].includes(status));
+                assert.ok(
+                  fallbackChecks.some(
+                    (input) => Object(Object(input).action).name === 'NOD_read_source',
+                  ),
+                );
+                assert.deepEqual(await approvalsFor(turnId), []);
+                assert.equal(sourceReads, 0);
+              } finally {
+                checkCost = previousCheckCost;
+                replyCost = previousDecisionCost;
+                await application.triage.updatePreferences(previous);
+              }
             },
-          };
-          readOnlyActions.add('GMAIL_FETCH_EMAILS');
-          const writes = integrationFixture.writes.length;
-          const executed = executedApps.length;
-          const read = async (args: Record<string, unknown>) => {
-            const prompt = 'Synthetic app read ' + randomUUID();
-            plans.set(prompt, { tool: 'read_source', action: 'read', args: { sourceId, ...args } });
-            const turnId = await enqueueTurn(prompt, {
-              source: 'event',
-              background: true,
-              proactive: true,
-            });
-            let turn = { status: '', error: '' };
-            for (let attempt = 0; attempt < 300; attempt++) {
-              turn = (await pool.query('SELECT status,error FROM turns WHERE id=$1', [turnId]))
-                .rows[0];
-              if (turn.status === 'succeeded' || turn.status === 'failed') break;
-              await delay(20);
-            }
-            assert.deepEqual(await approvalsFor(turnId), []);
-            return turn.status === 'succeeded' ? JSON.stringify(results.get(turnId)) : turn.error;
-          };
-          try {
-            await application.triage.updatePreferences({ proactivePaused: false });
-            assert.match(
-              await read({ tool: 'GMAIL_FETCH_EMAILS', args: { query: 'invoice' } }),
-              /Search this source/,
-            );
-            assert.match(await read({ query: 'email' }), /GMAIL_SEND_EMAIL/);
-            assert.match(
-              await read({ tool: 'GMAIL_SEND_EMAIL', args: { recipient_email: 'x@example.test' } }),
-              /not a read/,
-            );
-            assert.equal(executedApps.length, executed);
-            await read({ tool: 'GMAIL_FETCH_EMAILS', args: { query: 'invoice' } });
-            assert.deepEqual(executedApps.slice(executed), ['GMAIL_FETCH_EMAILS']);
-            assert.equal(integrationFixture.writes.length, writes);
-            assert.equal(
-              (
+          );
+          await t.test(
+            'a proactive app read runs only what the read-only check calls a read',
+            async () => {
+              const previous = await application.triage.getPreferences();
+              const connection = (
                 await pool.query(
-                  "SELECT count(*)::int AS count FROM proactive_evidence WHERE owner_id=$1 AND source_id=$2 AND resource_id<>'tools'",
-                  [ownerId, sourceId],
+                  "SELECT id FROM app_connections WHERE owner_id=$1 AND slug='gmail' AND NOT revoked",
+                  [ownerId],
                 )
-              ).rows[0].count,
-              1,
-            );
-            toolSearch = {
-              ...Object.fromEntries(
-                Array.from({ length: 6 }, (_, i) => [
-                  `GMAIL_SYNTHETIC_READ_${i}`,
-                  { description: 'Read a synthetic record.', inputSchema: schema('query') },
-                ]),
-              ),
-              GMAIL_FETCH_EMAILS: { description: 'Read messages.', inputSchema: schema('query') },
-            };
-            assert.match(await read({ query: 'email' }), /GMAIL_FETCH_EMAILS/);
-            const beforeLookup = executedApps.length;
-            assert.match(
-              await read({ tool: 'GMAIL_FETCH_EMAILS', args: { query: 'indexed' } }),
-              /Search this source/,
-            );
-            assert.equal(executedApps.length, beforeLookup);
-            await read({ query: 'GMAIL_FETCH_EMAILS' });
-            await read({ tool: 'GMAIL_FETCH_EMAILS', args: { query: 'indexed' } });
-            assert.deepEqual(executedApps.slice(beforeLookup), ['GMAIL_FETCH_EMAILS']);
-          } finally {
-            toolSearch = undefined;
-            readOnlyActions.clear();
-            await application.triage.updatePreferences(previous);
-          }
-        },
-      );
+              ).rows[0];
+              const sourceId = `connections:${connection.id}`;
+              const schema = (field: string) => ({
+                type: 'object',
+                properties: { [field]: { type: 'string' } },
+                additionalProperties: false,
+              });
+              toolSearch = {
+                GMAIL_FETCH_EMAILS: { description: 'Read messages.', inputSchema: schema('query') },
+                GMAIL_SEND_EMAIL: {
+                  description: 'Send a message.',
+                  inputSchema: schema('recipient_email'),
+                },
+              };
+              readOnlyActions.add('GMAIL_FETCH_EMAILS');
+              const writes = integrationFixture.writes.length;
+              const executed = executedApps.length;
+              const read = async (args: Record<string, unknown>) => {
+                const prompt = 'Synthetic app read ' + randomUUID();
+                plans.set(prompt, {
+                  tool: 'read_source',
+                  action: 'read',
+                  args: { sourceId, ...args },
+                });
+                const turnId = await enqueueTurn(prompt, {
+                  source: 'event',
+                  background: true,
+                  proactive: true,
+                });
+                let turn = { status: '', error: '' };
+                for (let attempt = 0; attempt < 300; attempt++) {
+                  turn = (await pool.query('SELECT status,error FROM turns WHERE id=$1', [turnId]))
+                    .rows[0];
+                  if (turn.status === 'succeeded' || turn.status === 'failed') break;
+                  await delay(20);
+                }
+                assert.deepEqual(await approvalsFor(turnId), []);
+                return turn.status === 'succeeded'
+                  ? JSON.stringify(results.get(turnId))
+                  : turn.error;
+              };
+              try {
+                await application.triage.updatePreferences({ proactivePaused: false });
+                assert.match(
+                  await read({ tool: 'GMAIL_FETCH_EMAILS', args: { query: 'invoice' } }),
+                  /Search this source/,
+                );
+                assert.match(await read({ query: 'email' }), /GMAIL_SEND_EMAIL/);
+                assert.match(
+                  await read({
+                    tool: 'GMAIL_SEND_EMAIL',
+                    args: { recipient_email: 'x@example.test' },
+                  }),
+                  /not a read/,
+                );
+                assert.equal(executedApps.length, executed);
+                await read({ tool: 'GMAIL_FETCH_EMAILS', args: { query: 'invoice' } });
+                assert.deepEqual(executedApps.slice(executed), ['GMAIL_FETCH_EMAILS']);
+                assert.equal(integrationFixture.writes.length, writes);
+                assert.equal(
+                  (
+                    await pool.query(
+                      "SELECT count(*)::int AS count FROM proactive_evidence WHERE owner_id=$1 AND source_id=$2 AND resource_id<>'tools'",
+                      [ownerId, sourceId],
+                    )
+                  ).rows[0].count,
+                  1,
+                );
+                toolSearch = {
+                  ...Object.fromEntries(
+                    Array.from({ length: 6 }, (_, i) => [
+                      `GMAIL_SYNTHETIC_READ_${i}`,
+                      { description: 'Read a synthetic record.', inputSchema: schema('query') },
+                    ]),
+                  ),
+                  GMAIL_FETCH_EMAILS: {
+                    description: 'Read messages.',
+                    inputSchema: schema('query'),
+                  },
+                };
+                assert.match(await read({ query: 'email' }), /GMAIL_FETCH_EMAILS/);
+                const beforeLookup = executedApps.length;
+                assert.match(
+                  await read({ tool: 'GMAIL_FETCH_EMAILS', args: { query: 'indexed' } }),
+                  /Search this source/,
+                );
+                assert.equal(executedApps.length, beforeLookup);
+                await read({ query: 'GMAIL_FETCH_EMAILS' });
+                await read({ tool: 'GMAIL_FETCH_EMAILS', args: { query: 'indexed' } });
+                assert.deepEqual(executedApps.slice(beforeLookup), ['GMAIL_FETCH_EMAILS']);
+              } finally {
+                toolSearch = undefined;
+                readOnlyActions.clear();
+                await application.triage.updatePreferences(previous);
+              }
+            },
+          );
+        } finally {
+          application.proactivity.due = automaticDue;
+        }
+      }
       await t.test('an old proactive approval cannot enable a connected write', async () => {
         const before = integrationFixture.writes.length;
         const held = await propose(
