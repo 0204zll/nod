@@ -1577,10 +1577,13 @@ async function initializeApplication(
                         const savedBinding = provenance.details?.verifiedBinding;
                         const verifiedBinding =
                           typeof savedBinding === 'string' ? savedBinding : undefined;
-                        if (action === 'CONNECTED_MCP_CALL' && !verifiedBinding)
+                        if (
+                          (action === 'CONNECTED_HTTP' || action === 'CONNECTED_MCP_CALL') &&
+                          !verifiedBinding
+                        )
                           throw Object.assign(
                             new Error(
-                              'The MCP confirmation has no saved account binding. Ask for this action again.',
+                              'The connected app confirmation has no saved account binding. Ask for this action again.',
                             ),
                             { notRun: true },
                           );
@@ -1709,7 +1712,8 @@ async function initializeApplication(
                           provenance.signal,
                           action === 'GMAIL_DELETE_MESSAGE' ||
                             action === 'GMAIL_DELETE_DRAFT' ||
-                            action === 'CONNECTED_MCP_CALL'
+                            action === 'CONNECTED_MCP_CALL' ||
+                            action === 'CONNECTED_HTTP'
                             ? verifiedBinding
                             : undefined,
                         );
@@ -2736,6 +2740,7 @@ async function initializeApplication(
       },
       localFiles: localFiles.available,
       integration: async (turn, action, args, options) => {
+        if (action === 'CONNECTED_HTTP') args = structuredClone(args);
         if (action === 'LOCAL_FILES_KEEP_OUT') {
           await options.admit?.(false);
           return withTurnLock({ turnId: turn.turnId, signal: options.signal }, async (client) => ({
@@ -2782,16 +2787,22 @@ async function initializeApplication(
             : isLocalFilesAction(action)
               ? integrations.prepare(ownerId, action, args, turn, options.signal)
               : integrations.prepare(ownerId, action, args);
-        const resolved = isLocalFilesAction(action) ? await prepare() : undefined;
+        const resolved =
+          isLocalFilesAction(action) || action === 'CONNECTED_HTTP' ? await prepare() : undefined;
+        const http =
+          action === 'CONNECTED_HTTP'
+            ? await discovered.approvalDetails(action, resolved!, options.signal)
+            : undefined;
         const verdict = await trust.check(turn, action, resolved ?? args, options.signal);
         await options.admit?.(verdict.confirm);
         const prepared = resolved ?? (await prepare());
-        const mcp =
-          verdict.confirm && action === 'CONNECTED_MCP_CALL'
-            ? await discovered.approvalDetails(prepared, options.signal)
-            : undefined;
+        const connected =
+          http ??
+          (verdict.confirm && action === 'CONNECTED_MCP_CALL'
+            ? await discovered.approvalDetails(action, prepared, options.signal)
+            : undefined);
         const account =
-          !mcp && verdict.confirm && typeof prepared.connectionId === 'string'
+          !connected && verdict.confirm && typeof prepared.connectionId === 'string'
             ? (await integrations.list(ownerId, { refresh: false })).find(
                 (item) => item.connectionId === prepared.connectionId,
               )
@@ -2879,14 +2890,16 @@ async function initializeApplication(
           expectedChatRevision:
             verdict.confirm || verdict.basis.kind !== 'read' ? verdict.chatRevision : undefined,
           signal: options.signal,
-          validate: mcp
+          validate: connected
             ? async (client) => {
                 if (
                   (await discovered.binding(String(prepared.connectionId), client)) !==
-                  mcp.verifiedBinding
+                  connected.verifiedBinding
                 )
                   throw Object.assign(
-                    new Error('This connected account changed before confirmation.'),
+                    new Error(
+                      `This connected account changed before ${verdict.confirm ? 'confirmation' : 'execution'}.`,
+                    ),
                     { notRun: true },
                   );
               }
@@ -2898,7 +2911,7 @@ async function initializeApplication(
               prepared,
               turn,
               options.signal,
-              deleteBinding,
+              connected?.verifiedBinding ?? deleteBinding,
               !verdict.confirm && verdict.basis.kind === 'read' ? readWork : 'action',
             );
             await ledger.action(
@@ -2920,7 +2933,7 @@ async function initializeApplication(
                   },
                 }
               : {}),
-            ...(mcp ?? {}),
+            ...(connected ?? {}),
             ...(target ? { target } : {}),
             ...(deleteBinding ? { verifiedBinding: deleteBinding } : {}),
             ...(verifiedDraftMessageId ? { verifiedDraftMessageId } : {}),
