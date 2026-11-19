@@ -433,6 +433,8 @@ test('HTTP confirmation requests hide secrets and report incomplete details', as
       assert.ok(current.withheld.includes('args.url'));
       assert.ok(current.withheld.includes('args.body.password'));
       assert.doesNotMatch(JSON.stringify(current), /synthetic-query-secret|synthetic-body-secret/);
+      if (current.purpose === 'confirmation_review')
+        assert.match(visibleMarkdownText(current.text), /description is incomplete/);
       return current.purpose === 'confirmation_review'
         ? { valid: true }
         : {
@@ -441,7 +443,7 @@ test('HTTP confirmation requests hide secrets and report incomplete details', as
           };
     },
   });
-  await communication.describe({
+  const presentation = await communication.describe({
     turn: { threadId: 'synthetic-thread', turnId: 'synthetic-turn' },
     action: 'CONNECTED_HTTP',
     args: {},
@@ -453,6 +455,8 @@ test('HTTP confirmation requests hide secrets and report incomplete details', as
       },
     },
   });
+  assert.match(visibleMarkdownText(presentation.question), /description is incomplete/);
+  assert.doesNotMatch(presentation.question, /synthetic-query-secret|synthetic-body-secret/);
   assert.equal(calls, 2);
   await assert.rejects(
     communication.describe({

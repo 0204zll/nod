@@ -2787,14 +2787,20 @@ async function initializeApplication(
             : isLocalFilesAction(action)
               ? integrations.prepare(ownerId, action, args, turn, options.signal)
               : integrations.prepare(ownerId, action, args);
-        const resolved = isLocalFilesAction(action) ? await prepare() : undefined;
+        const resolved =
+          isLocalFilesAction(action) || action === 'CONNECTED_HTTP' ? await prepare() : undefined;
+        const http =
+          action === 'CONNECTED_HTTP'
+            ? await discovered.approvalDetails(action, resolved!, options.signal)
+            : undefined;
         const verdict = await trust.check(turn, action, resolved ?? args, options.signal);
         await options.admit?.(verdict.confirm);
         const prepared = resolved ?? (await prepare());
         const connected =
-          verdict.confirm && (action === 'CONNECTED_HTTP' || action === 'CONNECTED_MCP_CALL')
+          http ??
+          (verdict.confirm && action === 'CONNECTED_MCP_CALL'
             ? await discovered.approvalDetails(action, prepared, options.signal)
-            : undefined;
+            : undefined);
         const account =
           !connected && verdict.confirm && typeof prepared.connectionId === 'string'
             ? (await integrations.list(ownerId, { refresh: false })).find(
@@ -2903,7 +2909,7 @@ async function initializeApplication(
               prepared,
               turn,
               options.signal,
-              deleteBinding,
+              connected?.verifiedBinding ?? deleteBinding,
               !verdict.confirm && verdict.basis.kind === 'read' ? readWork : 'action',
             );
             await ledger.action(

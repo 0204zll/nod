@@ -156,6 +156,7 @@ test(
     const connectionLabels: unknown[] = [];
     let confirmationValid = true;
     let confirmationModel: ((input: Record<string, unknown>) => unknown) | undefined;
+    let httpReview: ((input: Record<string, unknown>) => Promise<unknown>) | undefined;
     const decisionInputs: Array<{ name: string; input: Record<string, any> }> = [];
     const fallbackChecks: object[] = [];
     const smallReplies: object[] = [];
@@ -257,6 +258,13 @@ test(
         }
         if (task === 'review' && !('purpose' in input) && !('reply' in input))
           fallbackChecks.push(input);
+        if (
+          task === 'review' &&
+          httpReview &&
+          'action' in input &&
+          Object(input.action).name === 'CONNECTED_HTTP'
+        )
+          return httpReview(input as Record<string, unknown>);
         if (
           task === 'review' &&
           calendarReview &&
@@ -4162,6 +4170,39 @@ test(
             }
             expected = { method: 'GET', url };
             const nextArgs = () => ({ connectionId, pathId, method: 'GET', path: route });
+            for (const changed of [false, true]) {
+              httpReview = async () => {
+                if (changed)
+                  await pool.query('UPDATE discovered_connections SET paths=$2 WHERE id=$1', [
+                    connectionId,
+                    JSON.stringify([{ ...paths[0], endpoint: `${origin}/replacement` }]),
+                  ]);
+                return { run: true, because: 'read' };
+              };
+              const immediate = await propose(
+                'CONNECTED_HTTP',
+                {
+                  ...nextArgs(),
+                  path: `/auto-allowed?case=${changed ? 'changed' : 'unchanged'}`,
+                },
+                'apps',
+              );
+              assert.deepEqual(await approvalsFor(immediate), []);
+              assert.equal(calls.length, 3);
+              if (changed)
+                assert.match(JSON.stringify(results.get(immediate)), /connected account changed/);
+              else
+                assert.deepEqual(calls.at(-1), {
+                  method: 'GET',
+                  url: '/v2/auto-allowed?case=unchanged',
+                  body: '',
+                });
+              httpReview = undefined;
+              await pool.query('UPDATE discovered_connections SET paths=$2 WHERE id=$1', [
+                connectionId,
+                JSON.stringify(paths),
+              ]);
+            }
             for (const reason of ['rebind', 'legacy', 'stop']) {
               const held = await propose('CONNECTED_HTTP', nextArgs(), 'apps');
               const [card] = await approvalsFor(held);
@@ -4192,7 +4233,7 @@ test(
                   reason === 'rebind' ? /connected account changed/ : /no saved account binding/,
                 );
               }
-              assert.equal(calls.length, 2);
+              assert.equal(calls.length, 3);
               await pool.query('UPDATE discovered_connections SET paths=$2 WHERE id=$1', [
                 connectionId,
                 JSON.stringify(paths),
@@ -4218,8 +4259,9 @@ test(
               JSON.stringify(results.get(changed.json().turnId)) ?? changedTurn.error,
               /connected account changed before confirmation/,
             );
-            assert.equal(calls.length, 2);
+            assert.equal(calls.length, 3);
           } finally {
+            httpReview = undefined;
             confirmationModel = undefined;
             await pool.query('DELETE FROM vault_app_grants WHERE owner_id=$1 AND id=$2', [
               ownerId,
