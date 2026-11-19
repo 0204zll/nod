@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { AppState, Message, MessageHistoryPage } from '../../shared/contracts';
-import { api } from '../lib/api';
+import type { AppState, Artifact, Message, MessageHistoryPage, Task } from '../../shared/contracts';
+import { api, errorMessage } from '../lib/api';
 import { ChatHeader } from '../components/named-chats';
+import { Composer } from '../components/composer';
+import { Notice } from '../components/ui';
 import type { NamedChat as Named } from '../lib/named-chats';
 import { Chat } from './chat';
 import { TaskCard } from './tasks';
+
+export type FirstChatMessage = { id: string; text: string; attachments: Artifact[] };
 
 export function NamedChat({
   chat,
@@ -17,7 +21,11 @@ export function NamedChat({
   onNavigate,
   onRead,
   onFeedback,
+  firstMessage,
+  onFirstMessageSent,
 }: {
+  firstMessage?: FirstChatMessage;
+  onFirstMessageSent?(id: string): void;
   chat: Named;
   ownerId: string;
   state: AppState;
@@ -116,8 +124,77 @@ export function NamedChat({
           toolbarActions={tools}
           readUnavailable
           onFeedback={onFeedback}
+          onOpenChat={onNavigate}
+          requestedMessage={firstMessage && { ...firstMessage, source: 'composer' }}
+          onRequestHandled={onFirstMessageSent}
         />
       )}
+    </div>
+  );
+}
+
+export function DraftChat({
+  ownerId,
+  threadId,
+  ready,
+  refresh,
+  onNavigate,
+  onCreated,
+}: {
+  ownerId: string;
+  threadId: string;
+  ready: boolean;
+  refresh(): Promise<void>;
+  onNavigate(path: string): void;
+  onCreated(chat: Task, first: FirstChatMessage): void;
+}) {
+  const [text, setText] = useState('');
+  const [error, setError] = useState('');
+  useEffect(() => {
+    const leave = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || document.querySelector('[role="dialog"],[role="menu"]')) return;
+      if (document.querySelector('.draft-chat .composer-editor')?.textContent?.trim()) return;
+      onNavigate('/');
+    };
+    window.addEventListener('keydown', leave, true);
+    return () => window.removeEventListener('keydown', leave, true);
+  }, [onNavigate]);
+  return (
+    <div className="named-chat-route">
+      <ChatHeader onBack={() => onNavigate('/')} onChanged={() => {}} />
+      <div className="draft-chat">
+        {error && <Notice kind="error">{error}</Notice>}
+        <Composer
+          name="a new chat"
+          placeholder="What’s this chat about?"
+          draftKey={`nod.chat-draft.${ownerId}.${threadId}.new`}
+          ready={ready}
+          text={text}
+          setText={setText}
+          replyTo={null}
+          clearReply={() => {}}
+          onSend={async (value, attachments, recording) => {
+            setError('');
+            if (recording) {
+              setError('Type the first message of a new chat. Voice messages work once it starts.');
+              return { sent: false, restoreText: true, restoreRecording: true };
+            }
+            try {
+              const chat = await api<Task>('/api/chats', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ about: value }),
+              });
+              await refresh();
+              onCreated(chat, { id: crypto.randomUUID(), text: value, attachments });
+              return { sent: true };
+            } catch (cause) {
+              setError(errorMessage(cause));
+              return { sent: false, restoreText: true };
+            }
+          }}
+        />
+      </div>
     </div>
   );
 }

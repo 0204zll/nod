@@ -1,11 +1,13 @@
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft } from './components/icons';
 import { Chat } from './pages/chat';
-import { NamedChat } from './pages/named-chat';
+import { DraftChat, NamedChat, type FirstChatMessage } from './pages/named-chat';
 import { ChatList } from './components/named-chats';
 import {
   chatIdOf,
+  chatPath,
   chatUnread,
+  draftChatPath,
   earlierChats,
   isNamedChat,
   readChatCursors,
@@ -147,6 +149,8 @@ function Workspace({
   const [chatRequests, setChatRequests] = useState<Array<{ id: string; text: string }>>([]);
   const ownerId = session.user!.id;
   const openChatId = chatIdOf(path);
+  const draftOpen = path === draftChatPath;
+  const [firstMessages, setFirstMessages] = useState<Record<string, FirstChatMessage>>({});
   const [chatCursors, setChatCursors] = useState<Record<string, string>>({});
   useEffect(() => {
     if (state?.threadId) setChatCursors(readChatCursors(ownerId, state.threadId));
@@ -251,22 +255,13 @@ function Workspace({
             <ChatList
               chats={namedChats}
               activeId={openChatId}
+              draftActive={draftOpen}
               unread={(chat) => chat.id !== openChatId && chatUnread(chat, chatCursors)}
+              live={(chat) => state?.activity?.find((item) => item.taskId === chat.id)}
               drafts={chatDrafts}
               earlier={earlierChats(state?.tasks, namedChats)}
               onNavigate={navigate}
-              onCreated={(chat) => {
-                void refresh().then(() => {
-                  navigate(`/chat/${chat.id}`);
-                  window.setTimeout(
-                    () =>
-                      document
-                        .querySelector<HTMLElement>('.named-chat-route .composer-editor')
-                        ?.focus(),
-                    250,
-                  );
-                });
-              }}
+              onChanged={() => void refresh()}
             />
           }
           unreadCount={Math.max(
@@ -365,6 +360,23 @@ function Workspace({
                   setChatCursors(writeChatCursor(ownerId, state.threadId, chatId, at))
                 }
                 onFeedback={onFeedback}
+                firstMessage={firstMessages[openChat.id]}
+                onFirstMessageSent={() =>
+                  setFirstMessages(({ [openChat.id]: _sent, ...rest }) => rest)
+                }
+              />
+            )}
+            {draftOpen && state && (
+              <DraftChat
+                ownerId={ownerId}
+                threadId={state.threadId}
+                ready={state.configuration.llmReady && connected}
+                refresh={refresh}
+                onNavigate={navigate}
+                onCreated={(chat, first) => {
+                  setFirstMessages((current) => ({ ...current, [chat.id]: first }));
+                  navigate(chatPath(chat.id));
+                }}
               />
             )}
             {path === '/apps' && (
@@ -379,6 +391,7 @@ function Workspace({
             {!settingsPage(path) &&
               !preparedWorkId(path) &&
               !(openChatId && (openChat || !state)) &&
+              !draftOpen &&
               !sidebarItems.some((item) => item.path === path) && (
                 <div className="empty-state">
                   <h1>This page isn’t here.</h1>

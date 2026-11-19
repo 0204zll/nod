@@ -1,5 +1,5 @@
 import { lazy, memo, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ChatTile } from './named-chats';
+import { ChatAvatar } from './named-chats';
 import { createPortal } from 'react-dom';
 import { Copy, Check, CornerUpLeft, Ellipsis, SmilePlus } from './icons';
 import Markdown from 'react-markdown';
@@ -110,7 +110,7 @@ export function MessageQuote({
   message,
   composing = false,
 }: {
-  message: NonNullable<Message['replyTo']>;
+  message: NonNullable<Message['replyTo']> & { from?: string };
   composing?: boolean;
 }) {
   return (
@@ -126,7 +126,7 @@ export function MessageQuote({
       >
         <strong>
           {composing ? 'Replying to ' : ''}
-          {message.role === 'assistant' ? 'Nod' : composing ? 'yourself' : 'You'}
+          {message.role === 'assistant' ? (message.from ?? 'Nod') : composing ? 'yourself' : 'You'}
         </strong>
         <span
           className="message-excerpt"
@@ -341,10 +341,12 @@ export function MessageBubble({
   handoffPaused,
   work,
   chatLabel,
+  replyFrom,
 }: {
   message: Message;
   work?: MessageWork;
   chatLabel?: string;
+  replyFrom?: string;
   pendingAudio?: ImagePreview;
   connectedAppIds?: ReadonlySet<string>;
   grouped?: boolean;
@@ -700,7 +702,7 @@ export function MessageBubble({
       <div className="message-content">
         {chatLabel && !work && (
           <span className="message-chat-label">
-            <ChatTile name={chatLabel} size="sm" />
+            <ChatAvatar name={chatLabel} size="sm" />
             {chatLabel}
           </span>
         )}
@@ -762,7 +764,7 @@ export function MessageBubble({
                 );
               }}
             >
-              {visibleReply && <MessageQuote message={visibleReply} />}
+              {visibleReply && <MessageQuote message={{ ...visibleReply, from: replyFrom }} />}
               {cardText?.lead && (
                 <MessageText text={cardText.lead} connectedAppIds={connectedAppIds} />
               )}

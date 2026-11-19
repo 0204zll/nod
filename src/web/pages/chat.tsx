@@ -31,8 +31,14 @@ import { ChatTools } from '../components/chat-tools';
 import { ServiceLogo } from '../components/service-logo';
 import { Composer, type ComposerHandle, type ComposerSendResult } from '../components/composer';
 import { TaskCard } from './tasks';
-import { ChatCard, ChatTile } from '../components/named-chats';
-import { isNamedChat, type NamedChat } from '../lib/named-chats';
+import { ChatCard, ChatReceipt, FromNodLink } from '../components/named-chats';
+import {
+  chatNewsAt,
+  chatPath,
+  isNamedChat,
+  type ChatMessage,
+  type NamedChat,
+} from '../lib/named-chats';
 import { MessageBubble, type MessageWork } from '../components/message';
 import { conversationFiles } from '../components/attachment-card';
 import { ArtifactWorkspace } from '../components/artifact-drawer';
@@ -68,7 +74,7 @@ import {
   type ChatReadCursor,
 } from '../lib/chat-unread';
 
-type ComposerReply = NonNullable<Message['replyTo']> & { answerQuestion?: true };
+type ComposerReply = NonNullable<Message['replyTo']> & { answerQuestion?: true; from?: string };
 type UnreadVisit = {
   ownerId: string;
   threadId: string;
@@ -342,7 +348,12 @@ export function Chat({
   readCursor?: ChatReadCursor | null;
   readUnavailable?: boolean;
   onReadLatest?(threadId: string): void;
-  requestedMessage?: { id: string; text: string };
+  requestedMessage?: {
+    id: string;
+    text: string;
+    attachments?: Artifact[];
+    source?: 'composer' | 'ask_nod';
+  };
   onRequestHandled?(id: string): void;
   onFeedback?(): void;
   onDismissFeedbackDiscovery?(): void;
@@ -918,6 +929,51 @@ export function Chat({
     )
     .join(';');
   const files = useMemo(() => conversationFiles(visibleMessages), [fileKey]);
+  const cardsAfter = new Map<string, NamedChat[]>();
+  const movedCards = new Set<string>();
+  const askedInCard = new Set<string>();
+  for (const task of chat ? [] : (state.tasks ?? []).filter(isNamedChat)) {
+    const start = visibleMessages.findIndex((message) => message.id === task.messageId);
+    if (start < 0) continue;
+    const question =
+      task.status === 'needs_you'
+        ? visibleMessages.find((message) => message.id === task.questionMessageId)
+        : undefined;
+    if (question && !question.answerChoices && !question.approval) askedInCard.add(question.id);
+    const newsAt = chatNewsAt(task, visibleMessages);
+    if (!newsAt) continue;
+    let anchor = -1;
+    for (let index = visibleMessages.length - 1; index > start; index--)
+      if (visibleMessages[index]!.createdAt <= newsAt) {
+        anchor = index;
+        break;
+      }
+    if (anchor < 0) continue;
+    movedCards.add(task.id);
+    const id = visibleMessages[anchor]!.id;
+    cardsAfter.set(id, [...(cardsAfter.get(id) ?? []), task]);
+  }
+  const replyToChat = (task: NamedChat) => {
+    const question = allMessages.find((message) => message.id === task.questionMessageId);
+    if (!question) return onOpenChat?.(chatPath(task.id));
+    taskReply.current = question.id;
+    setReplyTo({ ...question, from: task.name });
+    composer.current?.focus();
+  };
+  const chatCard = (task: NamedChat) => (
+    <div key={`chat-${task.id}`} className="message message-assistant chat-card-slot">
+      <div className="message-content">
+        <ChatCard
+          chat={task}
+          live={live.find((item) => item.taskId === task.id)}
+          unread={chatUnread?.(task) ?? false}
+          showQuestion={!task.questionMessageId || askedInCard.has(task.questionMessageId)}
+          onOpen={(path) => onOpenChat?.(path)}
+          onReply={task.status === 'needs_you' ? () => replyToChat(task) : undefined}
+        />
+      </div>
+    </div>
+  );
   const planning =
     state.planningTasks === true && !allMessages.some((message) => message.suggestions);
   const unseen = away
@@ -1726,7 +1782,12 @@ export function Chat({
       text: requestedMessage.text,
     };
     requestedSends.current.push(request);
-    void send(requestedMessage.text, [], null, 'ask_nod').then((result) => {
+    void send(
+      requestedMessage.text,
+      requestedMessage.attachments ?? [],
+      null,
+      requestedMessage.source ?? 'ask_nod',
+    ).then((result) => {
       if (threadRef.current !== requestedThread) return;
       request.result = result;
       if (requestedSends.current.some((item) => !item.result)) return;
@@ -2297,7 +2358,7 @@ export function Chat({
               !welcoming &&
               !working &&
               !sending &&
-              (state.configuration.llmReady ? <Welcome /> : modelSetup)}
+              (state.configuration.llmReady ? chat ? null : <Welcome /> : modelSetup)}
             <div
               className="messages"
               role="log"
@@ -2363,15 +2424,13 @@ export function Chat({
                       ?.filter((task) => task.messageId === message.id)
                       .map((task) =>
                         isNamedChat(task) ? (
-                          <div key={task.id} className="message assistant">
-                            <div className="message-content">
-                              <ChatCard
-                                chat={task}
-                                unread={chatUnread?.(task) ?? false}
-                                onOpen={(path) => onOpenChat?.(path)}
-                              />
+                          movedCards.has(task.id) ? (
+                            <div key={task.id} className="chat-receipt-slot">
+                              <ChatReceipt chat={task} onOpen={(path) => onOpenChat?.(path)} />
                             </div>
-                          </div>
+                          ) : (
+                            chatCard(task)
+                          )
                         ) : (
                           <TaskCard
                             key={task.id}
@@ -2388,13 +2447,22 @@ export function Chat({
                           />
                         ),
                       )
-                  ) : (
+                  ) : askedInCard.has(message.id) ? null : (
                     <MessageBubble
                       message={message}
                       chatLabel={
                         !chat && message.role === 'assistant' && message.chatId
                           ? state.tasks?.find((task) => task.id === message.chatId)?.name
                           : undefined
+                      }
+                      replyFrom={
+                        message.replyTo?.role !== 'assistant'
+                          ? undefined
+                          : chat
+                            ? chat.name
+                            : message.chatId
+                              ? state.tasks?.find((task) => task.id === message.chatId)?.name
+                              : undefined
                       }
                       work={workOf(message)}
                       answersDisabled={sending || !state.configuration.llmReady || welcoming}
@@ -2485,6 +2553,12 @@ export function Chat({
                       }
                     />
                   )}
+                  {chat && message.role === 'user' && (message as ChatMessage).inMain && (
+                    <div className="chat-from-slot">
+                      <FromNodLink messageId={message.id} onOpen={() => onOpenChat?.('/')} />
+                    </div>
+                  )}
+                  {cardsAfter.get(message.id)?.map(chatCard)}
                   {message.id === introduction.data?.messageId && (
                     <ChatNotifications ownerId={ownerId} messageId={message.id} />
                   )}
@@ -2511,7 +2585,7 @@ export function Chat({
           </div>
         </div>
         <div className="chat-bottom conversation-column">
-          {connected && !chat && <TaskDots tasks={state.tasks ?? []} onOpenChat={onOpenChat} />}
+          {connected && !chat && <TaskDots tasks={state.tasks ?? []} />}
           {(canReturn || away || onReturnToMemory) && (
             <div className="chat-jump-actions">
               {onReturnToMemory && (

@@ -13,6 +13,7 @@ import {
   shortcutLabel,
   sidebarItems,
 } from '../lib/navigation';
+import { draftChatPath } from '../lib/named-chats';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
 import { useArtifactDrawer } from './artifact-context';
 import { ownedArtifactUrl, type ImagePreview } from './attachment-images';
@@ -166,7 +167,7 @@ export function ChatTools({
     {
       id: 'new-chat',
       label: 'New chat',
-      action: () => window.dispatchEvent(new CustomEvent('nod:new-chat')),
+      action: () => navigate(draftChatPath),
     },
     ...sidebarItems.map((item) => ({
       id: item.path,

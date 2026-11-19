@@ -501,7 +501,13 @@ export function Scheduled({
         <div className="saved-plan-list open-task-list">
           {open.map((task) =>
             isNamedChat(task) ? (
-              <ChatCard key={task.id} chat={task} unread={false} onOpen={navigate} />
+              <ChatCard
+                key={task.id}
+                chat={task}
+                live={activity.find((item) => item.taskId === task.id)}
+                unread={false}
+                onOpen={navigate}
+              />
             ) : (
               <TaskCard
                 key={task.id}

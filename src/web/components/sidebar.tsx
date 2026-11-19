@@ -248,15 +248,34 @@ export function Sidebar({
       <div className="sidebar-header">
         <a
           href="/"
-          className="brand"
-          aria-label="Nod"
+          className={`brand nod-entry${path === '/' ? ' nod-entry-active' : ''}`}
+          aria-label={chatLabel}
+          aria-current={path === '/' ? 'page' : undefined}
           onClick={(event) => {
-            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            if (
+              event.metaKey ||
+              event.ctrlKey ||
+              event.shiftKey ||
+              event.altKey ||
+              event.button !== 0
+            )
+              return;
             event.preventDefault();
             onNavigate('/');
           }}
         >
           <BrandMark />
+          {unreadCount || unreadPending ? (
+            <span className="nod-entry-status nod-entry-count" aria-hidden="true">
+              {unreadCount > 99 ? '99+' : unreadCount || '…'}
+            </span>
+          ) : presence ? (
+            <span
+              className="nod-entry-status nod-entry-dot"
+              data-state={presence}
+              aria-hidden="true"
+            />
+          ) : null}
           <span>Nod</span>
         </a>
       </div>
@@ -281,43 +300,6 @@ export function Sidebar({
             links[next]?.focus();
           }}
         >
-          <li>
-            <a
-              href="/"
-              className={`chat-row chat-row-nod ${path === '/' ? 'chat-row-active' : ''}`}
-              aria-label={chatLabel}
-              aria-current={path === '/' ? 'page' : undefined}
-              onClick={(event) => {
-                if (
-                  event.metaKey ||
-                  event.ctrlKey ||
-                  event.shiftKey ||
-                  event.altKey ||
-                  event.button !== 0
-                )
-                  return;
-                event.preventDefault();
-                onNavigate('/');
-              }}
-            >
-              <span className="chat-tile chat-tile-nod" aria-hidden="true">
-                <BrandMark small />
-              </span>
-              <span className="chat-row-copy">
-                <strong>Nod</strong>
-              </span>
-              {unreadCount || unreadPending ? (
-                <span className="chat-row-count" aria-hidden="true">
-                  {unreadCount > 99 ? '99+' : unreadCount || '…'}
-                </span>
-              ) : presence ? (
-                <span
-                  className={`chat-dot ${presence === 'waiting' ? 'chat-dot-needs' : 'chat-dot-working'}`}
-                  aria-hidden="true"
-                />
-              ) : null}
-            </a>
-          </li>
           {chats && <li className="nav-chats">{chats}</li>}
         </ul>
         <ul className="nav-pages">

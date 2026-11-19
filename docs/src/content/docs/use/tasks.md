@@ -23,18 +23,21 @@ Tasks share one [workspace](/use/workspace/#one-workspace-for-all-tasks) and own
 
 ## Named chats
 
-Every task Nod starts from your request is a chat with a short name, such as **Recruiter** or **Finance**. If Nod gives no name, the chat takes the first words of the task's title, and you can rename it. The sidebar starts with **Nod**, where you ask for anything. Your chats follow, each with its current step beneath the name. To create one yourself, select **New chat** and type a name.
+Every task Nod starts from your request is a chat with a short name, such as **Recruiter** or **Finance**. The sidebar starts with **Nod**, where you ask for anything. Your chats follow, latest first, each with one line: what it is doing, its question or its result.
 
-![The sidebar with Nod first and the Finance and Recruiter chats beneath it, then New chat.](../../../assets/screens/named-chats.png)
+In your chat with Nod, each chat is one card. While it works, a turning ring on its avatar and the card's line show its current step. When it has news, the card moves to the bottom of the conversation, and a small link under your request still leads to it. A question shows on the card with **Reply**. A finished chat shows its result in one sentence, and the full answer, such as a table or a draft, stays in the chat.
+
+![Nod's chat with the Recruiter card showing its result in one sentence, and Recruiter in the sidebar under Nod.](../../../assets/screens/named-chats.png)
 
 | You want to                      | Do this                                                                               |
 | -------------------------------- | ------------------------------------------------------------------------------------- |
 | Hand over a piece of work        | Ask Nod. It starts a chat for the work and stays free.                                |
 | See the whole conversation       | Select the chat in the sidebar.                                                       |
 | Ask a follow-up                  | Type in the chat. Nod answers there.                                                  |
-| Keep a subject in one place      | Select **New chat** and name it, or ask Nod for it.                                   |
+| Keep a subject in one place      | Select **New chat** and write your first message. It names the chat.                  |
+| Answer a chat's question         | Select **Reply** on its card, or answer inside the chat.                              |
 | Send related work                | Ask Nod. It sends the work to the chat that already exists.                           |
-| Rename, pin or archive           | Open the chat and use the menu at the top right.                                      |
+| Rename, pin or archive           | Use the chat's menu in the sidebar or at the top right of the chat.                   |
 | See steps, activity or the model | Open the chat's menu and select **Details**.                                          |
 | Find an older or archived chat   | Select **Earlier** under the chat list. Open an archived chat and select **Restore**. |
 | Search one chat                  | Open the chat, then search. Results come from that chat only.                         |
