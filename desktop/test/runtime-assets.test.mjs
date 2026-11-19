@@ -144,6 +144,127 @@ test('speech distribution includes matching source and license and rejects chang
   );
 });
 
+const intelSpeechApp = process.env.NOD_TEST_INTEL_SPEECH_APP;
+
+test(
+  'packaged Intel Mac speech worker prepares local voices (LAB-1720)',
+  { skip: !intelSpeechApp && 'Set NOD_TEST_INTEL_SPEECH_APP to the packaged Intel Nod.app' },
+  async (t) => {
+    const app = await realpath(intelSpeechApp);
+    const engine = join(app, 'Contents/Resources/engine');
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'nod-intel-speech-')));
+    t.after(() => rm(root, { recursive: true, force: true }));
+
+    const identityModel = Buffer.from(
+      '08083a3e0a100a017812017922084964656e7469747912086964656e746974795a0f0a0178120a0a08080112040a020801620f0a0179120a0a08080112040a0208014202100d',
+      'hex',
+    );
+    const tokenizer = {
+      'tokenizer.json': {
+        model: { type: 'WordLevel', vocab: { '[UNK]': 0 }, unk_token: '[UNK]' },
+        added_tokens: [],
+        decoder: null,
+        normalizer: null,
+        post_processor: null,
+        pre_tokenizer: null,
+      },
+      'tokenizer_config.json': {},
+    };
+    const assets = {
+      whisper: {
+        'config.json': { model_type: 'whisper', is_encoder_decoder: true },
+        'preprocessor_config.json': {
+          feature_extractor_type: 'WhisperFeatureExtractor',
+          n_fft: 400,
+          feature_size: 80,
+          sampling_rate: 16000,
+        },
+        ...tokenizer,
+        'onnx/encoder_model_quantized.onnx': identityModel,
+        'onnx/decoder_model_merged_quantized.onnx': identityModel,
+      },
+      kokoro: {
+        'config.json': { model_type: 'style_text_to_speech_2' },
+        ...tokenizer,
+        'onnx/model_quantized.onnx': identityModel,
+      },
+    };
+    const downloads = {};
+    const models = Object.entries(assets).map(([name, files]) => {
+      const repository = `nod-fixture/${name}`;
+      const revision = 'synthetic';
+      return {
+        name,
+        repository,
+        revision,
+        files: Object.entries(files).map(([path, value]) => {
+          const bytes = Buffer.isBuffer(value) ? value : Buffer.from(JSON.stringify(value));
+          downloads[`${repository}/resolve/${revision}/${path}`] = bytes.toString('base64');
+          return {
+            path,
+            size: bytes.length,
+            sha256: createHash('sha256').update(bytes).digest('hex'),
+          };
+        }),
+      };
+    });
+    const manifest = pathToFileURL(join(engine, 'src/providers/local-speech/models.ts')).href;
+    const fixtures = join(root, 'speech-fixtures.mjs');
+    await writeFile(
+      fixtures,
+      `import { registerHooks } from 'node:module';
+registerHooks({
+  load(url, context, nextLoad) {
+    if (url !== ${JSON.stringify(manifest)}) return nextLoad(url, context);
+    return {
+      format: 'module', shortCircuit: true,
+      source: ${JSON.stringify(`export const localSpeechModels = ${JSON.stringify(models)};`)},
+    };
+  },
+});
+const downloads = ${JSON.stringify(downloads)};
+globalThis.fetch = async (url) => {
+  const path = new URL(url).pathname.slice(1);
+  if (!Object.hasOwn(downloads, path)) throw new Error('Unexpected voice fixture URL: ' + url);
+  return new Response(Buffer.from(downloads[path], 'base64'));
+};`,
+    );
+
+    const script = `import assert from 'node:assert/strict';
+import { fork } from 'node:child_process';
+assert.equal(process.platform + '-' + process.arch, 'darwin-x64');
+assert.ok(process.versions.electron);
+const { createLocalSpeechProvider } = await import('./src/providers/local-speech/index.ts');
+const { withFailureLog } = await import('./src/ports/failure-log.ts');
+const speech = createLocalSpeechProvider({
+  cacheDir: ${JSON.stringify(join(root, 'cache'))},
+  fork(path, args, options) {
+    return fork(path, args, {
+      ...options, execArgv: [...options.execArgv, '--import', ${JSON.stringify(fixtures)}],
+    });
+  },
+});
+try {
+  await withFailureLog(
+    (event, detail, context) => console.error(JSON.stringify({ event, ...context, ...detail })),
+    () => speech.prepare(AbortSignal.timeout(30_000)),
+  );
+  assert.equal(speech.status().state, 'ready');
+} finally {
+  await speech.close();
+}`;
+    await run(
+      join(app, 'Contents/MacOS/nod'),
+      ['--import', 'tsx', '--import', fixtures, '--input-type=module', '-e', script],
+      {
+        cwd: engine,
+        env: { PATH: process.env.PATH, HOME: root, TMPDIR: root, ELECTRON_RUN_AS_NODE: '1' },
+        timeout: 45_000,
+      },
+    );
+  },
+);
+
 async function releaseRepository(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'nod-release-history-')));
   t.after(() => rm(root, { recursive: true, force: true }));
