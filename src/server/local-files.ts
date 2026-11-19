@@ -624,7 +624,10 @@ export function createLocalFiles(
         if (!version) return;
         if (fileVersion(await file.stat({ bigint: true })) !== version) throw changedRead(path);
         const current = await lstat(path, { bigint: true }).catch((error: unknown) => {
-          throw changedRead(path, error);
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw changedRead(path, error);
+          throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
+            notRun: true,
+          });
         });
         if (fileVersion(current) !== version) throw changedRead(path);
       };

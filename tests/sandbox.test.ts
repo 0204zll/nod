@@ -3,6 +3,7 @@ import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
+import fs from 'node:fs/promises';
 import {
   chmod,
   lstat,
@@ -18,6 +19,7 @@ import {
   utimes,
   writeFile,
 } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import { basename, join } from 'node:path';
@@ -1186,6 +1188,54 @@ test('local file reads refuse a parent folder replacement after opening', async 
             : new TextDecoder().decode(current.file!.bytes),
           'new',
         );
+      }
+    }
+  }
+});
+
+test('local file version checks keep the cause of a failed path check', async (t) => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'nod-read-path-error-')));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const path = join(home, 'note.txt');
+  await writeFile(path, 'synthetic text');
+  const pool = {
+    query: async () => ({ rows: [{ local_files_enabled: true, local_keep_out: [] }] }),
+  } as unknown as Pool;
+  const files = createLocalFiles(pool, 'owner', {
+    home,
+    dataRoot: join(home, 'data'),
+    available: true,
+  });
+  const originalLstat = fs.lstat;
+  for (const action of ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT'] as const) {
+    const checked = await files.prepare(action, { path });
+    for (const code of ['EIO', 'EMFILE', 'EACCES']) {
+      for (const failedCheck of [1, 2]) {
+        let checks = 0;
+        const failure = Object.assign(new Error(`${code}: synthetic path check failed`), {
+          code,
+          statusCode: 503,
+        });
+        const intercepted = t.mock.method(fs, 'lstat', (...args: Parameters<typeof fs.lstat>) => {
+          if (args[0] === path && args[1]?.bigint && ++checks === failedCheck)
+            return Promise.reject(failure);
+          return Reflect.apply(originalLstat, fs, args);
+        });
+        syncBuiltinESMExports();
+        try {
+          await assert.rejects(files.execute(action, checked), (error: unknown) => {
+            assert.equal(error, failure);
+            assert.equal((error as { notRun?: boolean }).notRun, true);
+            assert.equal(failure.code, code);
+            assert.equal(failure.statusCode, 503);
+            assert.doesNotMatch(failure.message, /changed after this file read/);
+            return true;
+          });
+          assert.equal(checks, failedCheck);
+        } finally {
+          intercepted.mock.restore();
+          syncBuiltinESMExports();
+        }
       }
     }
   }
