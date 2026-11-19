@@ -4754,6 +4754,218 @@ test(
         },
       );
 
+      await t.test('stale pending file versions do not hide a completed exact result', async () => {
+        for (const source of ['user', 'schedule'] as const)
+          for (const action of ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT']) {
+            const turn =
+              source === 'user'
+                ? await begin('Read the synthetic file.')
+                : await attachSchedule(await begin('Read the synthetic file.', { source }));
+            const args = { path: `/synthetic/${randomUUID()}.txt`, version: 'a'.repeat(64) };
+            const id = await propose(turn, action, args);
+            const result = { text: 'Completed synthetic observation' };
+            await db.pool.query(
+              "UPDATE approvals SET status='completed',result=$2::jsonb WHERE id=$1",
+              [id, result],
+            );
+            const sessionId = (await row(turn.turnId)).session_id;
+            await finish(turn.turnId, 'succeeded');
+            const pendingTurn = await running(
+              await thread.enqueueTurn('Read a changed synthetic file.', {
+                source: 'resume',
+                parentTurnId: turn.turnId,
+                sessionId,
+                background: source === 'schedule',
+              }),
+            );
+            const stale = await propose(pendingTurn, action, { ...args, version: 'b'.repeat(64) });
+            await finish(pendingTurn.turnId, 'failed');
+            const resumed = await running(
+              await thread.enqueueTurn('Continue the synthetic request.', {
+                source: 'resume',
+                parentTurnId: pendingTurn.turnId,
+                sessionId,
+                background: source === 'schedule',
+              }),
+            );
+            const before = calls.length;
+            assert.deepEqual(
+              await approvals.request(resumed, action, args, { allowed: true }),
+              result,
+            );
+            assert.equal(calls.length, before);
+            assert.equal(await proposal(resumed.turnId), undefined);
+            assert.equal((await stored(stale)).status, 'expired');
+            assert.equal((await stored(id)).status, 'completed');
+            await finish(resumed.turnId, 'succeeded');
+          }
+      });
+      await t.test('completed app approvals keep their result ordering', async () => {
+        for (const source of ['user', 'schedule'] as const) {
+          const turn =
+            source === 'user'
+              ? await begin('Read the synthetic app record.')
+              : await attachSchedule(await begin('Read the synthetic app record.', { source }));
+          const args = email('anna@example.test');
+          const original = await propose(turn, 'GMAIL_SEND_EMAIL', args);
+          const first = '00000000-0000-4000-8000-000000000001';
+          const second = '00000000-0000-4000-8000-000000000002';
+          const result = { id: 'original-synthetic-result' };
+          await db.pool.query(
+            "UPDATE approvals SET id=$2,status='completed',result=$3::jsonb WHERE id=$1",
+            [original, first, result],
+          );
+          try {
+            await db.pool.query(
+              "INSERT INTO approvals(id,owner_id,thread_id,turn_id,action,args,status,source_message_id,confirmation_message_id) SELECT $2,owner_id,thread_id,turn_id,action,args,'declined',source_message_id,confirmation_message_id FROM approvals WHERE id=$1",
+              [first, second],
+            );
+            let repeats = 0;
+            assert.deepEqual(
+              await approvals.request(turn, 'GMAIL_SEND_EMAIL', args, {
+                allowed: true,
+                run: async () => {
+                  repeats++;
+                },
+              }),
+              result,
+            );
+            assert.equal(repeats, 0);
+          } finally {
+            await db.pool.query('DELETE FROM approvals WHERE id=ANY($1::uuid[])', [
+              [first, second],
+            ]);
+            await finish(turn.turnId, 'succeeded');
+          }
+        }
+      });
+      await t.test('local file observations keep refusal fences across file versions', async () => {
+        for (const source of ['user', 'schedule'] as const)
+          for (const action of ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT'])
+            for (const status of [
+              'pending',
+              'confirmed',
+              'executing',
+              'declined',
+              'uncertain',
+              'completed',
+            ]) {
+              const turn =
+                source === 'user'
+                  ? await begin('Read the synthetic note.')
+                  : await attachSchedule(await begin('Read the synthetic note.', { source }));
+              const path = `/synthetic/${randomUUID()}.md`;
+              const args = { path, version: 'a'.repeat(64) };
+              const id = await propose(turn, action, args);
+              const result = { text: 'Original synthetic observation' };
+              await db.pool.query('UPDATE approvals SET status=$2,result=$3::jsonb WHERE id=$1', [
+                id,
+                status,
+                result,
+              ]);
+              let reads = 0;
+              const read = () =>
+                approvals.request(
+                  turn,
+                  action,
+                  { path, version: 'b'.repeat(64) },
+                  {
+                    allowed: true,
+                    run: async () => {
+                      reads++;
+                      return { text: 'Current synthetic observation' };
+                    },
+                  },
+                );
+              if (status === 'completed') {
+                assert.deepEqual(
+                  await approvals.request(turn, action, args, { allowed: true }),
+                  result,
+                );
+                assert.deepEqual(await read(), { text: 'Current synthetic observation' });
+                assert.equal(reads, 1);
+                rejectPreflight = true;
+                try {
+                  await assert.rejects(
+                    approvals.request(turn, action, args, { allowed: true }),
+                    /Fixture account disconnected/,
+                  );
+                } finally {
+                  rejectPreflight = false;
+                }
+              } else {
+                await assert.rejects(read(), /pending or uncertain outcome/);
+                assert.equal(reads, 0);
+                await db.pool.query("UPDATE approvals SET args=args-'version' WHERE id=$1", [id]);
+                await assert.rejects(read(), /pending or uncertain outcome/);
+                assert.equal(reads, 0);
+              }
+              assert.equal((await stored(id)).status, status);
+              assert.equal(
+                (
+                  await db.pool.query('SELECT count(*)::int AS n FROM approvals WHERE turn_id=$1', [
+                    turn.turnId,
+                  ])
+                ).rows[0].n,
+                1,
+              );
+              await finish(turn.turnId, 'succeeded');
+            }
+      });
+      await t.test(
+        'uncertain local reads stay fenced after the approval store reloads',
+        async () => {
+          try {
+            for (const action of ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT']) {
+              const turn = await begin('Read the synthetic note.');
+              const args = { path: `/synthetic/${randomUUID()}.txt`, version: 'a'.repeat(64) };
+              const id = await propose(turn, action, args);
+              await finish(turn.turnId);
+              const confirmed = await confirm(id, true);
+              assert.ok(confirmed && 'turnId' in confirmed);
+              const resumed = await running(confirmed.turnId);
+              executionResult = () => {
+                throw Object.assign(new Error('EIO: synthetic post-read check failed'), {
+                  statusCode: 503,
+                });
+              };
+              await execute(id);
+              const saved = await stored(id);
+              assert.equal(saved.status, 'uncertain');
+              assert.match(saved.result.error, /EIO: synthetic post-read check failed/);
+              const reopened = await createApprovals(async () => {
+                assert.fail('A saved uncertain read must not execute after a store reload.');
+              });
+              let reads = 0;
+              await assert.rejects(
+                reopened.request(
+                  resumed,
+                  action,
+                  { ...args, version: 'b'.repeat(64) },
+                  {
+                    allowed: true,
+                    run: async () => {
+                      reads++;
+                      return { text: 'New synthetic bytes' };
+                    },
+                  },
+                ),
+                /pending or uncertain outcome/,
+              );
+              assert.equal(reads, 0);
+              assert.equal(
+                await reopened.executeConfirmed(confirmed.turnId, new AbortController().signal),
+                undefined,
+              );
+              assert.deepEqual((await stored(id)).result, saved.result);
+              assert.equal((await stored(id)).status, 'uncertain');
+              await finish(confirmed.turnId, 'failed');
+            }
+          } finally {
+            executionResult = undefined;
+          }
+        },
+      );
       await t.test(
         'approval clicks bind the card, action, and client retry to the same approval',
         async () => {
