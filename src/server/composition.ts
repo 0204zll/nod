@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { isEnterKey } from '../shared/browser-keys.ts';
 import { z } from 'zod';
 import {
   appConfirmation,
@@ -2384,16 +2385,33 @@ async function initializeApplication(
               ? handoff
               : { result: handoff };
         }
+        const control = request.page.controls?.[0];
+        const namedControl =
+          control?.name.trim() && !['RootWebArea', 'WebArea', 'document'].includes(control.role);
+        const form = request.page.submits;
+        const knownForm = typeof form === 'object' && form.method.trim() && form.to.trim();
+        const enter =
+          (request.step.action === 'press' && isEnterKey(request.step.key)) ||
+          (request.step.action === 'type' && /[\r\n]/.test(request.step.text ?? ''));
         if (
-          request.step.action === 'click' &&
-          request.step.x !== undefined &&
-          !request.page.controls?.some(
-            ({ role, name }) => name && !['RootWebArea', 'WebArea', 'document'].includes(role),
-          )
-        )
+          !namedControl &&
+          ((request.step.action === 'click' &&
+            (request.step.x !== undefined ||
+              request.step.y !== undefined ||
+              request.step.points !== undefined ||
+              !knownForm)) ||
+            (enter && !knownForm))
+        ) {
+          const action =
+            request.step.action === 'click'
+              ? 'click'
+              : request.step.action === 'type'
+                ? 'typed line break'
+                : 'Enter press';
           throw new Error(
-            'The click target is not identified. Inspect a fresh snapshot or screenshot and choose the actual control. Do not ask the owner to approve an unidentified click.',
+            `The ${action} target is not identified. Inspect a fresh snapshot or screenshot and choose the actual control. Do not ask the owner to approve an unidentified ${action}.`,
           );
+        }
         if (request.subagent) return 'refused';
         const visible =
           turn.browserId &&

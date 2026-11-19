@@ -606,20 +606,21 @@ export async function openDevtools(url: string, targetId: string, signal?: Abort
       }>;
     };
     const byId = new Map(nodes.map((node) => [node.nodeId, node]));
+    const target = nodes.find((item) => item.backendDOMNodeId === backendNodeId);
     const controls: Array<{ role: string; name: string }> = [];
     for (
-      let node = nodes.find((item) => item.backendDOMNodeId === backendNodeId);
+      let node = target;
       node && controls.length < 3;
       node = node.parentId ? byId.get(node.parentId) : undefined
     ) {
-      const name = String(node.name?.value ?? '').trim();
-      if (!node.ignored && name) controls.push({ role: String(node.role?.value ?? ''), name });
+      const name = node.ignored ? '' : String(node.name?.value ?? '').trim();
+      if (node === target || name) controls.push({ role: String(node.role?.value ?? ''), name });
     }
     return controls;
   };
 
   const controlTarget = async (query: ControlQuery) => {
-    const found = await locate(query);
+    const found = await locate(query, true);
     const [frame] = found ? await tree(found.session) : [];
     return found && frame?.loaderId
       ? {
@@ -1051,12 +1052,13 @@ export async function openDevtools(url: string, targetId: string, signal?: Abort
         await check();
         await send('Runtime.enable', {}, session);
         await send('Runtime.addBinding', { name, executionContextId: context }, session);
+        let resolveClick!: (received: boolean) => void;
         const clicked = new Promise<boolean>((resolve) => {
+          resolveClick = resolve;
           bindings.set(name, (payload) => {
             outcome = payload === 'accepted';
             resolve(outcome);
           });
-          timer = setTimeout(() => resolve(false), 5000);
         });
         await send(
           'Runtime.callFunctionOn',
@@ -1090,6 +1092,7 @@ export async function openDevtools(url: string, targetId: string, signal?: Abort
           page,
         );
         pressed = false;
+        timer = setTimeout(() => resolveClick(false), 5000);
         if (!(await clicked)) throw new Error('The sign-in control did not receive the click.');
       } finally {
         if (pressed)
@@ -1121,7 +1124,7 @@ export async function openDevtools(url: string, targetId: string, signal?: Abort
       }
     },
     async submits(query: ControlQuery, enter: boolean) {
-      const target = await locate(query);
+      const target = await locate(query, true);
       if (target) return formOf(target, enter);
       if (query.focused) return null;
       throw new Error('The control could not be found.');

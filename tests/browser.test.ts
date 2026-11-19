@@ -2711,6 +2711,152 @@ test('a password typed through the handoff in several pauses hides only the fini
 });
 
 test(
+  'native browser targets keep their own name before named ancestor context',
+  { skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true', timeout: 60_000 },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'nod-target-name-native-'));
+    const server = createHttpServer((_request, response) => {
+      response.setHeader('content-type', 'text/html');
+      response.end(`<title>Synthetic target names</title>
+        <style>#blank{position:fixed;left:0;top:0;width:20vw;height:20vh}body{padding-top:25vh}</style>
+        <form aria-label="Named form"><button type="button" id="form-button"></button></form>
+        <section role="region" aria-label="Named region"><button id="blank"></button><input id="field"></section>
+        <button id="named">Named exact button<div id="child"></div></button>
+        <div id="custom" role="treeitem" aria-label="Named custom target" tabindex="0"></div>
+        <form action="/submit" method="post" aria-label="Known form"><input id="known"></form>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const origin = `http://127.0.0.1:${address.port}`;
+    const computer = createAgentBrowserComputer({
+      dataRoot: directory,
+      browserExecutable: process.env.NOD_TEST_BROWSER_EXECUTABLE,
+      privateNetwork: true,
+      headless: true,
+    });
+    try {
+      await computer.act('target-name', { action: 'open', url: origin });
+      for (const [selector, ancestor] of [
+        ['#form-button', 'Named form'],
+        ['#blank', 'Named region'],
+        ['#child', 'Named exact button'],
+      ]) {
+        const page = await computer.currentPage('target-name', { action: 'click', selector });
+        assert.equal(page.controls?.[0]?.name, '', selector);
+        assert.ok(
+          page.controls?.slice(1).some(({ name }) => name === ancestor),
+          selector,
+        );
+        assert.match(page.target!, /^[0-9a-f]{64}$/);
+      }
+      for (const step of [
+        { action: 'click', x: 0.05, y: 0.05 },
+        {
+          action: 'click',
+          points: [
+            { x: 0.05, y: 0.05 },
+            { x: 0.05, y: 0.05 },
+          ],
+        },
+      ] satisfies BrowserAction[]) {
+        const page = await computer.currentPage('target-name', step);
+        assert.equal(page.controls?.[0]?.name, '');
+        assert.equal(page.controls?.[1]?.name, 'Named region');
+      }
+      await computer.act('target-name', { action: 'fill', selector: '#field', text: 'synthetic' });
+      for (const step of [
+        { action: 'press', key: 'Enter' },
+        { action: 'type', text: 'synthetic\n' },
+      ] satisfies BrowserAction[]) {
+        const page = await computer.currentPage('target-name', step);
+        assert.deepEqual(page.controls?.[0], { role: 'textbox', name: '' });
+        assert.equal(page.controls?.[1]?.name, 'Named region');
+        assert.equal(page.submits, undefined);
+      }
+      for (const [selector, name] of [
+        ['#named', 'Named exact button'],
+        ['#custom', 'Named custom target'],
+      ]) {
+        const page = await computer.currentPage('target-name', { action: 'click', selector });
+        assert.equal(page.controls?.[0]?.name, name);
+      }
+      await computer.act('target-name', { action: 'fill', selector: '#known', text: 'synthetic' });
+      const known = await computer.currentPage('target-name', { action: 'press', key: 'Enter' });
+      assert.deepEqual(known.controls?.[0], { role: 'textbox', name: '' });
+      assert.equal(known.controls?.[1]?.name, 'Known form');
+      assert.deepEqual(known.submits, { method: 'POST', to: `${origin}/submit` });
+    } finally {
+      await computer.dispose();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'native coordinate targets follow normal pointer hit testing',
+  { skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true', timeout: 60_000 },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'nod-pointer-target-native-'));
+    const requests: string[] = [];
+    const server = createHttpServer((request, response) => {
+      if (request.method === 'POST' || request.url?.startsWith('/overlay')) {
+        requests.push(`${request.method} ${request.url}`);
+        response.writeHead(204).end();
+        return;
+      }
+      const named = request.url === '/named';
+      response.setHeader('content-type', 'text/html');
+      response.end(`<title>Synthetic pointer target</title>
+        <style>button{position:fixed;inset:0;width:100vw;height:100vh;border:0}#overlay{pointer-events:none;opacity:.2}</style>
+        <form method="post" action="/actual-${named ? 'named' : 'blank'}"><button${named ? ' aria-label="Named actual target"' : ''}></button></form>
+        <form method="get" action="/overlay"><button id="overlay" aria-label="Named overlay">Named overlay</button></form>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const computer = createAgentBrowserComputer({
+      dataRoot: directory,
+      browserExecutable: process.env.NOD_TEST_BROWSER_EXECUTABLE,
+      privateNetwork: true,
+      headless: true,
+    });
+    try {
+      const expected: string[] = [];
+      for (const named of [false, true]) {
+        await computer.act('pointer-target', {
+          action: 'open',
+          url: `http://127.0.0.1:${address.port}/${named ? 'named' : 'blank'}`,
+        });
+        const step: BrowserAction = { action: 'click', x: 0.5, y: 0.5 };
+        const page = await computer.currentPage('pointer-target', step);
+        assert.ok(page.target);
+        assert.deepEqual(page.controls?.[0], {
+          role: 'button',
+          name: named ? 'Named actual target' : '',
+        });
+        assert.deepEqual(page.submits, {
+          method: 'POST',
+          to: `http://127.0.0.1:${address.port}/actual-${named ? 'named' : 'blank'}`,
+        });
+        assert.deepEqual(requests, expected);
+        await computer.act('pointer-target', { ...step, expectTarget: page.target });
+        expected.push(`POST /actual-${named ? 'named' : 'blank'}`);
+        for (let i = 0; i < 500 && requests.length < expected.length; i++) await delay(10);
+        assert.deepEqual(requests, expected);
+      }
+    } finally {
+      await computer.dispose();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   'native secure entry completes single and split OTP controls without maxlength hints',
   { skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true', timeout: 60_000 },
   async () => {
@@ -6444,10 +6590,33 @@ test(
         to: `${origin}/reserve`,
       });
       await computer.act('submits', { action: 'fill', selector: 'input[name=q]', text: 'tables' });
-      assert.deepEqual(await submits({ action: 'press', key: 'Enter' }), {
-        method: 'GET',
-        to: `${origin}/search`,
-      });
+      for (const key of [
+        'Enter',
+        'Return',
+        'Shift+Enter',
+        'Enter+Shift',
+        'Ctrl+Enter+Meta',
+        'NumpadEnter',
+        '\r',
+        '\n',
+      ]) {
+        assert.deepEqual(
+          await submits({ action: 'press', key }),
+          {
+            method: 'GET',
+            to: `${origin}/search`,
+          },
+          key,
+        );
+      }
+      for (const key of [
+        'Enter+Unknown',
+        ' Enter ',
+        'ControlOrMeta+Enter',
+        'Enter\n',
+        'ShiftLeft+Enter',
+      ])
+        assert.equal(await submits({ action: 'press', key }), undefined, key);
       await computer.act('submits', {
         action: 'evaluate',
         script: "document.querySelector('form button').focus()",

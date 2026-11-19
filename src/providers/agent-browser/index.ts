@@ -20,6 +20,7 @@ import type {
 } from '../../ports/computer.ts';
 import { BrowserActionError } from '../../ports/computer.ts';
 import { fileBytes } from '../../shared/files.ts';
+import { isEnterKey } from '../../shared/browser-keys.ts';
 import type { BrowserHandoffInput } from '../../shared/browser-handoff.ts';
 import { threadIdentity } from '../../ports/thread-identity.ts';
 import { runProcess, serviceEnvironment } from '../process.ts';
@@ -1401,11 +1402,23 @@ export function createAgentBrowserComputer(options: {
                 assertOpen();
                 if ((await devtools.document()) !== document)
                   throw new BrowserActionError('browser_card_changed');
-                const { enabled } = z
-                  .object({ enabled: z.boolean() })
-                  .parse(
-                    await command(state, { action: 'isenabled', selector: control }, { signal }),
-                  );
+                const { enabled } = z.object({ enabled: z.boolean() }).parse(
+                  await command(
+                    state,
+                    { action: 'isenabled', selector: control },
+                    { signal },
+                  ).catch(async (error) => {
+                    signal?.throwIfAborted();
+                    if (!(error instanceof DaemonCommandError)) throw error;
+                    const changed = await devtools.document().then(
+                      (current) => current !== document,
+                      () => false,
+                    );
+                    signal?.throwIfAborted();
+                    if (changed) throw new BrowserActionError('browser_card_changed');
+                    throw error;
+                  }),
+                );
                 if (enabled) break;
                 if (performance.now() >= readyBy)
                   throw new BrowserActionError('browser_card_disabled');
@@ -1776,7 +1789,7 @@ export function createAgentBrowserComputer(options: {
             : { focused: step.action === 'type' };
     const { controls, identity: sourceIdentity } = await controlsOf(state, target);
     const enter =
-      (step.action === 'press' && step.key === 'Enter') ||
+      (step.action === 'press' && isEnterKey(step.key)) ||
       (step.action === 'type' && /[\r\n]/.test(step.text ?? ''));
     const submits =
       step.action === 'click' || enter ? await submissionOf(state, target, enter) : undefined;

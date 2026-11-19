@@ -23,7 +23,13 @@ import { createIntegrationFixture } from '../scripts/e2e-fixtures.ts';
 import { fakeComputer, fakeWorkspace } from './runtime-fixtures.ts';
 import { accessCookie, accessKey } from '../src/server/access.ts';
 import { createDecisionModel } from '../src/providers/decisions.ts';
-import { BrowserActionError, type Computer, type CredentialInput } from '../src/ports/computer.ts';
+import {
+  BrowserActionError,
+  type BrowserAction,
+  type BrowserPage,
+  type Computer,
+  type CredentialInput,
+} from '../src/ports/computer.ts';
 import { authenticatorKey } from '../src/shared/authenticator-key.ts';
 import { authenticatorCode } from '../src/server/authenticator.ts';
 import { transaction } from '../src/server/transaction.ts';
@@ -1580,6 +1586,202 @@ test(
             assert.equal((await approvalsFor(held))[0].status, 'completed');
           } finally {
             browserWording = undefined;
+          }
+        },
+      );
+
+      await t.test(
+        'unidentified coordinate, selector and Enter steps return to inspection before approval',
+        async () => {
+          const seen: BrowserAction[] = [];
+          let page: BrowserPage = {
+            origin: 'https://review.example.test',
+            url: 'https://review.example.test/request',
+          };
+          calendarBrowser = {
+            currentPage: async () => page,
+            act: async (_id, step) => {
+              seen.push(step);
+              return {
+                text: `Result:\n${JSON.stringify('Submit the synthetic request for review.')}`,
+                url: page.url,
+              };
+            },
+          };
+          const controls = [{ role: 'RootWebArea', name: 'Synthetic review page' }];
+          const cases: Array<{
+            step: BrowserAction;
+            controls?: BrowserPage['controls'];
+            submits?: BrowserPage['submits'];
+          }> = [
+            {
+              step: { action: 'click', selector: '#blank-button' },
+              controls: [
+                { role: 'button', name: '' },
+                { role: 'form', name: 'Payment form' },
+              ],
+            },
+            {
+              step: { action: 'press', key: 'Enter' },
+              controls: [
+                { role: 'textbox', name: '' },
+                { role: 'region', name: 'Account settings' },
+              ],
+              submits: 'unknown',
+            },
+            {
+              step: { action: 'type', text: 'synthetic\n' },
+              controls: [
+                { role: 'textbox', name: ' ' },
+                { role: 'button', name: 'Submit request' },
+              ],
+            },
+            {
+              step: { action: 'click', x: 0.5, y: 0.5 },
+              controls: [
+                { role: 'generic', name: '' },
+                { role: 'region', name: 'Payment details' },
+              ],
+              submits: { method: 'POST', to: 'https://review.example.test/submit' },
+            },
+            {
+              step: {
+                action: 'click',
+                points: [
+                  { x: 0.5, y: 0.5 },
+                  { x: 0.5, y: 0.5 },
+                ],
+              },
+              controls,
+              submits: { method: 'POST', to: 'https://review.example.test/submit' },
+            },
+            {
+              step: { action: 'click', x: 0.5, y: 0.5 },
+              controls: [{ role: 'button', name: ' ' }],
+              submits: { method: 'POST', to: 'https://review.example.test/submit' },
+            },
+            {
+              step: { action: 'click', y: 0.5 },
+              controls,
+              submits: { method: 'POST', to: 'https://review.example.test/submit' },
+            },
+            { step: { action: 'click', selector: '@e7' }, controls },
+            {
+              step: { action: 'click', selector: '#unnamed' },
+              controls: [{ role: 'button', name: ' \t ' }],
+              submits: 'unknown',
+            },
+            { step: { action: 'press', key: 'Enter' }, controls },
+            { step: { action: 'press', key: 'Enter' }, submits: 'unknown' },
+            { step: { action: 'type', text: 'synthetic\n' }, controls, submits: 'unknown' },
+            {
+              step: { action: 'type', text: 'synthetic\r' },
+              controls: [{ role: 'textbox', name: ' ' }],
+            },
+            { step: { action: 'press', key: 'Shift+Enter' }, controls, submits: 'unknown' },
+            { step: { action: 'press', key: 'Control+Enter' }, controls },
+            { step: { action: 'press', key: 'NumpadEnter' }, controls },
+            { step: { action: 'press', key: 'Return' }, controls },
+            { step: { action: 'press', key: 'Enter+Shift' }, controls },
+            { step: { action: 'press', key: '\r' }, controls },
+            { step: { action: 'press', key: '\n' }, controls },
+          ];
+          try {
+            for (const entry of cases) {
+              page = {
+                origin: page.origin,
+                url: page.url,
+                controls: entry.controls,
+                submits: entry.submits,
+              };
+              const text = `Synthetic unidentified step ${randomUUID()}`;
+              const { action, ...args } = entry.step;
+              const errors = batchErrors.length;
+              const before = seen.length;
+              batches.set(text, { subagents: false, calls: [{ tool: 'browser', action, args }] });
+              const response = await request('POST', '/api/messages', { text });
+              assert.equal(response.statusCode, 200, response.body);
+              await waitFor(response.json().turnId, 'waiting|succeeded');
+              assert.deepEqual(await approvalsFor(response.json().turnId), []);
+              assert.equal(seen.length, before);
+              assert.match(batchErrors.slice(errors).join('\n'), /target is not identified/);
+              if (entry.step.action === 'type')
+                assert.match(batchErrors.slice(errors).join('\n'), /typed line break/);
+            }
+            for (const entry of [
+              {
+                step: { action: 'click', selector: '#named-custom' },
+                controls: [
+                  { role: 'generic', name: 'Submit custom request' },
+                  { role: 'region', name: 'Request details' },
+                ],
+              },
+              {
+                step: { action: 'click', x: 0.5, y: 0.5 },
+                controls: [{ role: 'button', name: 'Submit request' }],
+                submits: { method: 'POST', to: 'https://review.example.test/submit' },
+              },
+              {
+                step: { action: 'click', selector: '#submit' },
+                controls: [{ role: 'button', name: 'Submit request' }],
+                submits: 'unknown',
+              },
+              {
+                step: { action: 'click', selector: '#submit-form' },
+                controls,
+                submits: { method: 'POST', to: 'https://review.example.test/submit' },
+              },
+              {
+                step: { action: 'press', key: 'Enter' },
+                controls: [],
+                submits: { method: 'POST', to: 'https://review.example.test/submit' },
+              },
+              {
+                step: { action: 'type', text: 'synthetic\n' },
+                controls: [{ role: 'textbox', name: ' Request ' }],
+              },
+            ] satisfies typeof cases) {
+              page = {
+                origin: page.origin,
+                url: page.url,
+                controls: entry.controls,
+                submits: entry.submits,
+              };
+              const { action, ...args } = entry.step;
+              const before = seen.filter((step) => step.action !== 'evaluate').length;
+              const held = await propose(action, args, 'browser');
+              const [card] = await approvalsFor(held);
+              assert.equal(card.status, 'pending');
+              assert.deepEqual(card.args.command, entry.step);
+              assert.deepEqual(card.args.submits, entry.submits);
+              assert.equal(seen.filter((step) => step.action !== 'evaluate').length, before);
+              const answer = await request('POST', '/api/messages', {
+                text: 'Yes',
+                replyToMessageId: card.confirmation_message_id,
+                approvalAnswer: { approvalId: card.id, approved: true },
+              });
+              assert.equal(answer.statusCode, 200, answer.body);
+              await waitFor(answer.json().turnId, 'succeeded');
+              assert.equal((await approvalsFor(held))[0].status, 'completed');
+              assert.deepEqual(seen.filter((step) => step.action !== 'evaluate').slice(before), [
+                { ...entry.step, expectOrigin: page.origin, expectUrl: page.url },
+              ]);
+            }
+            page = { origin: page.origin, url: page.url, controls, submits: 'unknown' };
+            for (const args of [{ selector: '#owner-approved' }, { x: 0.5, y: 0.5 }]) {
+              const text = `Click the synthetic owner-approved control ${randomUUID()}`;
+              asked.add(text);
+              const before = seen.filter((step) => step.action === 'click').length;
+              try {
+                const id = await propose('click', args, 'browser', text);
+                assert.deepEqual(await approvalsFor(id), []);
+                assert.equal(seen.filter((step) => step.action === 'click').length, before + 1);
+              } finally {
+                asked.delete(text);
+              }
+            }
+          } finally {
+            calendarBrowser = undefined;
           }
         },
       );
