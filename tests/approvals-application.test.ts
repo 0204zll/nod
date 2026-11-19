@@ -1584,7 +1584,7 @@ test(
       );
 
       await t.test(
-        'unidentified selector and Enter steps return to inspection before approval',
+        'unidentified coordinate, selector and Enter steps return to inspection before approval',
         async () => {
           const seen: BrowserAction[] = [];
           let page: BrowserPage = {
@@ -1607,6 +1607,27 @@ test(
             controls?: BrowserPage['controls'];
             submits?: BrowserPage['submits'];
           }> = [
+            {
+              step: {
+                action: 'click',
+                points: [
+                  { x: 0.5, y: 0.5 },
+                  { x: 0.5, y: 0.5 },
+                ],
+              },
+              controls,
+              submits: { method: 'POST', to: 'https://review.example.test/submit' },
+            },
+            {
+              step: { action: 'click', x: 0.5, y: 0.5 },
+              controls: [{ role: 'button', name: ' ' }],
+              submits: { method: 'POST', to: 'https://review.example.test/submit' },
+            },
+            {
+              step: { action: 'click', y: 0.5 },
+              controls,
+              submits: { method: 'POST', to: 'https://review.example.test/submit' },
+            },
             { step: { action: 'click', selector: '@e7' }, controls },
             {
               step: { action: 'click', selector: '#unnamed' },
@@ -1652,9 +1673,19 @@ test(
             }
             for (const entry of [
               {
+                step: { action: 'click', x: 0.5, y: 0.5 },
+                controls: [{ role: 'button', name: 'Submit request' }],
+                submits: { method: 'POST', to: 'https://review.example.test/submit' },
+              },
+              {
                 step: { action: 'click', selector: '#submit' },
                 controls: [{ role: 'button', name: 'Submit request' }],
                 submits: 'unknown',
+              },
+              {
+                step: { action: 'click', selector: '#submit-form' },
+                controls,
+                submits: { method: 'POST', to: 'https://review.example.test/submit' },
               },
               {
                 step: { action: 'press', key: 'Enter' },
@@ -1693,15 +1724,17 @@ test(
               ]);
             }
             page = { origin: page.origin, url: page.url, controls, submits: 'unknown' };
-            const text = `Click the synthetic owner-approved control ${randomUUID()}`;
-            asked.add(text);
-            const before = seen.filter((step) => step.action === 'click').length;
-            try {
-              const id = await propose('click', { selector: '#owner-approved' }, 'browser', text);
-              assert.deepEqual(await approvalsFor(id), []);
-              assert.equal(seen.filter((step) => step.action === 'click').length, before + 1);
-            } finally {
-              asked.delete(text);
+            for (const args of [{ selector: '#owner-approved' }, { x: 0.5, y: 0.5 }]) {
+              const text = `Click the synthetic owner-approved control ${randomUUID()}`;
+              asked.add(text);
+              const before = seen.filter((step) => step.action === 'click').length;
+              try {
+                const id = await propose('click', args, 'browser', text);
+                assert.deepEqual(await approvalsFor(id), []);
+                assert.equal(seen.filter((step) => step.action === 'click').length, before + 1);
+              } finally {
+                asked.delete(text);
+              }
             }
           } finally {
             calendarBrowser = undefined;

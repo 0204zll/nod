@@ -2395,7 +2395,11 @@ async function initializeApplication(
           (request.step.action === 'type' && /[\r\n]/.test(request.step.text ?? ''));
         if (
           !namedControl &&
-          ((request.step.action === 'click' && (request.step.x !== undefined || !knownForm)) ||
+          ((request.step.action === 'click' &&
+            (request.step.x !== undefined ||
+              request.step.y !== undefined ||
+              request.step.points !== undefined ||
+              !knownForm)) ||
             (enter && !knownForm))
         ) {
           const action =
