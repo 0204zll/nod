@@ -394,14 +394,20 @@ export function ChatCard({
               Reply
             </button>
           )}
-          <a href={chatPath(chat.id)} className="chat-button" onClick={open}>
-            Open {chat.name}
+          <a
+            href={chatPath(chat.id)}
+            className="chat-button"
+            aria-label={`Open ${chat.name}`}
+            onClick={open}
+          >
+            Open
             <ChevronRight size={15} aria-hidden="true" />
           </a>
           {finished && !chat.pinned && !chat.archivedAt && onChanged && (
             <button
               type="button"
               className="chat-button chat-button-quiet"
+              aria-label={`Keep ${chat.name}`}
               disabled={keeping}
               onClick={() => {
                 setKeeping(true);
@@ -413,7 +419,7 @@ export function ChatCard({
               }}
             >
               <KeepMark />
-              Keep {chat.name}
+              Keep
             </button>
           )}
         </div>

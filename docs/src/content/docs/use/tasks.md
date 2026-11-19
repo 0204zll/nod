@@ -23,11 +23,11 @@ Tasks share one [workspace](/use/workspace/#one-workspace-for-all-tasks) and own
 
 ## Named chats
 
-Every task Nod starts from your request is a chat with a short name, such as **Recruiter** or **Finance**. The sidebar starts with **Nod**, where you ask for anything. Your chats follow, latest first, each with one line: what it is doing, its question or its result.
+Every task Nod starts from your request is a chat named after its subject, such as **Designer search** or **Hosting costs**. The sidebar starts with **Nod**, where you ask for anything. Your chats follow, latest first, each with one line: what it is doing, its question or its result.
 
 In your chat with Nod, each chat is one card. While it works, a turning ring on its avatar and the card's line show its current step. When it has news, the card moves to the bottom of the conversation, and a small link under your request still leads to it. A question shows on the card with **Reply**. A finished chat shows its result in one sentence, and the full answer, such as a table or a draft, stays in the chat.
 
-![Nod's chat with the Recruiter card showing its result in one sentence, and Recruiter in the sidebar under Nod.](../../../assets/screens/named-chats.png)
+![Nod's chat with the Designer search card showing its result in one sentence, and Designer search in the sidebar under Nod.](../../../assets/screens/named-chats.png)
 
 | You want to                      | Do this                                                                               |
 | -------------------------------- | ------------------------------------------------------------------------------------- |
@@ -46,13 +46,13 @@ In your chat with Nod, each chat is one card. While it works, a turning ring on 
 
 Nod answers where you asked. A follow-up you start inside a chat stays in that chat. Anything that needs you, such as a question or an approval, also shows in your chat with Nod, and you can answer it in either place.
 
-A chat keeps its own conversation, so one subject does not crowd another. Every chat knows which other chats exist and what each is doing, and reads another chat's goal, result and latest messages when your request depends on it. Ask Finance what the Recruiter found, and it looks. What a chat reads there is information only: it never counts as your permission for an action. Your memory, files, connected apps and rules are shared across all of them.
+A chat keeps its own conversation, so one subject does not crowd another. Every chat knows which other chats exist and what each is doing, and reads another chat's goal, result and latest messages when your request depends on it. Ask in one chat what another one found, and Nod looks it up. What a chat reads there is information only: it never counts as your permission for an action. Your memory, files, connected apps and rules are shared across all of them.
 
-Nod sends new work to the chat whose role covers it. A second hiring request goes to the Recruiter you already have, not to a new chat.
+Nod sends new work to the chat whose subject covers it. A second request about the same hire goes to the chat you already have, not to a new one.
 
 Each new request in a finished chat stands alone. An earlier message in that chat can give Nod context, but it cannot approve a new action.
 
-A chat you keep stays in the list, and Nod gives it new work that fits its role. Nod never keeps a chat on its own. Other chats leave the list a day after they finish and move to **Earlier**. When a reply arrives only in a chat while Nod is in the background, the browser notification opens that chat.
+A chat you keep stays in the list, and Nod gives it new work on its subject. Nod never keeps a chat on its own. Other chats leave the list a day after they finish and move to **Earlier**. When a reply arrives only in a chat while Nod is in the background, the browser notification opens that chat.
 
 Chats are part of Nod web and desktop. Telegram and WhatsApp keep one conversation: reply to a chat's message there to continue it.
 
