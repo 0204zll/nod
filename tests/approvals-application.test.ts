@@ -4179,19 +4179,29 @@ test(
                   ]);
                 return { run: true, because: 'read' };
               };
-              const immediate = await propose(
-                'CONNECTED_HTTP',
-                {
+              const prompt = `Synthetic HTTP direct request ${randomUUID()}`;
+              plans.set(prompt, {
+                tool: 'apps',
+                action: 'CONNECTED_HTTP',
+                args: {
                   ...nextArgs(),
                   path: `/auto-allowed?case=${changed ? 'changed' : 'unchanged'}`,
                 },
-                'apps',
-              );
+              });
+              const response = await request('POST', '/api/messages', { text: prompt });
+              assert.equal(response.statusCode, 200, response.body);
+              const immediate = response.json().turnId;
+              await waitFor(immediate, 'succeeded|failed');
               assert.deepEqual(await approvalsFor(immediate), []);
               assert.equal(calls.length, 3);
-              if (changed)
-                assert.match(JSON.stringify(results.get(immediate)), /connected account changed/);
-              else
+              if (changed) {
+                const turn = (await pool.query('SELECT error FROM turns WHERE id=$1', [immediate]))
+                  .rows[0];
+                assert.match(
+                  JSON.stringify(results.get(immediate)) ?? turn.error,
+                  /connected account changed/,
+                );
+              } else
                 assert.deepEqual(calls.at(-1), {
                   method: 'GET',
                   url: '/v2/auto-allowed?case=unchanged',

@@ -2897,7 +2897,9 @@ async function initializeApplication(
                   connected.verifiedBinding
                 )
                   throw Object.assign(
-                    new Error('This connected account changed before confirmation.'),
+                    new Error(
+                      `This connected account changed before ${verdict.confirm ? 'confirmation' : 'execution'}.`,
+                    ),
                     { notRun: true },
                   );
               }
