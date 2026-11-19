@@ -1707,6 +1707,7 @@ test(
         'edited drafts keep the owner review before sending the full changed message',
         async () => {
           const recipient = 'reviewed-draft@example.test';
+          const extraRecipients = ['additional@example.test'];
           const subject = `Synthetic reviewed follow-up ${randomUUID()}`;
           const originalBody = `${'Synthetic context. '.repeat(240)}\nOriginal ending.`;
           const editedBody = originalBody.replace('Original ending.', 'Talk soon,\nSample');
@@ -1745,7 +1746,12 @@ test(
           try {
             draftTurn = await propose(
               'GMAIL_CREATE_EMAIL_DRAFT',
-              { recipient_email: recipient, subject, body: originalBody },
+              {
+                recipient_email: recipient,
+                extra_recipients: extraRecipients,
+                subject,
+                body: originalBody,
+              },
               'apps',
               original,
             );
@@ -1756,6 +1762,7 @@ test(
               await pool.query('SELECT * FROM draft_instructions WHERE turn_id=$1', [draftTurn])
             ).rows;
             assert.equal(retained.length, 1);
+            assert.deepEqual(retained[0].target.extra_recipients, extraRecipients);
             assert.ok(retained[0].draft_id);
             assert.ok(retained[0].source_ids.length > 0);
             await pool.query(

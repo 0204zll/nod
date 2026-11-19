@@ -248,7 +248,14 @@ function messageConfirmation(data: unknown) {
       return [`${label}: ${value.join(', ')}`];
     throw new Error('Nod cannot show all message recipients and fields for approval.');
   });
-  if (!fields.some((field) => field.startsWith('To: ')))
+  if (
+    !['recipient_email', 'to'].some((key) => {
+      const value = args[key];
+      return typeof value === 'string'
+        ? Boolean(value.trim())
+        : Array.isArray(value) && value.some((entry) => typeof entry === 'string' && entry.trim());
+    })
+  )
     throw new Error('Nod cannot identify the message recipient for approval.');
   if (args.attachments !== undefined && !Array.isArray(args.attachments))
     throw new Error('Nod cannot show and bind all message attachments for approval.');

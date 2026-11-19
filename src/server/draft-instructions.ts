@@ -47,7 +47,7 @@ export async function captureDraftInstructions(
       typeof args.draft_id === 'string' ? args.draft_id : null,
       JSON.stringify(
         Object.fromEntries(
-          ['recipient_email', 'to', 'cc', 'bcc', 'subject'].flatMap((key) =>
+          ['recipient_email', 'to', 'cc', 'bcc', 'extra_recipients', 'subject'].flatMap((key) =>
             args[key] === undefined ? [] : [[key, args[key]]],
           ),
         ),

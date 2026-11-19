@@ -1,8 +1,76 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createDecisionModel } from '../src/providers/decisions.ts';
-import { createTrustReview } from '../src/server/trust-review.ts';
+import { createTrustReview, ClearedMessageReviewError } from '../src/server/trust-review.ts';
 import { trustBasis, trustDecision } from '../src/server/trust-basis.ts';
+
+test('a complete Jev review clearance keeps later permission failures separate', async () => {
+  const { jevPolicy } = await import('../src/server/trust-jev-policy.ts');
+  const checked = {
+    userMessages: [
+      { at: '2026-11-19T09:00:00Z', text: 'Set the synthetic monthly limit to 100 dollars.' },
+    ],
+    action: { name: 'NOD_limits_update', arguments: { monthlyUsd: 100 } },
+    messageDrafts: [
+      {
+        draftId: null,
+        connectionId: 'synthetic-connection',
+        target: {},
+        messages: [],
+        unavailable: true,
+      },
+    ],
+  };
+  const answer: {
+    choice: string;
+    probability: number;
+    model: { provider: string; requested: string; served: string };
+    additional: Record<string, { choice: boolean; probability: number }>;
+  } = {
+    choice: 'message:0',
+    probability: 1,
+    model: { provider: 'typesafe', requested: 'jev-1.14.0', served: 'jev-1.14.0' },
+    additional: {
+      ...Object.fromEntries(
+        Object.keys(jevPolicy.features).map((name) => [name, { choice: false, probability: 1 }]),
+      ),
+      draftReviewClear_0: { choice: true, probability: 1 },
+    },
+  };
+  const review = createTrustReview({
+    review: async () => assert.fail('The decision check cannot switch to an LLM.'),
+    decisions: {
+      check: async (request) => {
+        request.forModel?.({ provider: 'typesafe', model: 'jev-1.14.0' });
+        return answer;
+      },
+    },
+  });
+  await assert.rejects(
+    review('', checked),
+    (error) =>
+      error instanceof ClearedMessageReviewError && /effects are incomplete/.test(error.message),
+  );
+  for (const field of ['message_review', 'direct_request']) {
+    const value = answer.additional[field];
+    delete answer.additional[field];
+    await assert.rejects(
+      review('', checked),
+      (error) =>
+        !(error instanceof ClearedMessageReviewError) && Object(error).reviewRequired === true,
+    );
+    answer.additional[field] = value;
+  }
+  answer.additional.draftReviewClear_0 = { choice: false, probability: 1 };
+  assert.equal(Object(await review('', checked)).reviewRequired, true);
+  answer.additional.draftReviewClear_0 = { choice: true, probability: 1 };
+  answer.model.served = 'synthetic-wrong-model';
+  await assert.rejects(
+    review('', checked),
+    (error) =>
+      !(error instanceof ClearedMessageReviewError) && Object(error).reviewRequired === true,
+  );
+});
 
 test('Jev keeps action data out of the owner proof and blocks failures without an LLM', async (t) => {
   for (const provider of ['openrouter', 'typesafe'] as const)
@@ -398,11 +466,7 @@ test('a nested effect can refuse the private-read path even when the first Jev c
   );
   assert.equal(privateChecks, 1);
   failure = 'refusal';
-  assert.deepEqual(await review('Apply the owner policy.', input), {
-    run: false,
-    reviewRequired: true,
-    reviewUnavailable: true,
-  });
+  assert.equal(await review('Apply the owner policy.', input), undefined);
   failure = 'http';
   await assert.rejects(review('Apply the owner policy.', input));
 });

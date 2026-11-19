@@ -138,7 +138,7 @@ export function createPiMemoryCurator(options: {
     },
     async select(signal) {
       signal?.throwIfAborted();
-      if (!options.resolve) return curator;
+      if (!curator.configured || !options.resolve) return curator;
       const access = await options.resolve();
       signal?.throwIfAborted();
       if (!access) throw new Error('The selected model is unavailable.');

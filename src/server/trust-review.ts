@@ -8,6 +8,7 @@ import { trustDecision, type TrustWords } from './trust-basis.ts';
 import { trustDimensions } from './trust-dimensions.ts';
 import { trustFacts } from './trust-facts.ts';
 import { checkJevEffects, checkJevModel, checkJevTrust, isJev, jevRequest } from './trust-jev.ts';
+import { jevPolicy } from './trust-jev-policy.ts';
 import { messageReviewPolicy } from './owner-instructions.ts';
 
 export class ClearedMessageReviewError extends Error {
@@ -211,16 +212,34 @@ export function createTrustReview(options: {
       )
     )
       return { run: false, reviewRequired: true, reviewUnavailable: true, decision: answer };
-    if (gate && jev)
-      return (
-        (await checkJevTrust(
+    if (gate && jev) {
+      const initial = checkJevModel(answer, jev);
+      const cleared =
+        Object.keys(jevPolicy.features).every(
+          (name) => typeof initial.additional[name]?.choice === 'boolean',
+        ) &&
+        initial.additional.message_review?.choice === false &&
+        initial.additional.message_review.probability >= 0.99;
+      try {
+        const result = await checkJevTrust(
           decisions,
           input as Parameters<typeof jevRequest>[0],
           answer,
           jev,
           signal,
-        )) ?? { run: false, reviewRequired: true, reviewUnavailable: true }
-      );
+        );
+        return (
+          result ??
+          (cleared ? undefined : { run: false, reviewRequired: true, reviewUnavailable: true })
+        );
+      } catch (error) {
+        if (cleared)
+          throw new ClearedMessageReviewError(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        throw error;
+      }
+    }
     if (!gate) {
       if (jev) {
         const checked = checkJevModel(answer, jev);
@@ -279,7 +298,7 @@ export function createTrustReview(options: {
       typeof permission.choice !== 'boolean' ||
       typeof preparation?.preparation !== 'boolean'
     )
-      return { run: false, reviewRequired: true, reviewUnavailable: true };
+      return undefined;
     const prepared = preparation.preparation === true && preparationCertainty >= 0.99;
     const source = gate.result({ trust: details?.trust }) as
       { run?: boolean; because?: string; rule?: boolean } | undefined;
@@ -306,8 +325,7 @@ export function createTrustReview(options: {
     ]) {
       const value = details?.additional?.[name] as { choice?: unknown } | undefined;
       const certainty = probability(value);
-      if (certainty === undefined || typeof value?.choice !== 'boolean')
-        return { run: false, reviewRequired: true, reviewUnavailable: true };
+      if (certainty === undefined || typeof value?.choice !== 'boolean') return undefined;
       if ((value.choice ? certainty : 1 - certainty) >= 0.5)
         return { run: false, decision: answer };
     }

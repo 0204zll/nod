@@ -10002,6 +10002,25 @@ test('OpenAI review output schemas constrain both key and subscription requests 
     });
 });
 
+test('an unconfigured curator does not resolve a model selection', async () => {
+  let configured = false;
+  let resolutions = 0;
+  const curator = createPiMemoryCurator({
+    provider: 'openai',
+    configured: () => configured,
+    resolve: async () => {
+      resolutions++;
+      return undefined;
+    },
+  });
+  assert.equal(await curator.select!(), curator);
+  assert.equal(resolutions, 0);
+  assert.equal(curator.configured, false);
+  configured = true;
+  await assert.rejects(curator.select!(), /selected model is unavailable/);
+  assert.equal(resolutions, 1);
+});
+
 test('an unavailable classification resolver never loads a fallback model', async () => {
   let fallbackLoads = 0;
   const curator = createPiMemoryCurator({

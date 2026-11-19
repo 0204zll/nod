@@ -341,3 +341,52 @@ test('only a complete clear result can keep ordinary confirmation after a permis
     (error) => error === failure && Object(error).reviewRequired === true,
   );
 });
+
+test('a complete typed review clearance keeps ordinary approval for missing permission data', async () => {
+  const checked = {
+    userMessages: [
+      { at: '2026-11-19T09:00:00Z', text: 'Set the synthetic monthly limit to 100 dollars.' },
+    ],
+    action: { name: 'NOD_limits_update', arguments: { monthlyUsd: 100 } },
+    messageDrafts: [
+      {
+        draftId: null,
+        connectionId: 'synthetic-connection',
+        target: {},
+        messages: [],
+        unavailable: true,
+      },
+    ],
+  };
+  for (const missing of ['permission', 'preparation', 'constraints', 'time', 'costs']) {
+    const additional: Record<string, unknown> = {
+      ...Object.fromEntries(
+        ['scope', 'constraints', 'time', 'numbers', 'conditions', 'targets', 'bans', 'costs'].map(
+          (name) => [name, { choice: name === 'scope', probability: 1 }],
+        ),
+      ),
+      preparation: { preparation: false, choice: false, probability: 1 },
+      permission: { permission: true, choice: true, probability: 1 },
+      messageReview: { choice: false, probability: 1 },
+      draftReviewClear_0: { choice: true, probability: 1 },
+    };
+    delete additional[missing];
+    const review = createTrustReview({
+      review: async () => assert.fail('The decision check cannot switch to an LLM.'),
+      decisions: {
+        check: async () => ({
+          trust: 'message:0',
+          choice: 'message:0',
+          probability: 1,
+          additional,
+        }),
+      },
+    });
+    assert.equal(await review('', checked), undefined, missing);
+    additional.messageReview = { choice: false, probability: 0.98 };
+    assert.equal(Object(await review('', checked)).reviewRequired, true);
+    additional.messageReview = { choice: false, probability: 1 };
+    additional.draftReviewClear_0 = { choice: false, probability: 1 };
+    assert.equal(Object(await review('', checked)).reviewRequired, true);
+  }
+});
