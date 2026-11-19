@@ -82,6 +82,7 @@ const input = z.discriminatedUnion('action', [
       model: modelSelectionInput.optional(),
       name: z.string().trim().min(1).max(chatNameLimit).optional(),
       chat: z.uuid().optional(),
+      newBecause: z.string().trim().min(1).max(300).optional(),
       pinned: z.boolean().optional(),
     })
     .strict(),
@@ -669,8 +670,21 @@ export function createTasks(options: {
           : ownerStarted && !request.chat
             ? await defaultChatName(client, ownerId, turn.threadId, request.title)
             : null;
-      if (request.name !== undefined)
+      if (request.name !== undefined) {
         await assertChatNameFree(client, ownerId, turn.threadId, name!, undefined, true);
+        const others = (
+          await client.query<{ id: string; name: string; title: string }>(
+            `SELECT t.id,t.name,t.title FROM tasks t JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
+             WHERE t.owner_id=$1 AND u.thread_id=$2 AND t.name IS NOT NULL AND t.archived_at IS NULL
+             ORDER BY t.updated_at DESC LIMIT 12`,
+            [ownerId, turn.threadId],
+          )
+        ).rows;
+        if (others.length && !request.newBecause)
+          throw failure(
+            `These chats already exist: ${others.map((chat) => `${chat.name} (chat "${chat.id}")`).join(', ')}. When this work fits the role or subject of one of them, give it this request with chat and no name, or with reply while it works. Start a new chat only for a different role or subject, and then pass newBecause with the reason none of them fits.`,
+          );
+      }
       const reused = request.chat
         ? (
             await client.query<{ id: string; name: string; state: string }>(
