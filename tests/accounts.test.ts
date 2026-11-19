@@ -577,7 +577,11 @@ test('decision trust never calls an LLM for uncertainty, missing results or fail
     },
     review: async () => assert.fail('Missing configuration must not start an LLM request.'),
   });
-  assert.equal(await unavailable(instructions, input), undefined);
+  assert.deepEqual(await unavailable(instructions, input), {
+    run: false,
+    reviewRequired: true,
+    reviewUnavailable: true,
+  });
   for (const output of [
     undefined,
     {},
@@ -591,7 +595,11 @@ test('decision trust never calls an LLM for uncertainty, missing results or fail
       decisions: { check: async () => output },
       review: async () => assert.fail('Missing results must not select another model.'),
     });
-    assert.equal(await missing(instructions, input), undefined);
+    const refused = await missing(instructions, input);
+    assert.equal(Object(refused).run, false);
+    assert.equal(Object(refused).reviewRequired, true);
+    assert.equal(Object(refused).reviewUnavailable, true);
+    assert.equal(trustBasis(refused, withOwnerIds(words, ['message'])), undefined);
   }
   const unscored = createTrustReview({
     decisions: { check: async () => ({ answer: 'yes' }) },
@@ -656,11 +664,22 @@ test('batched trust validates all answers, records one request, and refuses conf
         resolve: async () => ({ provider, key: 'synthetic-batch-key' }),
         fetch: async (_url, init) => {
           const body = JSON.parse(String(init?.body));
-          const questions = provider === 'openai' ? body.questions : Object.values(body.questions);
-          assert.equal(questions.length, 11);
-          assert.doesNotMatch(questions[0].instructions, /Complete permission policy/);
-          assert.match(questions[2].instructions, /Complete permission policy/);
-          assert.doesNotMatch(questions[1].instructions, /Complete permission policy/);
+          const questions: Array<{ name: string; instructions: string }> =
+            provider === 'openai'
+              ? body.questions
+              : Object.entries(body.questions).map(([name, question]) => ({
+                  name,
+                  ...Object(question),
+                }));
+          assert.equal(questions.length, 12);
+          const named = (name: string) => {
+            const question = questions.find((question) => question.name === name);
+            assert.ok(question);
+            return question;
+          };
+          assert.doesNotMatch(named('trust').instructions, /Complete permission policy/);
+          assert.match(named('permission').instructions, /Complete permission policy/);
+          assert.doesNotMatch(named('preparation').instructions, /Complete permission policy/);
           const answers = [
             {
               name: 'trust',
@@ -681,6 +700,7 @@ test('batched trust validates all answers, records one request, and refuses conf
               probabilities: { true: conflict ? 0 : 1, false: conflict ? 1 : 0 },
             },
             ...[
+              'messageReview',
               'scope',
               'constraints',
               'time',
@@ -695,7 +715,7 @@ test('batched trust validates all answers, records one request, and refuses conf
               choice: provider === 'openai' ? false : 'false',
               probabilities: { true: 0, false: 1 },
             })),
-          ].slice(0, missing ? 1 : 11);
+          ].slice(0, missing ? 1 : 12);
           return Response.json({
             answers:
               provider === 'openai'
@@ -769,7 +789,7 @@ test('pure decision checks bind the evaluated model, preserve target checks and 
     }),
     fetch: async (_url, init) => {
       const request = JSON.parse(String(init?.body));
-      assert.equal(Object.keys(request.questions).length, 11);
+      assert.equal(Object.keys(request.questions).length, 12);
       assert.deepEqual(request.state.action, input.action);
       assert.deepEqual(request.state.userMessages, input.userMessages);
       assert.equal(request.provider.allow_fallbacks, false);

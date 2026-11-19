@@ -11363,6 +11363,59 @@ async function access(provider: ModelAccess['provider'], id: string): Promise<Mo
   };
 }
 
+test('a selected Trust curator keeps its model and records both requests', async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => (globalThis.fetch = originalFetch));
+  let current = smallContextAccess('compatible', 'fixture-trust-original', 32768);
+  let selections = 0;
+  const models: string[] = [];
+  const usage: Array<{ id: string; model?: string }> = [];
+  globalThis.fetch = async (input, init) => {
+    const request = new Request(input, init);
+    assert.equal(new URL(request.url).hostname, '127.0.0.1');
+    models.push(String((await request.json()).model));
+    return reply({ role: 'assistant', content: '{"review":"clear"}' });
+  };
+  const curator = createPiMemoryCurator({
+    provider: current.provider,
+    configured: () => true,
+    resolve: async () => {
+      selections++;
+      return current;
+    },
+  });
+  const selected = await curator.select!();
+  current = smallContextAccess('compatible', 'fixture-trust-replacement', 32768);
+  const signal = new AbortController().signal;
+  await Promise.all(
+    ['grant', 'restriction'].map((purpose) =>
+      selected.curate(
+        { task: 'review', instructions: 'Return synthetic JSON.', input: { purpose } },
+        signal,
+        (value) => usage.push(value),
+      ),
+    ),
+  );
+  assert.equal(selections, 1);
+  assert.deepEqual(models, ['fixture-trust-original', 'fixture-trust-original']);
+  assert.equal(usage.length, 2);
+  assert.notEqual(usage[0].id, usage[1].id);
+  assert.deepEqual(
+    usage.map((value) => value.model),
+    models,
+  );
+  const stopped = new AbortController();
+  stopped.abort();
+  await assert.rejects(
+    selected.curate({ task: 'review', instructions: '', input: {} }, stopped.signal),
+    { name: 'AbortError' },
+  );
+  await assert.rejects(curator.select!(stopped.signal), { name: 'AbortError' });
+  assert.equal(selections, 1);
+  assert.equal(models.length, 2);
+  assert.equal(usage.length, 2);
+});
+
 function reply(content: Record<string, unknown>, finish = 'stop') {
   const chunk = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
   return new Response(
