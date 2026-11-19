@@ -1171,11 +1171,13 @@ test('local file opening failures return no bytes and permit a fresh read', asyn
   await handle.close();
   let reads = 0;
   let closes = 0;
+  let readFailure: Error | undefined;
   t.mock.method(
     prototype,
     'read',
     function (this: typeof handle, ...args: Parameters<typeof read>) {
       reads++;
+      if (readFailure) throw readFailure;
       return Reflect.apply(read, this, args);
     },
   );
@@ -1188,6 +1190,8 @@ test('local file opening failures return no bytes and permit a fresh read', asyn
       'open failure',
       'stat failure',
       'version failure',
+      'read failure',
+      'final stat failure',
       'target removed',
       'target retargeted',
     ]) {
@@ -1202,6 +1206,8 @@ test('local file opening failures return no bytes and permit a fresh read', asyn
         code: 'EIO',
         statusCode: 503,
       });
+      const uncertain = race === 'read failure' || race === 'final stat failure';
+      readFailure = race === 'read failure' ? failure : undefined;
       let restoreStat = () => {};
       let restoreClose = () => {};
       let opened = false;
@@ -1221,13 +1227,22 @@ test('local file opening failures return no bytes and permit a fresh read', asyn
           return Reflect.apply(originalClose, file, []);
         });
         restoreClose = () => close.mock.restore();
-        if (race === 'stat failure' || race === 'version failure') {
+        if (
+          race === 'stat failure' ||
+          race === 'version failure' ||
+          race === 'final stat failure'
+        ) {
           const originalStat = file.stat;
+          let versionChecks = 0;
           const stat = t.mock.method(
             file,
             'stat',
             async (...args: Parameters<typeof file.stat>) => {
-              if (race === 'stat failure' || args[0]?.bigint) throw failure;
+              if (
+                race === 'stat failure' ||
+                (args[0]?.bigint && (++versionChecks === 2 || race === 'version failure'))
+              )
+                throw failure;
               return Reflect.apply(originalStat, file, args);
             },
           );
@@ -1241,7 +1256,7 @@ test('local file opening failures return no bytes and permit a fresh read', asyn
       try {
         await assert.rejects(files.execute(action, checked), (error: unknown) => {
           assert.ok(error instanceof Error);
-          assert.equal((error as { notRun?: boolean }).notRun, true, race);
+          assert.equal((error as { notRun?: boolean }).notRun, uncertain ? undefined : true, race);
           if (race.endsWith('failure')) {
             assert.equal(error, failure);
             assert.equal(failure.code, 'EIO');
@@ -1249,10 +1264,11 @@ test('local file opening failures return no bytes and permit a fresh read', asyn
           }
           return true;
         });
-        assert.equal(reads, 0);
+        assert.equal(reads, Number(uncertain));
         if (race.startsWith('target ')) assert.equal(opens, 0);
         assert.equal(closes, closesBefore + Number(opened));
       } finally {
+        readFailure = undefined;
         restoreStat();
         restoreClose();
         intercepted.mock.restore();
