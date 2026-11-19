@@ -1211,6 +1211,32 @@ test('local file version checks keep the cause of a failed path check', async (t
   const originalLstat = fs.lstat;
   for (const action of ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT'] as const) {
     const checked = await files.prepare(action, { path });
+    for (const code of ['ENOENT', 'EIO', 'EMFILE', 'EACCES']) {
+      const failure = Object.assign(new Error(`${code}: synthetic preparation check failed`), {
+        code,
+        statusCode: 503,
+      });
+      const intercepted = t.mock.method(fs, 'lstat', (...args: Parameters<typeof fs.lstat>) => {
+        if (args[0] === path && args[1]?.bigint) return Promise.reject(failure);
+        return Reflect.apply(originalLstat, fs, args);
+      });
+      syncBuiltinESMExports();
+      try {
+        await assert.rejects(files.prepare(action, checked), (error: unknown) => {
+          assert.ok(error instanceof Error);
+          if (code === 'ENOENT') {
+            assert.equal((error as { notRun?: boolean }).notRun, true);
+            assert.equal((error as { statusCode?: number }).statusCode, 409);
+            assert.match(error.message, /changed after this file read/);
+            assert.ok(error.message.includes(failure.message));
+          } else assert.equal(error, failure);
+          return true;
+        });
+      } finally {
+        intercepted.mock.restore();
+        syncBuiltinESMExports();
+      }
+    }
     for (const code of ['EIO', 'EMFILE', 'EACCES']) {
       for (const failedCheck of [1, 2]) {
         let checks = 0;

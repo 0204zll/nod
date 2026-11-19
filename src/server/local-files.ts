@@ -694,7 +694,12 @@ export function createLocalFiles(
     if (input.paths) return { paths: await Promise.all(input.paths.map(real)) };
     const path = await real(input.path!);
     if (action === 'LOCAL_FILES_READ' || action === 'LOCAL_FILES_IMPORT') {
-      const version = fileVersion(await lstat(path, { bigint: true }));
+      const version = fileVersion(
+        await lstat(path, { bigint: true }).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw changedRead(path, error);
+          throw error;
+        }),
+      );
       if (input.version && input.version !== version) throw changedRead(path);
       return { ...input, path, version };
     }
