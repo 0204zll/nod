@@ -1097,6 +1097,8 @@ test('local file reads refuse a write that occurs before the read completes', as
   t.after(() => rm(home, { recursive: true, force: true }));
   const path = join(home, 'note.txt');
   await writeFile(path, 'old');
+  const timestamp = new Date('2026-01-01T00:00:00Z');
+  await utimes(path, timestamp, timestamp);
   const pool = {
     query: async () => ({ rows: [{ local_files_enabled: true, local_keep_out: [] }] }),
   } as unknown as Pool;
@@ -1121,10 +1123,13 @@ test('local file reads refuse a write that occurs before the read completes', as
       const result = await Reflect.apply(read, this, args);
       const before = await this.stat({ bigint: true });
       await writeFile(path, 'new');
+      await utimes(path, timestamp, new Date(timestamp.getTime() + 1000));
       writes++;
+      const after = await this.stat({ bigint: true });
+      assert.notEqual(after.mtimeNs, before.mtimeNs);
       observed = {
         before: version(before),
-        after: version(await this.stat({ bigint: true })),
+        after: version(after),
         path: version(await lstat(path, { bigint: true })),
       };
       return result;
@@ -1427,12 +1432,22 @@ test('local files stay in home, skip secrets and kept-out folders, and never ove
     for (const action of ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT'] as const) {
       const path = join(shared, 'versioned.txt');
       await writeFile(path, 'old');
-      const original = await lstat(path);
+      const timestamp = new Date('2026-01-01T00:00:00Z');
+      await utimes(path, timestamp, timestamp);
+      const original = await lstat(path, { bigint: true });
       const checked = await files.prepare(action, { path });
       assert.ok('version' in checked);
       await assert.rejects(files.execute(action, { path }), { notRun: true });
-      await writeFile(path, 'new');
-      await utimes(path, original.atime, original.mtime);
+      let changed = original;
+      for (let attempt = 0; attempt < 100 && changed.ctimeNs === original.ctimeNs; attempt++) {
+        await writeFile(path, 'new');
+        await utimes(path, timestamp, timestamp);
+        changed = await lstat(path, { bigint: true });
+        if (changed.ctimeNs === original.ctimeNs) await delay(10);
+      }
+      assert.equal(changed.mtimeNs, original.mtimeNs);
+      assert.equal(changed.size, original.size);
+      assert.notEqual(changed.ctimeNs, original.ctimeNs);
       await assert.rejects(files.prepare(action, checked), { notRun: true });
       await assert.rejects(files.execute(action, checked), { notRun: true });
       const current = await files.prepare(action, { path });
