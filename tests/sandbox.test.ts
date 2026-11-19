@@ -1192,6 +1192,7 @@ test('local file opening failures return no bytes and permit a fresh read', asyn
       'version failure',
       'read failure',
       'final stat failure',
+      'close failure',
       'target removed',
       'target retargeted',
     ]) {
@@ -1206,7 +1207,7 @@ test('local file opening failures return no bytes and permit a fresh read', asyn
         code: 'EIO',
         statusCode: 503,
       });
-      const uncertain = race === 'read failure' || race === 'final stat failure';
+      const uncertain = ['read failure', 'final stat failure', 'close failure'].includes(race);
       readFailure = race === 'read failure' ? failure : undefined;
       let restoreStat = () => {};
       let restoreClose = () => {};
@@ -1224,7 +1225,9 @@ test('local file opening failures return no bytes and permit a fresh read', asyn
         const originalClose = file.close;
         const close = t.mock.method(file, 'close', async () => {
           closes++;
-          return Reflect.apply(originalClose, file, []);
+          const result = await Reflect.apply(originalClose, file, []);
+          if (race === 'close failure') throw failure;
+          return result;
         });
         restoreClose = () => close.mock.restore();
         if (
@@ -1412,7 +1415,10 @@ test('local file version checks keep the cause of a failed path check', async (t
         try {
           await assert.rejects(files.execute(action, checked), (error: unknown) => {
             assert.equal(error, failure);
-            assert.equal((error as { notRun?: boolean }).notRun, true);
+            assert.equal(
+              (error as { notRun?: boolean }).notRun,
+              failedCheck === 1 ? true : undefined,
+            );
             assert.equal(failure.code, code);
             assert.equal(failure.statusCode, 503);
             assert.doesNotMatch(failure.message, /changed after this file read/);

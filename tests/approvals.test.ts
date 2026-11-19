@@ -4913,6 +4913,60 @@ test(
             }
       });
       await t.test(
+        'uncertain local reads stay fenced after the approval store reloads',
+        async () => {
+          try {
+            for (const action of ['LOCAL_FILES_READ', 'LOCAL_FILES_IMPORT']) {
+              const turn = await begin('Read the synthetic note.');
+              const args = { path: `/synthetic/${randomUUID()}.txt`, version: 'a'.repeat(64) };
+              const id = await propose(turn, action, args);
+              await finish(turn.turnId);
+              const confirmed = await confirm(id, true);
+              assert.ok(confirmed && 'turnId' in confirmed);
+              const resumed = await running(confirmed.turnId);
+              executionResult = () => {
+                throw Object.assign(new Error('EIO: synthetic post-read check failed'), {
+                  statusCode: 503,
+                });
+              };
+              await execute(id);
+              const saved = await stored(id);
+              assert.equal(saved.status, 'uncertain');
+              assert.match(saved.result.error, /EIO: synthetic post-read check failed/);
+              const reopened = await createApprovals(async () => {
+                assert.fail('A saved uncertain read must not execute after a store reload.');
+              });
+              let reads = 0;
+              await assert.rejects(
+                reopened.request(
+                  resumed,
+                  action,
+                  { ...args, version: 'b'.repeat(64) },
+                  {
+                    allowed: true,
+                    run: async () => {
+                      reads++;
+                      return { text: 'New synthetic bytes' };
+                    },
+                  },
+                ),
+                /pending or uncertain outcome/,
+              );
+              assert.equal(reads, 0);
+              assert.equal(
+                await reopened.executeConfirmed(confirmed.turnId, new AbortController().signal),
+                undefined,
+              );
+              assert.deepEqual((await stored(id)).result, saved.result);
+              assert.equal((await stored(id)).status, 'uncertain');
+              await finish(confirmed.turnId, 'failed');
+            }
+          } finally {
+            executionResult = undefined;
+          }
+        },
+      );
+      await t.test(
         'approval clicks bind the card, action, and client retry to the same approval',
         async () => {
           const first = await begin('Synthetic first approval');

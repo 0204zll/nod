@@ -404,6 +404,7 @@ test(
                 if (
                   repeatAfterConfirm &&
                   (text.includes('executed once by the trusted worker') ||
+                    text.includes('confirmed failed or was interrupted') ||
                     text.includes('confirmed did not run, so nothing was done'))
                 ) {
                   const calls = repeatAfterConfirm;
@@ -5440,6 +5441,95 @@ test(
             } finally {
               repeatAfterConfirm = undefined;
               intercepted.mock.restore();
+              syncBuiltinESMExports();
+            }
+          }
+        },
+      );
+      await t.test(
+        'a file path check failure after reading keeps the uncertain repeat fence',
+        async () => {
+          const folder = await mkdtemp(join(localHome, 'uncertain-read-'));
+          for (const action of ['read', 'import']) {
+            const path = join(folder, `${action}.txt`);
+            await writeFile(path, 'Original synthetic bytes');
+            const text = `Open the synthetic file ${randomUUID()}`;
+            const opening = await propose(action, { path }, 'files', text);
+            const [approval] = await approvalsFor(opening);
+            const originalOpen = fs.open;
+            const originalLstat = fs.lstat;
+            let reads = 0;
+            let failed = false;
+            const restoreReads: Array<() => void> = [];
+            const opened = t.mock.method(
+              fs,
+              'open',
+              async (...args: Parameters<typeof fs.open>) => {
+                const file = await Reflect.apply(originalOpen, fs, args);
+                if (args[0] === path) {
+                  const originalRead = file.read;
+                  const intercepted = t.mock.method(
+                    file,
+                    'read',
+                    async (...input: Parameters<typeof file.read>) => {
+                      const result = await Reflect.apply(originalRead, file, input);
+                      reads++;
+                      return result;
+                    },
+                  );
+                  restoreReads.push(() => intercepted.mock.restore());
+                }
+                return file;
+              },
+            );
+            const checked = t.mock.method(
+              fs,
+              'lstat',
+              async (...args: Parameters<typeof fs.lstat>) => {
+                if (args[0] === path && args[1]?.bigint && reads === 1 && !failed) {
+                  failed = true;
+                  await writeFile(path, 'Current synthetic bytes');
+                  throw Object.assign(new Error('EIO: synthetic post-read path check failed'), {
+                    statusCode: 503,
+                  });
+                }
+                return Reflect.apply(originalLstat, fs, args);
+              },
+            );
+            syncBuiltinESMExports();
+            const beforeFiles = new Set(workspaceFiles.keys());
+            try {
+              asked.add(text);
+              repeatAfterConfirm = { tool: 'files', action, args: { path } };
+              const accepted = await request('POST', '/api/messages', {
+                text: 'Yes',
+                replyToMessageId: approval.confirmation_message_id,
+                approvalAnswer: { approvalId: approval.id, approved: true },
+              });
+              assert.equal(accepted.statusCode, 200, accepted.body);
+              const resumed = accepted.json().turnId;
+              await waitFor(resumed, 'failed');
+              const [saved] = await approvalsFor(opening);
+              assert.equal(failed, true);
+              assert.equal(saved.status, 'uncertain');
+              assert.match(saved.result.error, /EIO: synthetic post-read path check failed/);
+              assert.doesNotMatch(JSON.stringify(saved.result), /synthetic bytes/);
+              assert.equal(repeatAfterConfirm, undefined);
+              const failedTurn = (
+                await pool.query('SELECT error FROM turns WHERE id=$1', [resumed])
+              ).rows[0];
+              assert.match(failedTurn.error, /pending or uncertain outcome/);
+              assert.equal(reads, 1);
+              assert.deepEqual(
+                [...workspaceFiles.keys()].filter((key) => !beforeFiles.has(key)),
+                [],
+              );
+              assert.deepEqual(await approvalsFor(resumed), []);
+            } finally {
+              repeatAfterConfirm = undefined;
+              restoreReads.forEach((restore) => restore());
+              opened.mock.restore();
+              checked.mock.restore();
               syncBuiltinESMExports();
             }
           }
