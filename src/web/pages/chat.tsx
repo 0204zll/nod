@@ -953,6 +953,28 @@ export function Chat({
     const id = visibleMessages[anchor]!.id;
     cardsAfter.set(id, [...(cardsAfter.get(id) ?? []), task]);
   }
+  const namedById = new Map(
+    (chat ? [] : (state.tasks ?? []).filter(isNamedChat)).map((task) => [task.id, task]),
+  );
+  const cardAnchor = (task: NamedChat) =>
+    movedCards.has(task.id)
+      ? [...cardsAfter].find(([, tasks]) => tasks.includes(task))?.[0]
+      : task.messageId;
+  const cardRightAfter = (index: number, task: NamedChat) => {
+    const anchor = cardAnchor(task);
+    if (visibleMessages[index]?.id === anchor) return true;
+    for (let next = index + 1; next < visibleMessages.length; next++) {
+      const id = visibleMessages[next]!.id;
+      if (id === anchor) return true;
+      if (id !== task.messageId && !askedInCard.has(id)) return false;
+    }
+    return false;
+  };
+  const requestChat = (message: Message, index: number) => {
+    if (chat || message.role !== 'user' || message.replyTo || !message.chatId) return undefined;
+    const task = namedById.get(message.chatId);
+    return task && !cardRightAfter(index, task) ? task : undefined;
+  };
   const replyToChat = (task: NamedChat) => {
     const question = allMessages.find((message) => message.id === task.questionMessageId);
     if (!question) return onOpenChat?.(chatPath(task.id));
@@ -2425,9 +2447,11 @@ export function Chat({
                       .map((task) =>
                         isNamedChat(task) ? (
                           movedCards.has(task.id) ? (
-                            <div key={task.id} className="chat-receipt-slot">
-                              <ChatReceipt chat={task} onOpen={(path) => onOpenChat?.(path)} />
-                            </div>
+                            visibleMessages[index - 1]?.chatId === task.id ? null : (
+                              <div key={task.id} className="chat-receipt-slot">
+                                <ChatReceipt chat={task} onOpen={(path) => onOpenChat?.(path)} />
+                              </div>
+                            )
                           ) : (
                             chatCard(task)
                           )
@@ -2558,6 +2582,14 @@ export function Chat({
                       <FromNodLink messageId={message.id} onOpen={() => onOpenChat?.('/')} />
                     </div>
                   )}
+                  {(() => {
+                    const task = requestChat(message, index);
+                    return task ? (
+                      <div className="chat-receipt-slot">
+                        <ChatReceipt chat={task} onOpen={(path) => onOpenChat?.(path)} />
+                      </div>
+                    ) : null;
+                  })()}
                   {cardsAfter.get(message.id)?.map(chatCard)}
                   {message.id === introduction.data?.messageId && (
                     <ChatNotifications ownerId={ownerId} messageId={message.id} />
@@ -2787,9 +2819,12 @@ export function Chat({
               }
               onStop={
                 working ||
-                state.tasks?.some((task) =>
-                  ['queued', 'working', 'needs_you'].includes(task.status),
-                )
+                (chat
+                  ? ['queued', 'working'].includes(chat.status)
+                  : state.tasks?.some(
+                      (task) =>
+                        !task.name && ['queued', 'working', 'needs_you'].includes(task.status),
+                    ))
                   ? () => void stop()
                   : undefined
               }
