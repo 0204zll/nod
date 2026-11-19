@@ -121,7 +121,7 @@ export async function assertNewChat(
         .map((chat) => `${chat.name} (chat "${chat.id}")`)
         .join(
           ', ',
-        )}. When this work fits the role or subject of one of them, give it this request with chat and no name, or with reply while it works. Start a new chat only for a different role or subject, and then pass newBecause with the reason none of them fits.`,
+        )}. When this work belongs to the subject of one of them, give it this request with chat and no name, or with reply while it works. Start a new chat only for a different subject, and then pass newBecause with the reason none of them covers it.`,
     );
 }
 
