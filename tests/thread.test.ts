@@ -2345,11 +2345,13 @@ test(
           const next = 'Now find a synthetic copywriter for the named chat fixture.';
           let chat: Task | undefined;
           let reuse: Promise<unknown> | undefined;
+          let record: { chat: { id: string }; messages: Array<{ text: string }> } | undefined;
           inspectObserver = async (context) => {
             if (context.prompt === prompt && !context.background) {
               chat = (await context.task!({
                 action: 'start',
                 name: 'Recruiter',
+                newBecause: 'No synthetic chat hires people yet.',
                 title: 'Find a synthetic designer',
                 message: 'Recruiter is on it.',
                 doneWhen: 'A synthetic shortlist exists',
@@ -2369,6 +2371,10 @@ test(
               return { status: 'succeeded' };
             }
             if (context.prompt === next && !context.background) {
+              record = (await context.task!({
+                action: 'read',
+                chat: 'recruiter',
+              })) as typeof record;
               reuse = context.task!({
                 action: 'start',
                 chat: chat!.id,
@@ -2542,6 +2548,10 @@ test(
           const again = await userMessages.submit(next);
           await waitFor(settled(again.turnId));
           await reuse;
+          assert.equal(record?.chat.id, chat!.id);
+          const read = record!.messages.map(({ text }) => text);
+          assert.ok(read.includes('Second synthetic request in the chat'));
+          assert.ok(!read.includes('Synthetic first message in Finance'));
           await waitFor(async () => (await row()).state === 'done');
           const reused = await row();
           assert.equal(reused.reports_to_main, true);

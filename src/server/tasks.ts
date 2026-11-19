@@ -30,10 +30,12 @@ import { createPreferencesStore, deliveryTime, isQuietTime } from './preferences
 import { personalSecret } from './memory-tree.ts';
 import {
   assertChatNameFree,
+  assertNewChat,
   chatColumnsSql,
   chatName,
   chatNameLimit,
   defaultChatName,
+  latestChatMessages,
   noteChatInput,
   restartChatRequest,
   setChatRequestSource,
@@ -59,6 +61,7 @@ const nextCheck = z.iso.datetime({ offset: true });
 const credentialUrl = /(?<![\w/])(?:[a-z][a-z\d+.-]*:)?\/\/[^/\s?#<>]*@/iu;
 const input = z.discriminatedUnion('action', [
   z.object({ action: z.literal('list') }).strict(),
+  z.object({ action: z.literal('read'), chat: z.string().trim().min(1).max(60) }).strict(),
   z
     .object({
       action: z.literal('reply'),
@@ -291,6 +294,31 @@ export function createTasks(options: {
           : {}),
       };
     });
+  }
+
+  async function chatRecord(client: Pick<PoolClient, 'query'>, threadId: string, ref: string) {
+    const wanted = ref.toLowerCase();
+    const task = (await read(client, { closed: true, thread: threadId })).find(
+      (item) => !item.archivedAt && (item.id === wanted || item.name?.toLowerCase() === wanted),
+    );
+    if (!task)
+      throw failure(`No chat matches "${ref}". Pass the id or name of a chat from taskLedger.`);
+    return {
+      chat: {
+        id: task.id,
+        name: task.name ?? null,
+        goal: task.title,
+        doneWhen: task.doneWhen,
+        status: task.status,
+        now: task.now,
+        result: task.result,
+        question: task.question,
+        waitingFor: task.waitingFor,
+        nextCheck: task.nextCheck,
+        updatedAt: task.updatedAt,
+      },
+      ...(await latestChatMessages(client, ownerId, threadId, task.id)),
+    };
   }
 
   async function chatStart(sessionId: string) {
@@ -599,6 +627,7 @@ export function createTasks(options: {
   ) {
     const request = input.parse(raw);
     if (request.action === 'list') return { tasks: await read(client) };
+    if (request.action === 'read') return chatRecord(client, turn.threadId, request.chat);
     const current = (
       await client.query('SELECT * FROM turns WHERE id=$1 AND owner_id=$2', [turn.turnId, ownerId])
     ).rows[0];
@@ -670,21 +699,8 @@ export function createTasks(options: {
           : ownerStarted && !request.chat
             ? await defaultChatName(client, ownerId, turn.threadId, request.title)
             : null;
-      if (request.name !== undefined) {
-        await assertChatNameFree(client, ownerId, turn.threadId, name!, undefined, true);
-        const others = (
-          await client.query<{ id: string; name: string; title: string }>(
-            `SELECT t.id,t.name,t.title FROM tasks t JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
-             WHERE t.owner_id=$1 AND u.thread_id=$2 AND t.name IS NOT NULL AND t.archived_at IS NULL
-             ORDER BY t.updated_at DESC LIMIT 12`,
-            [ownerId, turn.threadId],
-          )
-        ).rows;
-        if (others.length && !request.newBecause)
-          throw failure(
-            `These chats already exist: ${others.map((chat) => `${chat.name} (chat "${chat.id}")`).join(', ')}. When this work fits the role or subject of one of them, give it this request with chat and no name, or with reply while it works. Start a new chat only for a different role or subject, and then pass newBecause with the reason none of them fits.`,
-          );
-      }
+      if (request.name !== undefined)
+        await assertNewChat(client, ownerId, turn.threadId, name!, request.newBecause);
       const reused = request.chat
         ? (
             await client.query<{ id: string; name: string; state: string }>(

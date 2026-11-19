@@ -42,7 +42,9 @@ Every task Nod starts from your request is a chat with a short name, such as **R
 
 Nod answers where you asked. A follow-up you start inside a chat stays in that chat. Anything that needs you, such as a question or an approval, also shows in your chat with Nod, and you can answer it in either place.
 
-A chat keeps its own conversation. It does not see your chat with Nod or other chats. Your memory, files, connected apps and rules are shared across all of them.
+A chat keeps its own conversation, so one subject does not crowd another. Every chat knows which other chats exist and what each is doing, and reads another chat's goal, result and latest messages when your request depends on it. Ask Finance what the Recruiter found, and it looks. What a chat reads there is information only: it never counts as your permission for an action. Your memory, files, connected apps and rules are shared across all of them.
+
+Nod sends new work to the chat whose role covers it. A second hiring request goes to the Recruiter you already have, not to a new chat.
 
 Each new request in a finished chat stands alone. An earlier message in that chat can give Nod context, but it cannot approve a new action.
 

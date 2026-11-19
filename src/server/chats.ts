@@ -1,4 +1,5 @@
 import type { PoolClient } from 'pg';
+import { inChatSql, withdrawnSql } from './turn-chain.ts';
 
 type Queryable = Pick<PoolClient, 'query'>;
 
@@ -25,6 +26,22 @@ export function chatName(value: string) {
   return name;
 }
 
+export async function namedChats(client: Queryable, ownerId: string, threadId: string) {
+  return (
+    await client.query<{ id: string; name: string }>(
+      `SELECT t.id,t.name FROM tasks t JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
+       WHERE t.owner_id=$1 AND u.thread_id=$2 AND t.name IS NOT NULL AND t.archived_at IS NULL
+       ORDER BY t.updated_at DESC,t.id`,
+      [ownerId, threadId],
+    )
+  ).rows;
+}
+
+const sameName = (name: string) => {
+  const wanted = name.toLowerCase();
+  return (chat: { name: string }) => chat.name.toLowerCase() === wanted;
+};
+
 export async function defaultChatName(
   client: Queryable,
   ownerId: string,
@@ -37,19 +54,21 @@ export async function defaultChatName(
       .slice(0, chatNameLimit - 3)
       .join('')
       .trim() || 'Chat';
-  const taken = new Set(
-    (
-      await client.query<{ name: string }>(
-        `SELECT lower(t.name) AS name FROM tasks t JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
-         WHERE t.owner_id=$1 AND u.thread_id=$2 AND t.name IS NOT NULL AND t.archived_at IS NULL`,
-        [ownerId, threadId],
-      )
-    ).rows.map((row) => row.name),
-  );
+  const chats = await namedChats(client, ownerId, threadId);
   for (let count = 1; ; count++) {
     const name = count === 1 ? base : `${base} ${count}`;
-    if (!taken.has(name.toLowerCase())) return name;
+    if (!chats.some(sameName(name))) return name;
   }
+}
+
+function nameTaken(chat: { id: string; name: string }, hint: boolean) {
+  return Object.assign(
+    failure(
+      `A chat named ${chat.name} already exists.${hint ? ` Send this work to it with chat "${chat.id}".` : ''}`,
+      409,
+    ),
+    { code: 'chat_name_in_use', chatId: chat.id },
+  );
 }
 
 export async function assertChatNameFree(
@@ -58,24 +77,67 @@ export async function assertChatNameFree(
   threadId: string,
   name: string,
   except?: string,
-  hint = false,
 ) {
-  const taken = (
-    await client.query<{ id: string; name: string }>(
-      `SELECT t.id,t.name FROM tasks t JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
-       WHERE t.owner_id=$1 AND u.thread_id=$2 AND t.name IS NOT NULL AND t.archived_at IS NULL
-         AND lower(t.name)=lower($3) AND t.id IS DISTINCT FROM $4::uuid LIMIT 1`,
-      [ownerId, threadId, name, except ?? null],
-    )
-  ).rows[0];
-  if (taken)
-    throw Object.assign(
-      failure(
-        `A chat named ${taken.name} already exists.${hint ? ` Send this work to it with chat "${taken.id}".` : ''}`,
-        409,
-      ),
-      { code: 'chat_name_in_use', chatId: taken.id },
+  const taken = (await namedChats(client, ownerId, threadId)).find(
+    (chat) => chat.id !== except && sameName(name)(chat),
+  );
+  if (taken) throw nameTaken(taken, false);
+}
+
+export async function assertNewChat(
+  client: Queryable,
+  ownerId: string,
+  threadId: string,
+  name: string,
+  reason?: string,
+) {
+  const chats = await namedChats(client, ownerId, threadId);
+  const taken = chats.find(sameName(name));
+  if (taken) throw nameTaken(taken, true);
+  if (chats.length && !reason)
+    throw failure(
+      `These chats already exist: ${chats
+        .slice(0, 12)
+        .map((chat) => `${chat.name} (chat "${chat.id}")`)
+        .join(
+          ', ',
+        )}. When this work fits the role or subject of one of them, give it this request with chat and no name, or with reply while it works. Start a new chat only for a different role or subject, and then pass newBecause with the reason none of them fits.`,
     );
+}
+
+export async function latestChatMessages(
+  client: Queryable,
+  ownerId: string,
+  threadId: string,
+  chatId: string,
+) {
+  const { rows } = await client.query<{
+    id: string;
+    role: string;
+    text: string;
+    shortened: boolean;
+    created_at: Date;
+    total: number;
+  }>(
+    `SELECT * FROM (
+       SELECT m.id,m.role,left(m.text,2000) AS text,length(m.text)>2000 AS shortened,m.created_at,
+         count(*) OVER ()::int AS total
+       FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND m.text<>''
+         AND ${inChatSql('m', '$3::uuid')} AND NOT (m.role='user' AND ${withdrawnSql('m')})
+       ORDER BY m.created_at DESC,m.id DESC LIMIT 12
+     ) latest ORDER BY created_at,id`,
+    [ownerId, threadId, chatId],
+  );
+  return {
+    messages: rows.map((row) => ({
+      id: row.id,
+      from: row.role === 'user' ? 'owner' : 'nod',
+      text: row.text,
+      ...(row.shortened ? { shortened: true } : {}),
+      at: row.created_at.toISOString(),
+    })),
+    earlierMessages: Math.max(0, (rows[0]?.total ?? 0) - rows.length),
+  };
 }
 
 export async function chatOnlyPlacement(
