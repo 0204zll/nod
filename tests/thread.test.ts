@@ -2572,10 +2572,10 @@ test(
               method: 'POST',
               url: '/api/chats',
               headers,
-              payload: { about: 'Synthetic travel plans for spring' },
+              payload: {},
             })
           ).json();
-          assert.equal(unnamed.name, 'Synthetic travel');
+          assert.equal(unnamed.name, 'New chat');
           assert.equal(unnamed.nameAuto, true);
           const trip = await userMessages.submit('Synthetic travel plans for spring', [], {
             chatId: unnamed.id,

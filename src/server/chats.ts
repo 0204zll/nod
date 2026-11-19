@@ -6,6 +6,7 @@ type Queryable = Pick<PoolClient, 'query'>;
 export type MessageKind = 'plain' | 'decision' | 'notice';
 
 export const chatNameLimit = 24;
+export const chatResultLimit = 300;
 
 export const chatColumnsSql = `
   ALTER TABLE tasks ADD COLUMN IF NOT EXISTS name text;

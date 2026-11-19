@@ -34,6 +34,7 @@ import {
   chatColumnsSql,
   chatName,
   chatNameLimit,
+  chatResultLimit,
   defaultChatName,
   latestChatMessages,
   nameAutoChat,
@@ -883,9 +884,17 @@ export function createTasks(options: {
             )
           : await client.query(
               `UPDATE tasks SET state=$3,result=$4,closed_at=now(),updated_at=now() WHERE id=$1 AND owner_id=$2 AND state='open'
-           AND applied_revision=revision`,
+           AND applied_revision=revision AND (name IS NULL OR length($4)<=${chatResultLimit})`,
               [id, ownerId, request.status, request.result],
             );
+      if (
+        !updated.rowCount &&
+        request.action === 'finish' &&
+        request.result.length > chatResultLimit
+      )
+        throw failure(
+          `A chat's result is one sentence of at most ${chatResultLimit} characters: the owner reads it on the chat's card. Call finish again with that sentence, then give the full answer as your final text.`,
+        );
       if (!updated.rowCount)
         throw failure(
           'The task is closed, its step index is out of range, or it has an owner update to read.',
@@ -1095,7 +1104,6 @@ export function createTasks(options: {
       const body = z
         .object({
           name: z.string().optional(),
-          about: z.string().max(100_000).optional(),
           brief: z.string().trim().max(2000).optional(),
         })
         .strict()
@@ -1106,7 +1114,7 @@ export function createTasks(options: {
         const given = body.name !== undefined;
         const name = given
           ? chatName(body.name!)
-          : await defaultChatName(client, ownerId, thread.id, body.about ?? '');
+          : await defaultChatName(client, ownerId, thread.id, 'New chat');
         if (given) await assertChatNameFree(client, ownerId, thread.id, name);
         const turnId = randomUUID();
         await client.query(
