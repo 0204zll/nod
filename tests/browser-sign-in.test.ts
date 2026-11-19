@@ -1076,7 +1076,7 @@ test(
 test(
   'native sign-in methods bind observed controls and refuse changed or repeated selections',
   { skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true', timeout: 90_000 },
-  async () => {
+  async (t) => {
     const directory = await mkdtemp(join(tmpdir(), 'nod-method-native-'));
     const received: string[] = [];
     const cancelling = new AbortController();
@@ -1385,7 +1385,34 @@ test(
           const current = await inspector.signInControl({ pixel: { x: 150, y: 100 } });
           inspector.close();
           inspector = await openDevtools(String(connection.cdpUrl), tab.targetId);
-          await inspector.selectSignInControl(current);
+          let delayed = false;
+          let guardTimer: ReturnType<typeof setTimeout> | undefined;
+          const originalSend = WebSocket.prototype.send;
+          const sending = t.mock.method(
+            WebSocket.prototype,
+            'send',
+            function (this: WebSocket, data: Parameters<WebSocket['send']>[0]) {
+              const message = typeof data === 'string' ? JSON.parse(data) : undefined;
+              if (
+                path === '/framed' &&
+                !delayed &&
+                message?.method === 'Runtime.callFunctionOn' &&
+                message.params?.functionDeclaration?.includes("globalThis[name + 'Guard'] = guard")
+              ) {
+                delayed = true;
+                guardTimer = setTimeout(() => originalSend.call(this, data), 5200);
+                return;
+              }
+              originalSend.call(this, data);
+            },
+          );
+          try {
+            await inspector.selectSignInControl(current);
+          } finally {
+            clearTimeout(guardTimer);
+            sending.mock.restore();
+          }
+          assert.equal(delayed, path === '/framed');
           const deadline = Date.now() + 5000;
           while (received.length < 4 + index && Date.now() < deadline) await delay(10);
           assert.deepEqual(received, Array(4 + index).fill('/selected'));

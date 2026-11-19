@@ -1052,12 +1052,13 @@ export async function openDevtools(url: string, targetId: string, signal?: Abort
         await check();
         await send('Runtime.enable', {}, session);
         await send('Runtime.addBinding', { name, executionContextId: context }, session);
+        let resolveClick!: (received: boolean) => void;
         const clicked = new Promise<boolean>((resolve) => {
+          resolveClick = resolve;
           bindings.set(name, (payload) => {
             outcome = payload === 'accepted';
             resolve(outcome);
           });
-          timer = setTimeout(() => resolve(false), 5000);
         });
         await send(
           'Runtime.callFunctionOn',
@@ -1091,6 +1092,7 @@ export async function openDevtools(url: string, targetId: string, signal?: Abort
           page,
         );
         pressed = false;
+        timer = setTimeout(() => resolveClick(false), 5000);
         if (!(await clicked)) throw new Error('The sign-in control did not receive the click.');
       } finally {
         if (pressed)
