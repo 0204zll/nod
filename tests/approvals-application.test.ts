@@ -5449,6 +5449,8 @@ test(
       await t.test(
         'a file path check failure after reading keeps the uncertain repeat fence',
         async () => {
+          const enabled = await request('PATCH', '/api/preferences', { localFilesEnabled: true });
+          assert.equal(enabled.statusCode, 200, enabled.body);
           const folder = await mkdtemp(join(localHome, 'uncertain-read-'));
           for (const action of ['read', 'import']) {
             const path = join(folder, `${action}.txt`);
@@ -5456,6 +5458,10 @@ test(
             const text = `Open the synthetic file ${randomUUID()}`;
             const opening = await propose(action, { path }, 'files', text);
             const [approval] = await approvalsFor(opening);
+            assert.equal(
+              approval.action,
+              action === 'read' ? 'LOCAL_FILES_READ' : 'LOCAL_FILES_IMPORT',
+            );
             const originalOpen = fs.open;
             const originalLstat = fs.lstat;
             let reads = 0;
