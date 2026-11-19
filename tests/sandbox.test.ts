@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { existsSync } from 'node:fs';
+import { existsSync, type BigIntStats } from 'node:fs';
 import fs from 'node:fs/promises';
 import {
   chmod,
@@ -1110,17 +1110,37 @@ test('local file reads refuse a write that occurs before the read completes', as
   const prototype = Object.getPrototypeOf(handle) as typeof handle;
   const read = prototype.read;
   await handle.close();
+  const fields = ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const;
+  const version = (info: BigIntStats) => fields.map((key) => String(info[key]));
+  let writes = 0;
+  let observed: unknown;
   const intercepted = t.mock.method(
     prototype,
     'read',
     async function (this: typeof handle, ...args: Parameters<typeof handle.read>) {
       const result = await Reflect.apply(read, this, args);
+      const before = await this.stat({ bigint: true });
       await writeFile(path, 'new');
+      writes++;
+      observed = {
+        before: version(before),
+        after: version(await this.stat({ bigint: true })),
+        path: version(await lstat(path, { bigint: true })),
+      };
       return result;
     },
   );
   try {
-    await assert.rejects(files.execute('LOCAL_FILES_READ', checked), { notRun: true });
+    const result = await files.execute('LOCAL_FILES_READ', checked).then(
+      (value) => ({ value, error: undefined }),
+      (error: unknown) => ({ value: undefined, error }),
+    );
+    assert.equal(writes, 1);
+    assert.equal(
+      (result.error as { notRun?: boolean } | undefined)?.notRun,
+      true,
+      JSON.stringify({ observed, result: result.value }),
+    );
   } finally {
     intercepted.mock.restore();
   }
