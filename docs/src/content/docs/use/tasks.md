@@ -21,6 +21,35 @@ The main chat stays available while tasks work. Each task keeps its goal and his
 
 Tasks share one [workspace](/use/workspace/#one-workspace-for-all-tasks) and owner memory. Each task has its own working folder and saved session. See [Task sessions](/how-it-works/task-sessions/) for the architecture.
 
+## Named chats
+
+Every task Nod starts from your request is a chat with a short name, such as **Recruiter** or **Finance**. If Nod gives no name, the chat takes the first words of the task's title, and you can rename it. The sidebar starts with **Nod**, where you ask for anything. Your chats follow, each with its current step beneath the name. To create one yourself, select **New chat** and type a name.
+
+![The sidebar with Nod first and the Finance and Recruiter chats beneath it, then New chat.](../../../assets/screens/named-chats.png)
+
+| You want to                      | Do this                                                                               |
+| -------------------------------- | ------------------------------------------------------------------------------------- |
+| Hand over a piece of work        | Ask Nod. It starts a chat for the work and stays free.                                |
+| See the whole conversation       | Select the chat in the sidebar.                                                       |
+| Ask a follow-up                  | Type in the chat. Nod answers there.                                                  |
+| Keep a subject in one place      | Select **New chat** and name it, or ask Nod for it.                                   |
+| Send related work                | Ask Nod. It sends the work to the chat that already exists.                           |
+| Rename, pin or archive           | Open the chat and use the menu at the top right.                                      |
+| See steps, activity or the model | Open the chat's menu and select **Details**.                                          |
+| Find an older or archived chat   | Select **Earlier** under the chat list. Open an archived chat and select **Restore**. |
+| Search one chat                  | Open the chat, then search. Results come from that chat only.                         |
+| Jump to a chat                   | Open the command menu and type the chat's name.                                       |
+
+Nod answers where you asked. A follow-up you start inside a chat stays in that chat. Anything that needs you, such as a question or an approval, also shows in your chat with Nod, and you can answer it in either place.
+
+A chat keeps its own conversation. It does not see your chat with Nod or other chats. Your memory, files, connected apps and rules are shared across all of them.
+
+Each new request in a finished chat stands alone. An earlier message in that chat can give Nod context, but it cannot approve a new action.
+
+A pinned chat stays in the list. Other chats leave it a day after they finish and move to **Earlier**. When a reply arrives only in a chat while Nod is in the background, the browser notification opens that chat.
+
+Chats are part of Nod web and desktop. Telegram and WhatsApp keep one conversation: reply to a chat's message there to continue it.
+
 ## Scheduled work
 
 Open **Scheduled** to review open tasks and upcoming schedules. Open tasks appear first, with the same live line as in chat. Expand **Inactive** for paused schedules. Open a schedule’s **See details → Runs** for its history. See [Schedules](/use/schedules/).

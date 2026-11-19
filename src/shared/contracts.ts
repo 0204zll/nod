@@ -41,6 +41,7 @@ export interface Message {
   approval?: MessageApproval;
   cardAnswer?: true;
   work?: { kind: 'task' | 'schedule'; id: string; title: string };
+  chatId?: string | null;
 }
 export type ApprovalState = 'pending' | 'working' | 'done' | 'declined' | 'expired' | 'uncertain';
 export interface MessageApproval {
@@ -321,6 +322,11 @@ export interface Task {
   model?: ModelSelection | null;
   work?: WorkKind;
   scheduleModel?: ModelSelection;
+  name?: string;
+  pinned?: boolean;
+  reportsToMain?: boolean;
+  archivedAt?: string | null;
+  chatOnly?: { count: number; latestAt: string | null };
 }
 export interface TaskDetail {
   task: Task;

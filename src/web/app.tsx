@@ -1,6 +1,17 @@
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft } from './components/icons';
 import { Chat } from './pages/chat';
+import { NamedChat } from './pages/named-chat';
+import { ChatList } from './components/named-chats';
+import {
+  chatIdOf,
+  chatUnread,
+  earlierChats,
+  isNamedChat,
+  readChatCursors,
+  sidebarChats,
+  writeChatCursor,
+} from './lib/named-chats';
 import { Usage } from './pages/usage';
 import { Vault } from './pages/vault';
 import { Apps } from './pages/apps';
@@ -134,6 +145,41 @@ function Workspace({
     messageId: string;
   } | null>();
   const [chatRequests, setChatRequests] = useState<Array<{ id: string; text: string }>>([]);
+  const ownerId = session.user!.id;
+  const openChatId = chatIdOf(path);
+  const [chatCursors, setChatCursors] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (state?.threadId) setChatCursors(readChatCursors(ownerId, state.threadId));
+  }, [ownerId, state?.threadId]);
+  const namedChats = sidebarChats(state?.tasks, chatCursors, openChatId);
+  const openChat = state?.tasks?.filter(isNamedChat).find((task) => task.id === openChatId);
+  const chatDrafts = Object.fromEntries(
+    namedChats.flatMap((chat) => {
+      if (chat.id === openChatId || !state) return [];
+      try {
+        const saved = JSON.parse(
+          window.localStorage.getItem(`nod.chat-draft.${ownerId}.${state.threadId}.${chat.id}`) ??
+            'null',
+        ) as { text?: string } | null;
+        const text = saved?.text?.trim();
+        return text ? [[chat.id, text.slice(0, 60)]] : [];
+      } catch {
+        return [];
+      }
+    }),
+  ) as Record<string, string>;
+  const chatTurns = new Set(
+    (state?.activity ?? [])
+      .filter((item) => state?.tasks?.some((task) => task.id === item.taskId && task.name))
+      .map((item) => item.turnId),
+  );
+  const mainStreams = chatTurns.size
+    ? Object.fromEntries(
+        Object.entries(streams).filter(
+          ([id]) => ![...chatTurns].some((turnId) => id.includes(turnId)),
+        ),
+      )
+    : streams;
   const askInChat = (text: string) => {
     setChatRequests((current) => [...current, { id: crypto.randomUUID(), text }]);
     navigate('/');
@@ -201,7 +247,41 @@ function Workspace({
       {!settingsPage(path) && (
         <Sidebar
           path={path}
-          unreadCount={unread.count}
+          chats={
+            <ChatList
+              chats={namedChats}
+              activeId={openChatId}
+              unread={(chat) => chat.id !== openChatId && chatUnread(chat, chatCursors)}
+              drafts={chatDrafts}
+              earlier={earlierChats(state?.tasks, namedChats)}
+              onNavigate={navigate}
+              onCreated={(chat) => {
+                void refresh().then(() => {
+                  navigate(`/chat/${chat.id}`);
+                  window.setTimeout(
+                    () =>
+                      document
+                        .querySelector<HTMLElement>('.named-chat-route .composer-editor')
+                        ?.focus(),
+                    250,
+                  );
+                });
+              }}
+            />
+          }
+          unreadCount={Math.max(
+            0,
+            unread.count -
+              (state && unread.cursor
+                ? state.messages.filter(
+                    (message) =>
+                      message.role === 'assistant' &&
+                      message.chatId &&
+                      message.createdAt > unread.cursor!.createdAt &&
+                      (chatCursors[message.chatId] ?? '') >= message.createdAt,
+                  ).length
+                : 0),
+          )}
           unreadPending={unread.pending}
           presence={
             !connected
@@ -228,9 +308,11 @@ function Workspace({
                 <Chat
                   ownerId={session.user!.id}
                   state={state}
-                  streams={streams}
+                  streams={mainStreams}
                   connected={connected}
                   refresh={refresh}
+                  onOpenChat={navigate}
+                  chatUnread={(chat) => chatUnread(chat, chatCursors)}
                   initialFocusMessageId={pendingMessageFocus}
                   onReturnToMemory={onReturnToMemory}
                   toolbarActions={
@@ -268,6 +350,23 @@ function Workspace({
                 <Vault hidden={path !== '/vault'} onAsk={askInChat} />
               </>
             )}
+            {openChatId && state && openChat && (
+              <NamedChat
+                key={openChat.id}
+                chat={openChat}
+                ownerId={ownerId}
+                state={state}
+                streams={streams}
+                connected={connected}
+                refresh={refresh}
+                visible
+                onNavigate={navigate}
+                onRead={(chatId, at) =>
+                  setChatCursors(writeChatCursor(ownerId, state.threadId, chatId, at))
+                }
+                onFeedback={onFeedback}
+              />
+            )}
             {path === '/apps' && (
               <Apps key={session.user!.id} configuration={state?.configuration} onAsk={askInChat} />
             )}
@@ -279,6 +378,7 @@ function Workspace({
             {settings}
             {!settingsPage(path) &&
               !preparedWorkId(path) &&
+              !(openChatId && (openChat || !state)) &&
               !sidebarItems.some((item) => item.path === path) && (
                 <div className="empty-state">
                   <h1>This page isn’t here.</h1>

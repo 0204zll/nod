@@ -42,7 +42,19 @@ function highlighted(text: string, query: string) {
     .map((part, index) => (index % 2 ? <mark key={index}>{part}</mark> : part));
 }
 
-export function ChatTools({ files, tasks = [] }: { files: ImagePreview[]; tasks?: Task[] }) {
+export function ChatTools({
+  files,
+  tasks = [],
+  enabled = true,
+  chatId,
+}: {
+  files: ImagePreview[];
+  tasks?: Task[];
+  enabled?: boolean;
+  chatId?: string;
+}) {
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
   const drawer = useArtifactDrawer();
   const desktop = desktopSettingsAvailable();
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
@@ -92,7 +104,7 @@ export function ChatTools({ files, tasks = [] }: { files: ImagePreview[]; tasks?
         isEditingTarget(event.target)
       )
         return;
-      if (document.querySelector('[role="dialog"],dialog[open]')) return;
+      if (!enabledRef.current || document.querySelector('[role="dialog"],dialog[open]')) return;
       if (
         event.key.toLowerCase() === 'k' ||
         (desktopSettingsAvailable() && event.key.toLowerCase() === 'f')
@@ -115,7 +127,7 @@ export function ChatTools({ files, tasks = [] }: { files: ImagePreview[]; tasks?
     setSearch({ query: trimmedQuery, items: [], error: '', loading: true });
     const timer = setTimeout(() => {
       void api<Array<Message & { snippet?: string }>>(
-        `/api/messages/search?q=${encodeURIComponent(trimmedQuery)}`,
+        `/api/messages/search?q=${encodeURIComponent(trimmedQuery)}${chatId ? `&chat=${chatId}` : ''}`,
         { signal: controller.signal },
       )
         .then((items) => {
@@ -151,6 +163,11 @@ export function ChatTools({ files, tasks = [] }: { files: ImagePreview[]; tasks?
           },
         ]
       : []),
+    {
+      id: 'new-chat',
+      label: 'New chat',
+      action: () => window.dispatchEvent(new CustomEvent('nod:new-chat')),
+    },
     ...sidebarItems.map((item) => ({
       id: item.path,
       label: `Open ${item.label}`,
@@ -165,11 +182,13 @@ export function ChatTools({ files, tasks = [] }: { files: ImagePreview[]; tasks?
       .filter((task) => task.messageId)
       .map((task) => ({
         id: task.id,
-        label: `Go to ${task.title}`,
+        label: task.name ? `Open ${task.name}` : `Go to ${task.title}`,
         action: () =>
-          window.dispatchEvent(
-            new CustomEvent('nod:focus-message', { detail: { messageId: task.messageId } }),
-          ),
+          task.name
+            ? navigate(`/chat/${task.id}`)
+            : window.dispatchEvent(
+                new CustomEvent('nod:focus-message', { detail: { messageId: task.messageId } }),
+              ),
       })),
   ]
     .filter((item) => item.label.toLocaleLowerCase().includes(query.toLocaleLowerCase()))
@@ -182,7 +201,7 @@ export function ChatTools({ files, tasks = [] }: { files: ImagePreview[]; tasks?
           action: () =>
             window.dispatchEvent(
               new CustomEvent('nod:focus-message', {
-                detail: { messageId: message.id },
+                detail: { messageId: message.id, ...(chatId ? { chatId } : {}) },
               }),
             ),
         }))

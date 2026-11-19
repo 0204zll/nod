@@ -35,6 +35,7 @@ import {
   workOriginSql,
   taskMessageSql,
 } from './turn-chain.ts';
+import { chatOnlyPlacement, noteSessionInput, type MessageKind } from './chats.ts';
 import { dataRoot, databaseUrl, ownerId } from './config.ts';
 import { delta, refresh, working } from './events.ts';
 import {
@@ -131,6 +132,7 @@ interface SubmitUserMessageOptions {
   replyToMessageId?: string;
   replyQuote?: string;
   seenMessageId?: string;
+  chatId?: string;
   clientMessageId?: string;
   questionAnswer?: QuestionAnswer;
   approvalAnswer?: { approvalId: string; approved: boolean };
@@ -228,6 +230,7 @@ export interface ThreadDependencies {
   taskContext?: (turn: TurnRef) => Promise<RuntimeContext['taskContext']>;
   settleTask?: (turn: TurnRef, result: string) => Promise<void>;
   taskLedger?: (threadId: string) => Promise<NonNullable<RuntimeContext['tasks']>>;
+  chatStart?: (sessionId: string) => Promise<Date | null>;
   startTurn?: (turn: TurnRef) => Promise<void>;
   runTurn: (context: RuntimeContext) => Promise<RuntimeResult>;
   speech: Pick<SpeechService, 'synthesize'> & Partial<Pick<SpeechService, 'configured'>>;
@@ -427,6 +430,7 @@ export async function insertAssistantMessage(
   presentation?: Presentation,
   answerChoices?: AnswerChoices,
   analytics?: CaptureAnalytics,
+  kind?: MessageKind,
 ) {
   const visual =
     presentation === undefined
@@ -486,8 +490,14 @@ export async function insertAssistantMessage(
     ).rows[0]?.id;
   await assertReplyTarget(client, turn.threadId, replyToMessageId);
   const id = randomUUID();
+  const chatOnly = await chatOnlyPlacement(
+    client,
+    ownerId,
+    turn.turnId,
+    kind ?? (choices || streamId?.includes('failure') ? 'notice' : 'plain'),
+  );
   await client.query(
-    'INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,attachments,stream_id,reply_to_message_id,presentation,answer_choices) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
+    'INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,attachments,stream_id,reply_to_message_id,presentation,answer_choices,chat_only) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)',
     [
       id,
       ownerId,
@@ -500,6 +510,7 @@ export async function insertAssistantMessage(
       replyToMessageId ?? null,
       visual ? JSON.stringify(visual) : null,
       choices ? JSON.stringify(choices) : null,
+      chatOnly,
     ],
   );
   if (analytics) {
@@ -690,6 +701,7 @@ async function readAnswer(
     threadId,
     replyToMessageId: options.replyToMessageId,
     seenMessageId: options.seenMessageId,
+    chatId: options.chatId,
     hasAttachments,
   });
 }
@@ -697,9 +709,16 @@ async function readAnswer(
 type TaskReply = (
   client: PoolClient,
   threadId: string,
-  messageId: string,
+  messageId: string | undefined,
+  chatId?: string,
 ) => Promise<
-  | { id: string; session_id: string; background: boolean; record(turnId: string): Promise<void> }
+  | {
+      id: string | null;
+      session_id: string;
+      background: boolean;
+      record(turnId: string): Promise<boolean>;
+      saved(messageId: string): Promise<void>;
+    }
   | undefined
 >;
 
@@ -720,6 +739,7 @@ export async function submitUserMessage(
     channel,
     replyToMessageId: options.replyToMessageId,
     seenMessageId: options.seenMessageId,
+    chatId: options.chatId,
     clientMessageId: options.clientMessageId,
     sourceId: options.sourceId,
     hasAttachments: attachments.length > 0 || Boolean(options.prepareAttachments),
@@ -854,9 +874,9 @@ export async function submitUserMessage(
     const messageId = options.clientMessageId ?? randomUUID();
     const turnId = randomUUID();
     const taskTarget =
-      live &&
-      options.replyToMessageId &&
-      (await taskReply?.(client, thread.id, options.replyToMessageId));
+      live && (options.replyToMessageId || options.chatId)
+        ? await taskReply?.(client, thread.id, options.replyToMessageId, options.chatId)
+        : undefined;
     const question = live
       ? taskTarget ||
         choiceQuestion ||
@@ -890,10 +910,12 @@ export async function submitUserMessage(
         live ? 'queued' : 'cancelled',
       ],
     );
-    if (taskTarget) await taskTarget.record(turnId);
+    const chatOnly = taskTarget ? (await taskTarget.record(turnId)) && channel === 'web' : false;
+    if (question && !taskTarget && !options.chatId && question.session_id !== thread.id)
+      await noteSessionInput(client, ownerId, question.session_id);
     const prepared = (await options.prepareAttachments?.(client, thread.id)) ?? [];
     await client.query(
-      "INSERT INTO messages(id,owner_id,role,text,display_text,thread_id,turn_id,attachments,reply_to_message_id,reply_quote,audio_caption,question_answer) VALUES($1,$2,'user',$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+      "INSERT INTO messages(id,owner_id,role,text,display_text,thread_id,turn_id,attachments,reply_to_message_id,reply_quote,audio_caption,question_answer,chat_only) VALUES($1,$2,'user',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
       [
         messageId,
         ownerId,
@@ -906,8 +928,10 @@ export async function submitUserMessage(
         options.replyQuote ?? null,
         options.audioCaption ?? null,
         options.questionAnswer ? JSON.stringify(options.questionAnswer) : null,
+        chatOnly,
       ],
     );
+    if (taskTarget) await taskTarget.saved(messageId);
     if (live) await sendDrain(client, thread.id);
     markInserted();
     return { threadId: thread.id, turnId, messageId };
@@ -1817,6 +1841,10 @@ async function loadMessage(messageId: string | null) {
 async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
   const threadId = turn.thread_id as string;
   const sourceMessageId: string | null = turn.message_id ?? null;
+  const chatStart =
+    turn.session_id === threadId
+      ? null
+      : ((await dependencies.chatStart?.(turn.session_id)) ?? null);
   const [
     source,
     history,
@@ -1846,8 +1874,19 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
        AND (NOT $5::boolean OR (m.created_at<=boundary.at AND
          (u.id IS NULL OR u.session_id=$6
           OR (u.status IN ('succeeded','failed','cancelled') AND u.finished_at<=boundary.at))))
+       AND (NOT m.chat_only OR u.session_id=$6)
+       AND ($7::timestamptz IS NULL OR u.session_id=$6
+         OR ((u.id IS NULL OR u.session_id=$2) AND m.created_at<$7))
        ORDER BY m.created_at DESC,m.id DESC LIMIT 30) m ORDER BY created_at,id`,
-      [ownerId, threadId, sourceMessageId, turn.id, Boolean(turn.background), turn.session_id],
+      [
+        ownerId,
+        threadId,
+        sourceMessageId,
+        turn.id,
+        Boolean(turn.background),
+        turn.session_id,
+        chatStart,
+      ],
     ),
     pool.query<{ status: string; error: string | null; withdrawn: boolean }>(
       `SELECT status,error,withdrawn FROM turns WHERE owner_id=$1 AND session_id=$2 AND id<>$3 AND started_at IS NOT NULL
@@ -2664,6 +2703,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
           undefined,
           answerChoices,
           dependencies.analytics,
+          'decision',
         );
         if (result.status === 'waiting_credentials' || result.waitingFor === 'credentials')
           await dependencies.bindVerificationQuestion?.(turnId, messageId, client);

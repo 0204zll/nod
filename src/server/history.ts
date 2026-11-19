@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { Pool } from 'pg';
-import { withdrawnSql } from './turn-chain.ts';
+import { inChatSql, withdrawnSql } from './turn-chain.ts';
 export function activeThreadSql(alias = 'm') {
   return `${alias}.thread_id=(SELECT th.id FROM threads th WHERE th.owner_id=${alias}.owner_id AND th.archived_at IS NULL)`;
 }
@@ -14,6 +14,7 @@ const inputSchema = z
     to: z.iso.date().optional(),
     around: z.uuid().optional(),
     order: z.enum(['relevance', 'newest']).default('relevance'),
+    chat: z.uuid().optional(),
   })
   .refine((input) => input.query || input.around || input.from || input.to, {
     message: 'Search with query, from or to, or read around a result id.',
@@ -43,7 +44,13 @@ export function createHistorySearch({
   const kept = (alias: string) =>
     standing ? ` AND NOT (${alias}.role='user' AND ${withdrawnSql(alias)})` : '';
   return async function search(raw: unknown) {
-    const { query, before, cursor, from, to, around, order } = inputSchema.parse(raw);
+    const { query, before, cursor, from, to, around, order, chat } = inputSchema.parse(raw);
+    const inChat = (alias: string) =>
+      !chat
+        ? ''
+        : alias === 'u'
+          ? ` AND u.task_id='${chat}'::uuid`
+          : ` AND ${inChatSql(alias, `'${chat}'::uuid`)}`;
     if (around) {
       const { rows } = await pool.query<HistoryMessage>(
         `WITH target AS (
@@ -80,7 +87,7 @@ export function createHistorySearch({
       `${alias}.owner_id=$1 AND ${activeThreadSql(alias)}
        AND ($3::timestamptz IS NULL OR (${alias}.created_at,${alias}.id)<($3,$4::uuid))
        AND ($5::date IS NULL OR (${alias}.created_at AT TIME ZONE terms.zone)::date>=$5)
-       AND ($6::date IS NULL OR (${alias}.created_at AT TIME ZONE terms.zone)::date<=$6)`;
+       AND ($6::date IS NULL OR (${alias}.created_at AT TIME ZONE terms.zone)::date<=$6)${inChat(alias)}`;
     const where = (alias: string, column: string) =>
       `${scope(alias)} AND ($2::text IS NULL OR to_tsvector('english',${column}) @@ terms.q)`;
     const ordered = (alias: string, column: string) =>
@@ -132,7 +139,7 @@ export function createHistorySearch({
       `WITH terms AS (SELECT replace(plainto_tsquery('english',coalesce($4,''))::text,'&','|')::tsquery AS q),
        thread AS (
          SELECT m.id,m.owner_id,m.role,m.text,m.turn_id,m.created_at,row_number() OVER (ORDER BY m.created_at,m.id) AS n
-         FROM messages m WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}),
+         FROM messages m WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${activeThreadSql('m')}${inChat('m')}),
        picked AS (SELECT t.n,ids.place,t.id FROM unnest($2::uuid[]) WITH ORDINALITY ids(id,place) JOIN thread t ON t.id=ids.id),
        shown AS (
          SELECT t.*,bool_or(p.id=t.id) AS match,min(p.place) AS place FROM thread t

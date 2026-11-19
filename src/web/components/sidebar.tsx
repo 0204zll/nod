@@ -1,4 +1,4 @@
-import { type Ref, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { Fragment, type Ref, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { LayoutGrid, Moon, Settings, Sun } from './icons';
 import { BrandMark } from './brand';
 import { Tooltip } from './tooltip';
@@ -14,6 +14,7 @@ import {
 
 export function Sidebar({
   path,
+  chats,
   unreadCount = 0,
   unreadPending = false,
   presence,
@@ -23,6 +24,7 @@ export function Sidebar({
   actionsRef,
 }: {
   path: string;
+  chats?: React.ReactNode;
   unreadCount?: number;
   unreadPending?: boolean;
   presence?: 'working' | 'waiting';
@@ -42,7 +44,7 @@ export function Sidebar({
           : 'Checking unread messages'
         : `${unreadCount} unread ${unreadCount === 1 ? 'message' : 'messages'}`;
   const chatLabel = [
-    'Chat',
+    'Nod',
     unreadCount || unreadPending ? unreadLabel : null,
     presence === 'waiting' ? 'waiting for you' : presence === 'working' ? 'Nod is working' : null,
   ]
@@ -198,6 +200,49 @@ export function Sidebar({
       document.removeEventListener('visibilitychange', clear);
     };
   }, [mac, desktop]);
+  const navItem = (item: (typeof sidebarItems)[number]) => {
+    const Icon = item.icon;
+    const label = desktop ? shortcutLabel(item.key, mac) : undefined;
+    return (
+      <Fragment key={item.path}>
+        <li>
+          <Tooltip
+            content={item.path === '/' ? 'Nod' : item.label}
+            shortcut={label}
+            side="right"
+            forceOpen={hints}
+          >
+            <a
+              href={item.path}
+              aria-label={item.path === '/' ? chatLabel : item.label}
+              aria-current={path === item.path ? 'page' : undefined}
+              aria-keyshortcuts={desktop ? `${mac ? 'Meta' : 'Control'}+${item.key}` : undefined}
+              className={`nav-link ${path === item.path ? 'nav-link-active' : ''}`}
+              onClick={(event) => {
+                if (
+                  event.metaKey ||
+                  event.ctrlKey ||
+                  event.shiftKey ||
+                  event.altKey ||
+                  event.button !== 0
+                )
+                  return;
+                event.preventDefault();
+                onNavigate(item.path);
+              }}
+            >
+              <span className="nav-icon">
+                <Icon size={20} solid={path === item.path} aria-hidden="true" />
+                {item.path === '/' && unreadBadge}
+                {item.path === '/' && statusDot}
+              </span>
+              <span className="nav-label">{item.path === '/' ? 'Nod' : item.label}</span>
+            </a>
+          </Tooltip>
+        </li>
+      </Fragment>
+    );
+  };
   return (
     <aside className="sidebar" aria-label="Sidebar">
       <div className="sidebar-header">
@@ -215,7 +260,7 @@ export function Sidebar({
           <span>Nod</span>
         </a>
       </div>
-      <nav className="main-nav" aria-label="Main navigation" id="sidebar-navigation">
+      <nav className="main-nav main-nav-chats" aria-label="Main navigation" id="sidebar-navigation">
         <ul
           onKeyDown={(event) => {
             if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
@@ -236,44 +281,47 @@ export function Sidebar({
             links[next]?.focus();
           }}
         >
-          {sidebarItems.map((item) => {
-            const Icon = item.icon;
-            const label = desktop ? shortcutLabel(item.key, mac) : undefined;
-            return (
-              <li key={item.path}>
-                <Tooltip content={item.label} shortcut={label} side="right" forceOpen={hints}>
-                  <a
-                    href={item.path}
-                    aria-label={item.path === '/' ? chatLabel : item.label}
-                    aria-current={path === item.path ? 'page' : undefined}
-                    aria-keyshortcuts={
-                      desktop ? `${mac ? 'Meta' : 'Control'}+${item.key}` : undefined
-                    }
-                    className={`nav-link ${path === item.path ? 'nav-link-active' : ''}`}
-                    onClick={(event) => {
-                      if (
-                        event.metaKey ||
-                        event.ctrlKey ||
-                        event.shiftKey ||
-                        event.altKey ||
-                        event.button !== 0
-                      )
-                        return;
-                      event.preventDefault();
-                      onNavigate(item.path);
-                    }}
-                  >
-                    <span className="nav-icon">
-                      <Icon size={20} solid={path === item.path} aria-hidden="true" />
-                      {item.path === '/' && unreadBadge}
-                      {item.path === '/' && statusDot}
-                    </span>
-                    <span className="nav-label">{item.label}</span>
-                  </a>
-                </Tooltip>
-              </li>
-            );
-          })}
+          <li>
+            <a
+              href="/"
+              className={`chat-row chat-row-nod ${path === '/' ? 'chat-row-active' : ''}`}
+              aria-label={chatLabel}
+              aria-current={path === '/' ? 'page' : undefined}
+              onClick={(event) => {
+                if (
+                  event.metaKey ||
+                  event.ctrlKey ||
+                  event.shiftKey ||
+                  event.altKey ||
+                  event.button !== 0
+                )
+                  return;
+                event.preventDefault();
+                onNavigate('/');
+              }}
+            >
+              <span className="chat-tile chat-tile-nod" aria-hidden="true">
+                <BrandMark small />
+              </span>
+              <span className="chat-row-copy">
+                <strong>Nod</strong>
+              </span>
+              {unreadCount || unreadPending ? (
+                <span className="chat-row-count" aria-hidden="true">
+                  {unreadCount > 99 ? '99+' : unreadCount || '…'}
+                </span>
+              ) : presence ? (
+                <span
+                  className={`chat-dot ${presence === 'waiting' ? 'chat-dot-needs' : 'chat-dot-working'}`}
+                  aria-hidden="true"
+                />
+              ) : null}
+            </a>
+          </li>
+          {chats && <li className="nav-chats">{chats}</li>}
+        </ul>
+        <ul className="nav-pages">
+          {sidebarItems.filter((item) => item.path !== '/').map(navItem)}
         </ul>
       </nav>
       <div className="mobile-top-bar">
@@ -328,35 +376,47 @@ export function Sidebar({
               {sidebarItems.map((item) => {
                 const Icon = item.icon;
                 return (
-                  <a
-                    key={item.path}
-                    href={item.path}
-                    className="mobile-section"
-                    aria-label={item.path === '/' ? chatLabel : item.label}
-                    aria-current={path === item.path ? 'page' : undefined}
-                    onClick={(event) => {
-                      if (
-                        event.metaKey ||
-                        event.ctrlKey ||
-                        event.shiftKey ||
-                        event.altKey ||
-                        event.button !== 0
-                      )
-                        return;
-                      event.preventDefault();
-                      closeMobileMenu();
-                      onNavigate(item.path);
-                    }}
-                  >
-                    <span className="nav-icon">
-                      <Icon size={20} solid={path === item.path} aria-hidden="true" />
-                    </span>
-                    <span>{item.label}</span>
-                    {item.path === '/' && unreadBadge}
-                  </a>
+                  <Fragment key={item.path}>
+                    <a
+                      href={item.path}
+                      className="mobile-section"
+                      aria-label={item.path === '/' ? chatLabel : item.label}
+                      aria-current={path === item.path ? 'page' : undefined}
+                      onClick={(event) => {
+                        if (
+                          event.metaKey ||
+                          event.ctrlKey ||
+                          event.shiftKey ||
+                          event.altKey ||
+                          event.button !== 0
+                        )
+                          return;
+                        event.preventDefault();
+                        closeMobileMenu();
+                        onNavigate(item.path);
+                      }}
+                    >
+                      <span className="nav-icon">
+                        <Icon size={20} solid={path === item.path} aria-hidden="true" />
+                      </span>
+                      <span>{item.path === '/' ? 'Nod' : item.label}</span>
+                      {item.path === '/' && unreadBadge}
+                    </a>
+                    {item.path === '/' && chats && (
+                      <div
+                        className="mobile-chats"
+                        onClick={(event) => {
+                          if ((event.target as HTMLElement).closest('a')) closeMobileMenu();
+                        }}
+                      >
+                        {chats}
+                      </div>
+                    )}
+                  </Fragment>
                 );
               })}
             </nav>
+
             {account && (
               <div className="mobile-sheet-actions">
                 <button

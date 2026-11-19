@@ -230,7 +230,9 @@ export async function captureOwnerInstructions(
              AND s.source='user' AND (s.message_id=messages.id OR s.id=messages.turn_id))
            ORDER BY created_at DESC,id DESC LIMIT 1),
          said AS (SELECT id,text,created_at,
-             (($4::uuid IS NOT NULL AND EXISTS (SELECT 1 FROM turns owned WHERE owned.owner_id=$1 AND (owned.id=messages.turn_id OR owned.message_id=messages.id) AND to_jsonb(owned)->>'task_id'=$4::text) AND NOT EXISTS (SELECT 1 FROM approvals a JOIN turns r
+             (($4::uuid IS NOT NULL AND EXISTS (SELECT 1 FROM turns owned WHERE owned.owner_id=$1 AND (owned.id=messages.turn_id OR owned.message_id=messages.id) AND to_jsonb(owned)->>'task_id'=$4::text)
+               AND messages.created_at>=COALESCE((SELECT (to_jsonb(k)->>'request_started_at')::timestamptz FROM tasks k WHERE k.id=$4::uuid AND k.owner_id=$1),'-infinity')
+               AND NOT EXISTS (SELECT 1 FROM approvals a JOIN turns r
                ON r.id=a.execution_turn_id AND r.owner_id=a.owner_id AND r.thread_id=a.thread_id
                WHERE a.owner_id=$1 AND a.thread_id=$2 AND r.source='resume' AND r.message_id=messages.id))
                OR ($4::uuid IS NULL AND id=COALESCE($7::uuid,(SELECT id FROM authority)))) AS can_authorize,

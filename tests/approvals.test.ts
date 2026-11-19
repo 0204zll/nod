@@ -6504,6 +6504,66 @@ test(
         },
       );
 
+      await t.test('a text reply answers only a confirmation shown in its own view', async (t) => {
+        const turn = await begin('Synthetic named chat confirmation');
+        const [quiet, asking] = [randomUUID(), randomUUID()];
+        for (const id of [quiet, asking])
+          await db.pool.query(
+            "INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,now_text,name) VALUES($1,$2,$3,$1,'Synthetic','Synthetic','Synthetic',$4)",
+            [id, ownerId, turn.turnId, `Synthetic ${id.slice(0, 8)}`],
+          );
+        await db.pool.query('UPDATE turns SET task_id=$2 WHERE id=$1', [turn.turnId, asking]);
+        await approvals.request(turn, 'NOD_notification_preferences_update', {
+          notificationRule: 'Synthetic named chat rule',
+        });
+        const saved = await proposal(turn.turnId);
+        await finish(turn.turnId);
+        t.after(() =>
+          db.pool.query("UPDATE approvals SET status='expired' WHERE id=$1", [saved.id]),
+        );
+        const answer = (chatId?: string) =>
+          approvals.chat.answer({
+            threadId: turn.threadId,
+            channel: 'web',
+            text: 'Yes',
+            ...(chatId ? { chatId } : {}),
+          });
+        assert.equal(await answer(quiet), undefined);
+        assert.equal((await answer(asking))?.approvalId, saved.id);
+        assert.equal((await answer())?.approvalId, saved.id);
+        const privateTurn = randomUUID();
+        await db.pool.query(
+          "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background,task_id) VALUES($1,$2,$3,$4,'user','Synthetic private follow-up','succeeded',true,$4)",
+          [privateTurn, ownerId, turn.threadId, quiet],
+        );
+        await db.pool.query(
+          "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,chat_only) VALUES($1,$2,$3,$4,'assistant','Synthetic private answer',true)",
+          [randomUUID(), ownerId, turn.threadId, privateTurn],
+        );
+        assert.equal((await answer())?.approvalId, saved.id);
+        assert.equal(await answer(quiet), undefined);
+        const reports = async () =>
+          (await db.pool.query('SELECT reports_to_main FROM tasks WHERE id=$1', [asking])).rows[0]
+            .reports_to_main;
+        await db.pool.query('UPDATE tasks SET reports_to_main=false WHERE id=$1', [asking]);
+        const input = {
+          text: 'Yes',
+          channel: 'web',
+          threadId: turn.threadId,
+          replyToMessageId: saved.confirmation_message_id,
+          clientMessageId: randomUUID(),
+        };
+        await transaction(
+          async (client) =>
+            approvals.chat.accept(client, {
+              ...input,
+              answer: await approvals.chat.answer(input),
+            }),
+          db.pool,
+        );
+        assert.equal(await reports(), true);
+      });
+
       await t.test(
         'a channel confirmation preserves the exact snapshot and client retries do not execute twice',
         async (t) => {

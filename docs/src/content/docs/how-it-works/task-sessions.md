@@ -96,6 +96,21 @@ Coordination goes through the main session and ledger. Task sessions cannot forw
 
 Shared information does not grant permission. For a task started from chat, the trust check uses its original owner request and owner messages addressed to it. It also keeps up to five owner chat messages from the 24 hours before the task started, as background only. Other task reports, files, briefs and memory cannot authorize an outside action. See [Approvals](/trust/approvals/).
 
+## Named chats
+
+A named chat is a task that has a `name`. Its ID is its session ID, as for every task started from the main chat. The same task row serves each request the chat handles, so the ledger has one entry per chat.
+
+| Rule          | What the server does                                                                                                                                                                                                                                                                                                                     |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Target        | A message sent from a chat's view carries that chat's ID and goes to it. No model chooses the target. A reply target from another chat is refused.                                                                                                                                                                                       |
+| Fresh request | A message to a chat whose request is closed starts a new request: its turn has no parent, it becomes the task's source request, and earlier owner messages in the chat become background that cannot authorize an action. A message to an open request continues it.                                                                     |
+| Reuse         | The coordinator gives a closed chat its next request with `task start` and the chat's ID. Names are unique among the conversation's chats that are not archived.                                                                                                                                                                         |
+| Placement     | A task reports to the main chat while it works on something the main chat asked for. After a request typed in the chat's own view, its replies are saved as chat-only and the main chat does not show them. Questions, approvals and failure notices always show in the main chat, and a message for a chat-app turn is never chat-only. |
+| Replies       | A text reply can answer only a confirmation shown in the view where it was typed.                                                                                                                                                                                                                                                        |
+| Context       | The coordinator imports only messages the main chat shows, and its ledger entry for a chat counts the chat-only messages it has not seen. A chat imports its own messages and main-chat messages from before it was created. `history_search` accepts a chat ID.                                                                         |
+
+Tasks without a name, which include every task a schedule or the background observer creates, keep the behaviour described above.
+
 ## One task across web and chat apps
 
 Web chat and the Tasks page show the same compact preview. Expand it for steps, activity, the completion condition and task controls. Activity shows tool and helper events, not private model reasoning.

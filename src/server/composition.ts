@@ -2526,7 +2526,8 @@ async function initializeApplication(
       learnedSkills: learnedSkills.index,
       taskContext: tasks.context,
       settleTask: tasks.settle,
-      taskLedger: tasks.read,
+      taskLedger: tasks.ledger,
+      chatStart: tasks.chatStart,
       task: async (turn, raw, sourceMessageId, priorMessageId, priorHandoff) => {
         const request = raw as { action?: unknown; model?: unknown } | undefined;
         if (request?.action === 'start' && request.model) {

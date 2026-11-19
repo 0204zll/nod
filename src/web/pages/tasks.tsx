@@ -1,4 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
+import { navigate } from '../lib/navigation';
+import { ChatCard } from '../components/named-chats';
+import { isNamedChat } from '../lib/named-chats';
 import Markdown from 'react-markdown';
 import {
   CalendarClock,
@@ -143,14 +146,16 @@ export function TaskCard({
   live,
   onScheduled,
   onReply,
+  defaultExpanded = false,
 }: {
   task: Task;
+  defaultExpanded?: boolean;
   live?: Activity;
   onScheduled?(): void;
   onReply?(): void;
 }) {
   const headingId = useId();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const card = useRef<HTMLElement>(null);
   const inChat = Boolean(onReply);
   useEffect(() => {
@@ -494,13 +499,17 @@ export function Scheduled({
       )}
       {open.length > 0 && (
         <div className="saved-plan-list open-task-list">
-          {open.map((task) => (
-            <TaskCard
-              key={task.id}
-              task={task}
-              live={activity.find((item) => item.taskId === task.id)}
-            />
-          ))}
+          {open.map((task) =>
+            isNamedChat(task) ? (
+              <ChatCard key={task.id} chat={task} unread={false} onOpen={navigate} />
+            ) : (
+              <TaskCard
+                key={task.id}
+                task={task}
+                live={activity.find((item) => item.taskId === task.id)}
+              />
+            ),
+          )}
         </div>
       )}
       {!schedules.data ? (

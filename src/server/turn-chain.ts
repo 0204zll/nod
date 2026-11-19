@@ -5,6 +5,15 @@ export const browserOf = (turn: TurnRef) => turn.browserId ?? turn.threadId;
 export const taskMessageSql =
   '(t.message_id=m.id OR mt.task_id=t.id OR m.reply_to_message_id=t.message_id OR pt.task_id=t.id)';
 
+export const inMainSql = (alias: string) => `NOT ${alias}.chat_only`;
+
+export function inChatSql(alias: string, chat: string) {
+  return `(EXISTS (SELECT 1 FROM turns ct WHERE ct.owner_id=${alias}.owner_id AND ct.task_id=${chat}
+      AND (ct.id=${alias}.turn_id OR ct.message_id=${alias}.id))
+    OR EXISTS (SELECT 1 FROM tasks ck WHERE ck.owner_id=${alias}.owner_id AND ck.id=${chat}
+      AND ${alias}.id IN (ck.source_message_id,ck.message_id)))`;
+}
+
 export function supersededSql(alias: string, newer: string) {
   return `EXISTS(SELECT 1 FROM turns newer WHERE newer.owner_id=${alias}.owner_id AND newer.session_id=${alias}.session_id
     AND newer.id<>${alias}.id AND ${newer})`;

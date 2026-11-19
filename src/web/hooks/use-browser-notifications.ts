@@ -89,4 +89,47 @@ export function useBrowserNotifications(ownerId: string, state: AppState | null)
       })
       .catch(() => {});
   }, [scope, state?.messages, ownerId, preferences]);
+  const chatReplies = useRef<Map<string, string> | null>(null);
+  const replies = (state?.tasks ?? [])
+    .filter((task) => task.name && task.chatOnly?.latestAt)
+    .map((task) => `${task.id}=${task.chatOnly!.latestAt}`)
+    .join();
+  useEffect(() => {
+    if (!state || desktopSettingsAvailable()) return;
+    const latest = new Map(
+      (state.tasks ?? []).flatMap((task) =>
+        task.name && task.chatOnly?.latestAt ? [[task.id, task.chatOnly.latestAt] as const] : [],
+      ),
+    );
+    const previous = chatReplies.current;
+    chatReplies.current = latest;
+    if (!previous || !preferences || !browserNotificationStatus(ownerId).enabled) return;
+    const consentGeneration = scope.consentGeneration;
+    const isCurrent = () =>
+      scope.active &&
+      current.current.scope === scope &&
+      scope.consentGeneration === consentGeneration &&
+      sessionStore.getSnapshot().epoch === scope.epoch &&
+      sessionStore.getSnapshot().session?.user?.id === ownerId;
+    for (const [chatId, at] of latest) {
+      if ((previous.get(chatId) ?? '') >= at || window.location.pathname === `/chat/${chatId}`)
+        continue;
+      void deliverBrowserNotification(
+        ownerId,
+        state.threadId,
+        { id: `${chatId}:${at}`, createdAt: at },
+        isCurrent,
+        () =>
+          !!current.current.preferences &&
+          !browserNotificationQuietTime(current.current.preferences),
+        chatId,
+      )
+        .then((notification) => {
+          if (!notification) return;
+          scope.displayed.add(notification);
+          notification.onclose = () => scope.displayed.delete(notification);
+        })
+        .catch(() => {});
+    }
+  }, [scope, replies, ownerId, preferences]);
 }

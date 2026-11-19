@@ -44,7 +44,7 @@ import {
   stopThread,
   submitUserMessage,
 } from './thread.ts';
-import { reactionReplySql } from './turn-chain.ts';
+import { inChatSql, inMainSql, reactionReplySql } from './turn-chain.ts';
 import { isMessageReaction } from '../shared/emoji.ts';
 import { accessKey, registerLocalAccess } from './access.ts';
 import { logFailure, withFailureLog, type FailureLogSink } from './failure-log.ts';
@@ -78,8 +78,11 @@ const messageFields = `m.id,m.role,m.text,CASE WHEN m.role='user' THEN m.display
      (SELECT json_build_object('kind','task','id',k.id,'title',k.title) FROM tasks k WHERE k.owner_id=m.owner_id AND k.session_id=w.session_id ORDER BY k.created_at DESC LIMIT 1),
      (SELECT json_build_object('kind','schedule','id',r.id,'title',r.title) FROM schedule_runs r WHERE r.owner_id=m.owner_id AND r.turn_id=w.session_id LIMIT 1))
      FROM turns w WHERE w.id=m.turn_id AND w.owner_id=m.owner_id) END AS "work",
+ (SELECT k.id FROM turns w JOIN tasks k ON k.owner_id=w.owner_id AND k.id=(to_jsonb(w)->>'task_id')::uuid
+   WHERE w.id=m.turn_id AND w.owner_id=m.owner_id AND to_jsonb(k)->>'name' IS NOT NULL) AS "chatId",
  CASE WHEN target.id IS NULL OR ${reactionReplySql('target')} THEN NULL ELSE json_build_object('id',target.id,'role',target.role,'text',COALESCE(m.reply_quote,''),'isQuote',m.reply_quote IS NOT NULL) END AS "replyTo"`;
-const chatMessageSql = `NOT ${reactionReplySql('m')}`;
+const visibleMessageSql = `NOT ${reactionReplySql('m')}`;
+const chatMessageSql = `${visibleMessageSql} AND ${inMainSql('m')}`;
 const textMessageOptions = {
   bodyLimit: 8 * 1024 * 1024,
   config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
@@ -427,7 +430,12 @@ export async function createApp(dependencies: AppDependencies = {}) {
     };
   });
   app.get('/api/messages/search', async (request) => {
-    const { q } = z.object({ q: z.string().trim().min(1).max(200) }).parse(request.query);
+    const { q, chat } = z
+      .object({ q: z.string().trim().min(1).max(200), chat: z.uuid().optional() })
+      .parse(request.query);
+    const scope = chat
+      ? `${visibleMessageSql} AND ${inChatSql('m', `'${chat}'::uuid`)}`
+      : chatMessageSql;
     const thread = await activeThread(pool);
     const { rows } = await pool.query(
       `SELECT ${messageFields},ts_headline('english',m.text,websearch_to_tsquery('english',$3),'StartSel="", StopSel="", MaxWords=35, MinWords=15, ShortWord=0') AS snippet
@@ -437,7 +445,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
            || jsonb_path_query_array(m.presentation,'strict $.** ? (@.type() == "array")[*] ? (@.type() == "string" || @.type() == "number")') AS content
          WHERE m.role='assistant' AND m.presentation->>'version'='1'
        ) visual ON true
-       WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND ${chatMessageSql} AND (
+       WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND ${scope} AND (
          to_tsvector('english',m.text) @@ websearch_to_tsquery('english',$3) OR strpos(lower(m.text),lower($3))>0
          OR jsonb_to_tsvector('english',visual.content,'["string","numeric"]') @@ websearch_to_tsquery('english',$3)
          OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(visual.content) value WHERE strpos(lower(value),lower($3))>0)
@@ -469,16 +477,20 @@ export async function createApp(dependencies: AppDependencies = {}) {
   });
   app.get('/api/messages/around/:id', async (request) => {
     const { id } = z.object({ id: z.uuid() }).parse(request.params);
+    const { chat } = z.object({ chat: z.uuid().optional() }).parse(request.query);
+    const scope = chat
+      ? `${visibleMessageSql} AND ${inChatSql('m', `'${chat}'::uuid`)}`
+      : chatMessageSql;
     const thread = await activeThread(pool);
     const hit = (
       await pool.query(
-        `SELECT m.created_at FROM messages m WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.hidden_at IS NULL AND ${chatMessageSql}`,
+        `SELECT m.created_at FROM messages m WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.hidden_at IS NULL AND ${scope}`,
         [id, ownerId, thread.id],
       )
     ).rows[0];
     if (!hit) throw Object.assign(new Error('Message not found.'), { statusCode: 404 });
     const { rows } = await pool.query(
-      `SELECT ${messageFields} FROM messages m LEFT JOIN messages target ON target.id=m.reply_to_message_id AND target.owner_id=m.owner_id AND target.hidden_at IS NULL WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND ${chatMessageSql} AND m.created_at BETWEEN $3::timestamptz-interval '1 day' AND $3::timestamptz+interval '1 day' ORDER BY (m.id=$4) DESC,abs(extract(epoch FROM m.created_at-$3::timestamptz)),m.id LIMIT 60`,
+      `SELECT ${messageFields} FROM messages m LEFT JOIN messages target ON target.id=m.reply_to_message_id AND target.owner_id=m.owner_id AND target.hidden_at IS NULL WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL AND ${scope} AND m.created_at BETWEEN $3::timestamptz-interval '1 day' AND $3::timestamptz+interval '1 day' ORDER BY (m.id=$4) DESC,abs(extract(epoch FROM m.created_at-$3::timestamptz)),m.id LIMIT 60`,
       [ownerId, thread.id, hit.created_at, id],
     );
     return messageViews(rows);
@@ -503,6 +515,38 @@ export async function createApp(dependencies: AppDependencies = {}) {
       WHERE m.owner_id=$1 AND m.thread_id=$4 AND m.hidden_at IS NULL AND m.created_at>=COALESCE((SELECT chat_cleared_at FROM threads WHERE id=$4 AND owner_id=$1),'-infinity') AND ${chatMessageSql} AND ($2::timestamptz IS NULL OR date_trunc('milliseconds',m.created_at) < $2 OR (date_trunc('milliseconds',m.created_at) = $2 AND $3::uuid IS NOT NULL AND m.id < $3))
       ORDER BY date_trunc('milliseconds',m.created_at) DESC,m.id DESC LIMIT 61`,
       [ownerId, query.before ?? null, query.beforeId ?? null, thread.id],
+    );
+    const page = rows.rows.slice(0, 60);
+    return {
+      messages: await messageViews(page.reverse()),
+      hasMore: rows.rows.length > 60,
+    } satisfies MessageHistoryPage;
+  });
+  app.get<{ Params: { id: string } }>('/api/chats/:id/messages', async (request) => {
+    const chatId = z.uuid().parse(request.params.id);
+    const query = z
+      .object({
+        before: z.iso.datetime({ offset: true }).optional(),
+        beforeId: z.uuid().optional(),
+      })
+      .parse(request.query);
+    const thread = await activeThread(pool);
+    const chat = await pool.query(
+      `SELECT 1 FROM tasks t JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
+       WHERE t.id=$1 AND t.owner_id=$2 AND u.thread_id=$3 AND t.name IS NOT NULL`,
+      [chatId, ownerId, thread.id],
+    );
+    if (!chat.rowCount)
+      throw Object.assign(new Error('This chat is unavailable in this conversation.'), {
+        statusCode: 404,
+      });
+    const rows = await pool.query(
+      `SELECT ${messageFields} FROM messages m
+      LEFT JOIN messages target ON target.id=m.reply_to_message_id AND target.owner_id=m.owner_id AND target.hidden_at IS NULL
+      WHERE m.owner_id=$1 AND m.thread_id=$4 AND m.hidden_at IS NULL AND ${visibleMessageSql} AND ${inChatSql('m', '$5::uuid')}
+        AND ($2::timestamptz IS NULL OR date_trunc('milliseconds',m.created_at) < $2 OR (date_trunc('milliseconds',m.created_at) = $2 AND $3::uuid IS NOT NULL AND m.id < $3))
+      ORDER BY date_trunc('milliseconds',m.created_at) DESC,m.id DESC LIMIT 61`,
+      [ownerId, query.before ?? null, query.beforeId ?? null, thread.id, chatId],
     );
     const page = rows.rows.slice(0, 60);
     return {
@@ -614,6 +658,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
         replyToMessageId: input.replyToMessageId,
         replyQuote: input.replyQuote,
         seenMessageId: input.seenMessageId,
+        chatId: input.chatId,
         threadId: input.threadId,
         chatClearedAt: input.chatClearedAt,
         clientMessageId,

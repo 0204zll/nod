@@ -17,7 +17,8 @@ import { appConfirmation } from '../ports/agent.ts';
 import { untrustedBlock } from '../shared/untrusted.ts';
 import { localTimestamp } from '../shared/date-locale.ts';
 import { lockKey, locksTable } from './locks.ts';
-import { withdrawnSql } from './turn-chain.ts';
+import { inChatSql, inMainSql, withdrawnSql } from './turn-chain.ts';
+import { noteChatInput } from './chats.ts';
 import { afterCommit, transaction } from './transaction.ts';
 import { computerRequestArgs, isComputerAction } from './computer-use.ts';
 import { createErrorRedactor } from './redaction.ts';
@@ -77,6 +78,7 @@ export interface ChatConfirmationInput {
   threadId: string;
   replyToMessageId?: string;
   seenMessageId?: string;
+  chatId?: string;
   clientMessageId?: string;
   sourceId?: string;
   hasAttachments?: boolean;
@@ -842,12 +844,19 @@ export async function createApprovals(
       (
         await pool.query(
           `SELECT m.id FROM messages m JOIN turns u ON u.id=m.turn_id WHERE m.owner_id=$1 AND u.owner_id=$1 AND m.thread_id=$2 AND u.channel=$3 AND m.role='assistant' AND m.hidden_at IS NULL
+           AND ${input.chatId ? inChatSql('m', '$5::uuid') : `$5::uuid IS NULL AND ${inMainSql('m')}`}
            AND NOT EXISTS (SELECT 1 FROM messages s WHERE s.id=$4 AND s.owner_id=$1 AND s.thread_id=$2 AND date_trunc('milliseconds',s.created_at)<date_trunc('milliseconds',m.created_at))
            AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.owner_id=$1 AND n.thread_id=$2 AND n.role='assistant' AND n.turn_id IS NULL AND n.delivered_channel=$3 AND n.hidden_at IS NULL
              AND (n.created_at,n.id)>(m.created_at,m.id)
              AND NOT EXISTS (SELECT 1 FROM messages s WHERE s.id=$4 AND s.owner_id=$1 AND s.thread_id=$2 AND date_trunc('milliseconds',s.created_at)<date_trunc('milliseconds',n.created_at)))
            ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
-          [ownerId, input.threadId, input.channel, input.seenMessageId ?? null],
+          [
+            ownerId,
+            input.threadId,
+            input.channel,
+            input.seenMessageId ?? null,
+            input.chatId ?? null,
+          ],
         )
       ).rows[0]?.id;
     if (!target) return undefined;
@@ -962,6 +971,8 @@ export async function createApprovals(
         client,
       },
     );
+    if (approval.turn_task_id && !input.chatId)
+      await noteChatInput(client, ownerId, approval.turn_task_id as string, false);
     const messageId = input.clientMessageId ?? randomUUID();
     await client.query('UPDATE turns SET message_id=$2 WHERE id=$1 AND owner_id=$3', [
       turnId,

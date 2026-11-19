@@ -96,6 +96,7 @@ test(
     const { createAccountStore } = await import('../src/server/account-store.ts');
     const { createTriage } = await import('../src/server/triage.ts');
     const { createTasks } = await import('../src/server/tasks.ts');
+    const { captureOwnerInstructions } = await import('../src/server/owner-instructions.ts');
     const { createOnboardingSuggestions } = await import('../src/server/onboarding-suggestions.ts');
     assert.equal(dataRoot, root);
 
@@ -325,7 +326,8 @@ test(
     await accounts.initialize();
     const userMessages = thread.createUserMessageService({
       confirmAction: approvals.chat,
-      taskReply: (client, threadId, messageId) => tasks.resolveReply(client, threadId, messageId),
+      taskReply: (client, threadId, messageId, chatId) =>
+        tasks.resolveReply(client, threadId, messageId, chatId),
       accepted: () => {
         const capture = snapshotAnalytics(captureAnalytics);
         return (channel) => {
@@ -2329,6 +2331,222 @@ test(
             );
             assert.equal((await tasks.read()).find(({ id }) => id === task.id)?.status, 'done');
           }
+        },
+      );
+
+      await t.test(
+        'a named chat keeps follow-ups to itself and starts each request fresh',
+        async (t) => {
+          const previousObserver = inspectObserver;
+          t.after(() => {
+            inspectObserver = previousObserver;
+          });
+          const prompt = 'Find a synthetic designer for the named chat fixture.';
+          const next = 'Now find a synthetic copywriter for the named chat fixture.';
+          let chat: Task | undefined;
+          let reuse: Promise<unknown> | undefined;
+          inspectObserver = async (context) => {
+            if (context.prompt === prompt && !context.background) {
+              chat = (await context.task!({
+                action: 'start',
+                name: 'Recruiter',
+                title: 'Find a synthetic designer',
+                message: 'Recruiter is on it.',
+                doneWhen: 'A synthetic shortlist exists',
+                now: 'Searching',
+              })) as Task;
+              await assert.rejects(
+                context.task!({
+                  action: 'start',
+                  name: 'recruiter',
+                  title: 'Duplicate',
+                  message: 'Duplicate',
+                  doneWhen: 'Never',
+                  now: 'Never',
+                }),
+                /already exists/,
+              );
+              return { status: 'succeeded' };
+            }
+            if (context.prompt === next && !context.background) {
+              reuse = context.task!({
+                action: 'start',
+                chat: chat!.id,
+                title: 'Find a synthetic copywriter',
+                message: 'Sent to Recruiter.',
+                doneWhen: 'A synthetic copywriter shortlist exists',
+                now: 'Searching',
+              });
+              await reuse;
+              return { status: 'succeeded' };
+            }
+            if (context.taskContext?.id !== chat?.id || !chat) return;
+            await context.task!({
+              action: 'finish',
+              id: chat.id,
+              status: 'done',
+              result: 'Synthetic chat result',
+            });
+            await context.reply(`Synthetic chat answer: ${context.prompt}`);
+            return { status: 'succeeded' };
+          };
+          await waitFor(settledThread);
+          const request = await userMessages.submit(prompt);
+          await waitFor(settled(request.turnId));
+          assert.ok(chat, 'the coordinator fixture did not start the chat');
+          await waitFor(
+            async () => (await tasks.read()).find(({ id }) => id === chat!.id)?.status === 'done',
+          );
+          const row = async () =>
+            (
+              await db.pool.query(
+                'SELECT state,reports_to_main,source_message_id,request_started_at FROM tasks WHERE id=$1',
+                [chat!.id],
+              )
+            ).rows[0];
+          const message = async (id: string) =>
+            (await db.pool.query('SELECT chat_only,turn_id FROM messages WHERE id=$1', [id]))
+              .rows[0];
+          const reported = (
+            await db.pool.query(
+              "SELECT m.chat_only FROM messages m JOIN turns u ON u.id=m.turn_id WHERE u.task_id=$1 AND m.role='assistant'",
+              [chat!.id],
+            )
+          ).rows;
+          assert.ok(reported.length);
+          assert.ok(reported.every(({ chat_only }) => chat_only === false));
+
+          const first = await userMessages.submit('Synthetic follow-up in the chat', [], {
+            chatId: chat!.id,
+          });
+          await waitFor(settled(first.turnId));
+          const firstTurn = (
+            await db.pool.query('SELECT session_id,parent_turn_id,task_id FROM turns WHERE id=$1', [
+              first.turnId,
+            ])
+          ).rows[0];
+          assert.deepEqual(firstTurn, {
+            session_id: chat!.id,
+            parent_turn_id: null,
+            task_id: chat!.id,
+          });
+          assert.equal((await message(first.messageId)).chat_only, true);
+          const restarted = await row();
+          assert.equal(restarted.reports_to_main, false);
+          assert.equal(restarted.source_message_id, first.messageId);
+          const answer = (
+            await db.pool.query(
+              "SELECT id,chat_only FROM messages WHERE turn_id=$1 AND role='assistant'",
+              [first.turnId],
+            )
+          ).rows[0];
+          assert.equal(answer.chat_only, true);
+          const main = (await app.inject({ method: 'GET', url: '/api/messages', headers })).json()
+            .messages as Array<{ id: string }>;
+          assert.ok(!main.some(({ id }) => id === first.messageId || id === answer.id));
+          const inChat = (
+            await app.inject({ method: 'GET', url: `/api/chats/${chat!.id}/messages`, headers })
+          ).json().messages as Array<{ id: string }>;
+          assert.ok(inChat.some(({ id }) => id === first.messageId));
+          assert.ok(inChat.some(({ id }) => id === answer.id));
+          assert.ok(inChat.some(({ id }) => id === request.messageId));
+
+          const evidence = async (turnId: string) =>
+            (
+              await captureOwnerInstructions(
+                db.pool,
+                ownerId,
+                (await thread.activeThread(db.pool)).id,
+                [],
+                chat!.id,
+                new Date(Date.now() - 86_400_000),
+                turnId,
+              )
+            )?.evidence.messages ?? [];
+          const second = await userMessages.submit('Second synthetic request in the chat', [], {
+            chatId: chat!.id,
+          });
+          await waitFor(settled(second.turnId));
+          const seen = await evidence(second.turnId);
+          assert.equal(seen.find(({ id }) => id === second.messageId)?.canAuthorize, true);
+          assert.equal(seen.find(({ id }) => id === first.messageId)?.canAuthorize, false);
+
+          const { createHistorySearch } = await import('../src/server/history.ts');
+          const found = (
+            await createHistorySearch({ pool: db.pool, ownerId })({
+              query: 'Synthetic follow-up',
+              chat: chat!.id,
+            })
+          ).messages.map(({ id }) => id);
+          assert.ok(found.includes(first.messageId));
+          const chatIds = new Set(
+            (
+              (
+                await app.inject({
+                  method: 'GET',
+                  url: `/api/chats/${chat!.id}/messages`,
+                  headers,
+                })
+              ).json().messages as Array<{ id: string }>
+            ).map(({ id }) => id),
+          );
+          assert.ok(found.every((id) => chatIds.has(id)));
+          const recalled = await personal.recall(
+            'Synthetic follow-up in the chat',
+            undefined,
+            null,
+          );
+          assert.ok(!JSON.stringify(recalled).includes('Synthetic follow-up in the chat'));
+
+          const wrong = randomUUID();
+          await assert.rejects(
+            userMessages.submit('Synthetic message to a missing chat', [], { chatId: wrong }),
+            /unavailable/,
+          );
+
+          const made = await app.inject({
+            method: 'POST',
+            url: '/api/chats',
+            headers,
+            payload: { name: 'Finance' },
+          });
+          assert.equal(made.statusCode, 200);
+          assert.equal(made.json().name, 'Finance');
+          assert.equal(made.json().pinned, true);
+          assert.equal(
+            (
+              await app.inject({
+                method: 'POST',
+                url: '/api/chats',
+                headers,
+                payload: { name: 'finance' },
+              })
+            ).statusCode,
+            409,
+          );
+          const hello = await userMessages.submit('Synthetic first message in Finance', [], {
+            chatId: made.json().id,
+          });
+          assert.deepEqual(
+            (
+              await db.pool.query(
+                'SELECT session_id,parent_turn_id,task_id FROM turns WHERE id=$1',
+                [hello.turnId],
+              )
+            ).rows[0],
+            { session_id: made.json().id, parent_turn_id: null, task_id: made.json().id },
+          );
+          assert.equal((await message(hello.messageId)).chat_only, true);
+          await waitFor(settled(hello.turnId));
+
+          const again = await userMessages.submit(next);
+          await waitFor(settled(again.turnId));
+          await reuse;
+          await waitFor(async () => (await row()).state === 'done');
+          const reused = await row();
+          assert.equal(reused.reports_to_main, true);
+          assert.equal(reused.source_message_id, again.messageId);
+          assert.equal((await tasks.read()).filter(({ name }) => name === 'Recruiter').length, 1);
         },
       );
 

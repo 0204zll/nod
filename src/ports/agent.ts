@@ -183,6 +183,7 @@ export interface RuntimeContext {
     doneWhen: string;
     revision: number;
     messageId?: string | null;
+    name?: string;
   };
   tasks?: import('../shared/contracts.ts').Task[];
   workspacePath: string;

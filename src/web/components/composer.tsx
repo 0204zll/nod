@@ -64,6 +64,7 @@ export type ComposerSendResult =
 
 interface ComposerProps {
   active?: boolean;
+  name?: string;
   draftKey?: string;
   privateReply?: boolean;
   restoreReply?(reply: Message['replyTo']): void;
@@ -88,6 +89,7 @@ interface ComposerProps {
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
   {
     active = true,
+    name = 'Nod',
     ready,
     busy = false,
     text,
@@ -165,7 +167,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     submit: () => {},
     upload: (_files: File[], _method: 'paste') => {},
   });
-  const placeholder = busy ? 'Send another message to Nod…' : 'Message Nod…';
+  const placeholder = busy ? `Send another message to ${name}…` : `Message ${name}…`;
   const currentPlaceholder = useRef(placeholder);
   currentPlaceholder.current = placeholder;
   const extensions = useMemo(

@@ -1,4 +1,5 @@
 import type { Message, Preferences } from '../../shared/contracts';
+import { navigate } from './navigation';
 import { desktopSettingsAvailable } from './desktop';
 import { captureAnalytics } from './analytics';
 
@@ -180,6 +181,7 @@ export async function deliverBrowserNotification(
   message: Pick<Message, 'id' | 'createdAt'>,
   isCurrent: () => boolean,
   canDeliver: () => boolean = () => true,
+  chatId?: string,
 ) {
   const key = `nod.browser-notifications.last.${JSON.stringify([ownerId, threadId])}`;
   const eligible = () =>
@@ -214,9 +216,11 @@ export async function deliverBrowserNotification(
       if (!isCurrent()) return;
       window.focus();
       captureAnalytics('notification_opened', { kind: 'reply' });
-      window.dispatchEvent(
-        new CustomEvent('nod:focus-message', { detail: { messageId: message.id } }),
-      );
+      if (chatId) navigate(`/chat/${chatId}`);
+      else
+        window.dispatchEvent(
+          new CustomEvent('nod:focus-message', { detail: { messageId: message.id } }),
+        );
     };
     return notification;
   };

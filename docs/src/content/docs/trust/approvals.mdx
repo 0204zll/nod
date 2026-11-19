@@ -64,6 +64,8 @@ Your messages from a turn you stopped, or whose model request failed at the prov
 
 Only your words carry authority. The checker never reads the web pages or emails Nod read, so their text reaches it only where Nod copies it into the action itself, such as an email body, or into a message of Nod's that you answered. The one exception is a computer use step: the checker sees the app window's current content, including any email text in it, as data, never as your words. The checker is an AI model and can be wrong.
 
+In a [named chat](/use/tasks/#named-chats), the checker sees the words you addressed to that chat's current request. Words you typed in the main chat or in another chat do not count there, and a new request in a finished chat does not inherit what an earlier request allowed.
+
 ## Because you said
 
 When the checker runs an action, it quotes the words that allow it, exactly as you wrote them: from your message, a saved owner input for the schedule, your standing instruction or your rules. For an exact complete schedule approval, it records that approval instead of inventing owner words. For an action that only reads or drafts, it says so instead. The server then checks that those words really are in what the checker was shown. The check ignores capital letters, spacing, quote marks, an ellipsis at either end of the excerpt, and accents in ordinary words, so _ícone de lápis_ matches _icone de lapis_. In email addresses, domains, links and paths, accents must match too. A changed, added or left-out word still fails it. A run that quotes nothing, or quotes words you never wrote, asks you instead, or in a scheduled run or background work doesn't run at all. The server checks where the words came from, not whether they cover the action: that judgment is still the checker's.
@@ -201,6 +203,8 @@ Nod doesn't add its own confirmation on top of the trust check or payment approv
 :::caution[What the trust check doesn't cover]
 It checks connected-app actions, browser steps that could submit or change something, Nod's own changes and [sign-ins](/trust/vault/). Card entry always goes through [payment approval](/trust/payments/). The checker judges a browser step by the label the website gives the control and, for a form, the address it sends to. A button that acts through page scripts instead of a form shows only its label, so a deceptive site can still mislabel it. Your request covers the steps it needs on the website you named, so a page could steer Nod to another step there that also fits, such as adding a second item to the basket; payment approval shows the total before any card is used. Opening a link Nod found counts as reading. The checker is a best-effort judge and can be wrong.
 :::
+
+A typed reply answers only a confirmation shown where you typed it. A "yes" in one named chat cannot approve what another chat asked.
 
 ## Where this is enforced
 

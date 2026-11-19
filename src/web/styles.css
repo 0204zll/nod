@@ -3,6 +3,7 @@
 @import './components/controls.css';
 @import './components/setup-progress.css';
 @import './components/message-presentation.css';
+@import './components/named-chats.css';
 @import './components/presentation-booking.css';
 @import './components/presentation-travel.css';
 @import './components/presentation-places.css';

@@ -1,4 +1,5 @@
 import { lazy, memo, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { ChatTile } from './named-chats';
 import { createPortal } from 'react-dom';
 import { Copy, Check, CornerUpLeft, Ellipsis, SmilePlus } from './icons';
 import Markdown from 'react-markdown';
@@ -339,9 +340,11 @@ export function MessageBubble({
   handoff,
   handoffPaused,
   work,
+  chatLabel,
 }: {
   message: Message;
   work?: MessageWork;
+  chatLabel?: string;
   pendingAudio?: ImagePreview;
   connectedAppIds?: ReadonlySet<string>;
   grouped?: boolean;
@@ -695,6 +698,12 @@ export function MessageBubble({
       tabIndex={-1}
     >
       <div className="message-content">
+        {chatLabel && !work && (
+          <span className="message-chat-label">
+            <ChatTile name={chatLabel} size="sm" />
+            {chatLabel}
+          </span>
+        )}
         {work && <WorkLabel work={work} />}
         {run && <ScheduleRunTrack run={run} />}
         <div className="message-row" hidden={run?.outcome === 'failed'}>

@@ -32,6 +32,7 @@ export const messageInput = z
     approvalAnswer: z.object({ approvalId: z.uuid(), approved: z.boolean() }).strict().optional(),
     replyQuote: z.string().trim().min(1).max(4000).optional(),
     seenMessageId: z.uuid().optional(),
+    chatId: z.uuid().optional(),
     clientMessageId: z.uuid().optional(),
     threadId: z.uuid().optional(),
     chatClearedAt: z.iso.datetime().nullable().optional(),
