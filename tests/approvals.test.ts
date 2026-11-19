@@ -6542,26 +6542,6 @@ test(
         );
         assert.equal((await answer())?.approvalId, saved.id);
         assert.equal(await answer(quiet), undefined);
-        const reports = async () =>
-          (await db.pool.query('SELECT reports_to_main FROM tasks WHERE id=$1', [asking])).rows[0]
-            .reports_to_main;
-        await db.pool.query('UPDATE tasks SET reports_to_main=false WHERE id=$1', [asking]);
-        const input = {
-          text: 'Yes',
-          channel: 'web',
-          threadId: turn.threadId,
-          replyToMessageId: saved.confirmation_message_id,
-          clientMessageId: randomUUID(),
-        };
-        await transaction(
-          async (client) =>
-            approvals.chat.accept(client, {
-              ...input,
-              answer: await approvals.chat.answer(input),
-            }),
-          db.pool,
-        );
-        assert.equal(await reports(), true);
       });
 
       await t.test(

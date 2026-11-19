@@ -36,8 +36,10 @@ import {
   chatNameLimit,
   defaultChatName,
   latestChatMessages,
-  noteChatInput,
+  nameAutoChat,
+  ownerChatRequest,
   restartChatRequest,
+  reviveChat,
   setChatRequestSource,
 } from './chats.ts';
 import { texts as codeTexts } from './chat-verification.ts';
@@ -62,6 +64,7 @@ const credentialUrl = /(?<![\w/])(?:[a-z][a-z\d+.-]*:)?\/\/[^/\s?#<>]*@/iu;
 const input = z.discriminatedUnion('action', [
   z.object({ action: z.literal('list') }).strict(),
   z.object({ action: z.literal('read'), chat: z.string().trim().min(1).max(60) }).strict(),
+  z.object({ action: z.literal('name'), id: z.uuid(), name: z.string() }).strict(),
   z
     .object({
       action: z.literal('reply'),
@@ -136,7 +139,8 @@ type Row = {
   schedule_model: ModelSelection | null;
   name: string | null;
   pinned: boolean;
-  reports_to_main: boolean;
+  name_auto: boolean;
+  last_reply: string | null;
   archived_at: Date | null;
   chat_only_count: number | null;
   chat_only_latest: Date | null;
@@ -217,7 +221,7 @@ export function createTasks(options: {
            COALESCE(q.text,CASE WHEN u.status='cancelled' THEN continuation.text END) AS question,
            COALESCE(q.id,CASE WHEN u.status='cancelled' THEN continuation.id END) AS question_message_id,
            t.model,CASE WHEN t.session_id=t.id THEN ${workKindSql('t', 'NULL')} END AS work,
-           work_schedule.model AS schedule_model,t.name,t.pinned,t.reports_to_main,t.archived_at,chat_only.count AS chat_only_count,
+           work_schedule.model AS schedule_model,t.name,t.pinned,t.name_auto,t.archived_at,last_reply.text AS last_reply,chat_only.count AS chat_only_count,
            chat_only.latest AS chat_only_latest
          FROM ranked t LEFT JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
          ${workOriginSql('t')}
@@ -225,6 +229,11 @@ export function createTasks(options: {
            JOIN turns cu ON cu.id=cm.turn_id AND cu.owner_id=cm.owner_id
            WHERE t.name IS NOT NULL AND cm.owner_id=t.owner_id AND cu.task_id=t.id AND cm.chat_only
              AND cm.role='assistant' AND cm.hidden_at IS NULL) chat_only ON true
+         LEFT JOIN LATERAL (SELECT left(split_part(btrim(lm.text),E'\\n\\n',1),240) AS text FROM messages lm
+           JOIN turns lu ON lu.id=lm.turn_id AND lu.owner_id=lm.owner_id
+           WHERE t.name IS NOT NULL AND lm.owner_id=t.owner_id AND lu.task_id=t.id AND lm.role='assistant'
+             AND lm.text<>'' AND lm.hidden_at IS NULL
+           ORDER BY lm.created_at DESC,lm.id DESC LIMIT 1) last_reply ON true
          LEFT JOIN LATERAL (SELECT m.id,m.text FROM messages m
            WHERE u.status='waiting' AND m.owner_id=u.owner_id AND m.turn_id=u.id AND m.role='assistant' AND m.text<>'' AND m.hidden_at IS NULL
            ORDER BY m.created_at DESC,m.id DESC LIMIT 1) q ON true
@@ -275,7 +284,8 @@ export function createTasks(options: {
           ? {
               name: row.name,
               pinned: row.pinned,
-              reportsToMain: row.reports_to_main,
+              ...(row.name_auto ? { nameAuto: true } : {}),
+              lastReply: row.last_reply,
               archivedAt: row.archived_at?.toISOString() ?? null,
               chatOnly: {
                 count: row.chat_only_count ?? 0,
@@ -402,34 +412,41 @@ export function createTasks(options: {
 
   function replyTarget(
     client: PoolClient,
+    threadId: string,
     row: { task_id: string; id: string; session_id: string; name: string | null; state: string },
     fromChat: boolean,
   ) {
     const restart = row.name !== null && row.state !== 'open';
+    let restarted = false;
     return {
       task_id: row.task_id,
       id: restart ? null : row.id,
       session_id: row.session_id,
       background: true,
       saved: async (messageId: string) => {
-        if (restart) await setChatRequestSource(client, ownerId, row.task_id, messageId);
+        if (restarted) await setChatRequestSource(client, ownerId, row.task_id, messageId);
       },
-      record: async (turnId: string) => {
-        await recordInput(client, row.task_id, turnId);
-        if (row.name === null) return false;
-        if (restart) await restartChatRequest(client, ownerId, row.task_id, fromChat);
-        else await noteChatInput(client, ownerId, row.task_id, fromChat);
-        return (
-          fromChat &&
-          Boolean(
-            (
-              await client.query(
-                'SELECT 1 FROM tasks WHERE id=$1 AND owner_id=$2 AND NOT reports_to_main',
-                [row.task_id, ownerId],
-              )
-            ).rowCount,
-          )
-        );
+      record: async (turnId: string, text: string, live: boolean) => {
+        if (!live)
+          await client.query('UPDATE turns SET task_id=$1 WHERE id=$2 AND owner_id=$3', [
+            row.task_id,
+            turnId,
+            ownerId,
+          ]);
+        else {
+          if (restart) {
+            await restartChatRequest(
+              client,
+              ownerId,
+              threadId,
+              row.task_id,
+              ownerChatRequest(text, row.name!),
+            );
+            restarted = true;
+          }
+          await recordInput(client, row.task_id, turnId);
+        }
+        return fromChat && row.name !== null;
       },
     };
   }
@@ -455,7 +472,7 @@ export function createTasks(options: {
           )
         ).rows[0]
       : undefined;
-    if (!chatId) return replied ? replyTarget(client, replied, false) : undefined;
+    if (!chatId) return replied ? replyTarget(client, threadId, replied, false) : undefined;
     const chat = (
       await client.query(
         `SELECT t.id AS task_id,t.turn_id AS id,t.session_id,t.name,t.state FROM tasks t
@@ -476,7 +493,7 @@ export function createTasks(options: {
           code: 'chat_mismatch',
         });
     }
-    return replyTarget(client, chat, true);
+    return replyTarget(client, threadId, chat, true);
   }
 
   async function recordInput(client: PoolClient, id: string, turnId: string) {
@@ -549,7 +566,7 @@ export function createTasks(options: {
                LEFT JOIN turns r ON r.id=a.turn_id AND r.owner_id=a.owner_id
                WHERE m.id=$3 AND m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL
                  AND m.reply_to_message_id IS NULL AND m.approval_answer IS NULL AND NOT ${withdrawnSql('m')}
-                 AND a.hidden_at IS NULL AND NOT a.chat_only
+                 AND a.hidden_at IS NULL
                  AND a.created_at>m.created_at - interval '24 hours'
                  AND (a.created_at,a.id)<(m.created_at,m.id)
                  AND CASE WHEN u.channel='web' THEN NOT ${reactionReplySql('a')}
@@ -579,8 +596,8 @@ export function createTasks(options: {
       [sourceMessageId, turnId, ownerId],
     );
     if (!claimed.rowCount) return;
+    await reviveChat(client, ownerId, task.thread_id, taskId);
     await recordInput(client, taskId, turnId);
-    await noteChatInput(client, ownerId, taskId, false);
   }
 
   async function stop(
@@ -631,6 +648,11 @@ export function createTasks(options: {
     const current = (
       await client.query('SELECT * FROM turns WHERE id=$1 AND owner_id=$2', [turn.turnId, ownerId])
     ).rows[0];
+    if (request.action === 'name') {
+      if (current.task_id !== request.id) throw failure('Only a chat itself can set its name.');
+      await nameAutoChat(client, ownerId, turn.threadId, request.id, request.name);
+      return (await read(client, { id: request.id, closed: true }))[0];
+    }
     if (request.action === 'reply') {
       if (current.task_id || current.session_id !== turn.threadId || !sourceMessageId)
         throw failure('Only the main chat can send owner updates to tasks.');
@@ -748,32 +770,19 @@ export function createTasks(options: {
           )
         ).rows[0];
         if (!source) throw failure('Owner request not found.');
-        const { revision } = (
-          await client.query<{ revision: number }>(
-            `UPDATE tasks SET title=$3,done_when=$4,brief=$5,now_text=$6,steps=$7,step_index=0,waiting_for=$8,
-               next_check=$9,source_message_id=$10,message_id=$11,result='',state='open',closed_at=NULL,
-               revision=revision+1,reports_to_main=true,archived_at=NULL,pinned=pinned OR $12,
-               request_started_at=(SELECT created_at FROM messages WHERE id=$10 AND owner_id=$2),updated_at=now()
-             WHERE id=$1 AND owner_id=$2 RETURNING revision`,
-            [
-              id,
-              ownerId,
-              request.title,
-              request.doneWhen,
-              request.brief ?? request.doneWhen,
-              request.now,
-              JSON.stringify(request.steps ?? []),
-              JSON.stringify(request.waitingFor ?? []),
-              request.nextCheck ?? null,
-              sourceMessageId,
-              messageId,
-              request.pinned ?? false,
-            ],
-          )
-        ).rows[0];
+        await restartChatRequest(client, ownerId, turn.threadId, id, {
+          title: request.title,
+          doneWhen: request.doneWhen,
+          brief: request.brief ?? request.doneWhen,
+          now: request.now,
+          steps: request.steps,
+          waitingFor: request.waitingFor,
+          nextCheck: request.nextCheck,
+          pinned: request.pinned,
+        });
         await client.query(
-          "UPDATE turns SET status='cancelled',finished_at=now() WHERE session_id=$1 AND owner_id=$2 AND status='waiting'",
-          [id, ownerId],
+          'UPDATE tasks SET source_message_id=$3,message_id=$4 WHERE id=$1 AND owner_id=$2',
+          [id, ownerId, sourceMessageId, messageId],
         );
         const child = await enqueueTurn(source.text, {
           source: 'task',
@@ -785,21 +794,16 @@ export function createTasks(options: {
           background: true,
           client,
         });
-        await client.query('UPDATE turns SET message_id=$1,task_revision=$2 WHERE id=$3', [
+        await client.query('UPDATE turns SET message_id=$1 WHERE id=$2 AND owner_id=$3', [
           sourceMessageId,
-          revision,
-          child,
-        ]);
-        await link(client, child, id);
-        await client.query('UPDATE tasks SET turn_id=$2 WHERE id=$1 AND owner_id=$3', [
-          id,
           child,
           ownerId,
         ]);
+        await recordInput(client, id, child);
       } else {
         await client.query(
-          `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,message_id,title,done_when,brief,now_text,steps,waiting_for,next_check,applied_revision,activity_key,model,name,pinned)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+          `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,message_id,title,done_when,brief,now_text,steps,waiting_for,next_check,applied_revision,activity_key,model,name,pinned,name_auto)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
           [
             id,
             ownerId,
@@ -819,6 +823,7 @@ export function createTasks(options: {
             model ? JSON.stringify(model) : null,
             name,
             request.pinned ?? false,
+            name !== null && request.name === undefined,
           ],
         );
         if (independent) {
@@ -992,7 +997,7 @@ export function createTasks(options: {
       doneWhen: row.done_when,
       revision: row.revision,
       messageId: row.message_id,
-      ...(row.name ? { name: row.name } : {}),
+      ...(row.name ? { name: row.name, ...(row.name_auto ? { nameAuto: true } : {}) } : {}),
     };
   }
 
@@ -1083,14 +1088,21 @@ export function createTasks(options: {
     });
     app.post('/api/chats', async (request) => {
       const body = z
-        .object({ name: z.string(), brief: z.string().trim().max(2000).optional() })
+        .object({
+          name: z.string().optional(),
+          about: z.string().max(100_000).optional(),
+          brief: z.string().trim().max(2000).optional(),
+        })
         .strict()
         .parse(request.body);
       const id = randomUUID();
       await transaction(async (client) => {
         const thread = await lockThread(client);
-        const name = chatName(body.name);
-        await assertChatNameFree(client, ownerId, thread.id, name);
+        const given = body.name !== undefined;
+        const name = given
+          ? chatName(body.name!)
+          : await defaultChatName(client, ownerId, thread.id, body.about ?? '');
+        if (given) await assertChatNameFree(client, ownerId, thread.id, name);
         const turnId = randomUUID();
         await client.query(
           `INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background,finished_at)
@@ -1098,15 +1110,19 @@ export function createTasks(options: {
           [turnId, ownerId, thread.id, id, `New chat: ${name}`],
         );
         await client.query(
-          `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,brief,now_text,state,closed_at,applied_revision,name,pinned,reports_to_main)
-           VALUES($1,$2,$3,$1,$4,$5,$6,'','done',now(),1,$4,true,false)`,
+          `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,brief,now_text,state,closed_at,applied_revision,name,pinned,name_auto)
+           VALUES($1,$2,$3,$1,$4,$5,$6,'','done',now(),1,$4,true,$7)`,
           [
             id,
             ownerId,
             turnId,
             name,
             'Each request in this chat is answered.',
-            body.brief || `The owner created this chat by hand. Its name, ${name}, is its subject.`,
+            body.brief ||
+              (given
+                ? `The owner created this chat by hand. Its name, ${name}, is its subject.`
+                : 'The owner created this chat by hand. Its first request sets its subject.'),
+            !given,
           ],
         );
         await client.query('UPDATE turns SET task_id=$1 WHERE id=$2 AND owner_id=$3', [
@@ -1131,8 +1147,8 @@ export function createTasks(options: {
       await transaction(async (client) => {
         const thread = await lockThread(client);
         const chat = (
-          await client.query<{ name: string }>(
-            `SELECT t.name FROM tasks t JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
+          await client.query<{ name: string; state: string }>(
+            `SELECT t.name,t.state FROM tasks t JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
              WHERE t.id=$1 AND t.owner_id=$2 AND u.thread_id=$3 AND t.name IS NOT NULL FOR NO KEY UPDATE OF t`,
             [id, ownerId, thread.id],
           )
@@ -1141,25 +1157,23 @@ export function createTasks(options: {
         const name = change.name === undefined ? chat.name : chatName(change.name);
         if (change.name !== undefined || change.archived === false)
           await assertChatNameFree(client, ownerId, thread.id, name, id);
-        if (change.archived) {
-          const active = await client.query(
-            `SELECT 1 FROM turns u WHERE u.owner_id=$1 AND u.session_id=$2
-               AND (u.status IN ('queued','running') OR (${waitingTurnSql('u')})) LIMIT 1`,
-            [ownerId, id],
+        if (change.archived && chat.state === 'open')
+          throw Object.assign(
+            failure(`${chat.name} is still working. Stop it before you archive it.`, 409),
+            { code: 'chat_active' },
           );
-          if (active.rowCount)
-            throw Object.assign(
-              failure(`${chat.name} is still working. Stop it before you archive it.`, 409),
-              {
-                code: 'chat_active',
-              },
-            );
-        }
         await client.query(
-          `UPDATE tasks SET name=$3,pinned=COALESCE($4,pinned),
+          `UPDATE tasks SET name=$3,name_auto=name_auto AND $6,pinned=COALESCE($4,pinned),
              archived_at=CASE WHEN $5::boolean IS NULL THEN archived_at WHEN $5 THEN now() END,updated_at=now()
            WHERE id=$1 AND owner_id=$2`,
-          [id, ownerId, name, change.pinned ?? null, change.archived ?? null],
+          [
+            id,
+            ownerId,
+            name,
+            change.pinned ?? null,
+            change.archived ?? null,
+            change.name === undefined,
+          ],
         );
       }, pool);
       refresh();
@@ -1347,11 +1361,7 @@ export function createTasks(options: {
     chatCommand,
     read: (thread?: string) => read(pool, { closed: true, thread }),
     ledger: async (thread?: string) =>
-      (await read(pool, { closed: true, thread }))
-        .filter((task) => !task.archivedAt)
-        .map((task) =>
-          task.name && task.reportsToMain === false ? { ...task, result: '' } : task,
-        ),
+      (await read(pool, { closed: true, thread })).filter((task) => !task.archivedAt),
     chatStart,
     resumeDue,
     wakeDue,

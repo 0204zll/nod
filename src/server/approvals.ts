@@ -18,7 +18,6 @@ import { untrustedBlock } from '../shared/untrusted.ts';
 import { localTimestamp } from '../shared/date-locale.ts';
 import { lockKey, locksTable } from './locks.ts';
 import { inChatSql, inMainSql, withdrawnSql } from './turn-chain.ts';
-import { noteChatInput } from './chats.ts';
 import { afterCommit, transaction } from './transaction.ts';
 import { computerRequestArgs, isComputerAction } from './computer-use.ts';
 import { createErrorRedactor } from './redaction.ts';
@@ -971,8 +970,6 @@ export async function createApprovals(
         client,
       },
     );
-    if (approval.turn_task_id && !input.chatId)
-      await noteChatInput(client, ownerId, approval.turn_task_id as string, false);
     const messageId = input.clientMessageId ?? randomUUID();
     await client.query('UPDATE turns SET message_id=$2 WHERE id=$1 AND owner_id=$3', [
       turnId,

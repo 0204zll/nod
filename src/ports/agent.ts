@@ -184,6 +184,7 @@ export interface RuntimeContext {
     revision: number;
     messageId?: string | null;
     name?: string;
+    nameAuto?: boolean;
   };
   tasks?: import('../shared/contracts.ts').Task[];
   workspacePath: string;

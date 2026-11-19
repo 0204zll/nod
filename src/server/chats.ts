@@ -9,7 +9,7 @@ export const chatNameLimit = 24;
 
 export const chatColumnsSql = `
   ALTER TABLE tasks ADD COLUMN IF NOT EXISTS name text;
-  ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reports_to_main boolean NOT NULL DEFAULT true;
+  ALTER TABLE tasks ADD COLUMN IF NOT EXISTS name_auto boolean NOT NULL DEFAULT false;
   ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pinned boolean NOT NULL DEFAULT false;
   ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_at timestamptz;
   ALTER TABLE tasks ADD COLUMN IF NOT EXISTS request_started_at timestamptz;
@@ -54,7 +54,10 @@ export async function defaultChatName(
       .slice(0, chatNameLimit - 3)
       .join('')
       .trim() || 'Chat';
-  const chats = await namedChats(client, ownerId, threadId);
+  return freeName(await namedChats(client, ownerId, threadId), base);
+}
+
+function freeName(chats: Array<{ name: string }>, base: string) {
   for (let count = 1; ; count++) {
     const name = count === 1 ? base : `${base} ${count}`;
     if (!chats.some(sameName(name))) return name;
@@ -82,6 +85,22 @@ export async function assertChatNameFree(
     (chat) => chat.id !== except && sameName(name)(chat),
   );
   if (taken) throw nameTaken(taken, false);
+}
+
+export async function nameAutoChat(
+  client: Queryable,
+  ownerId: string,
+  threadId: string,
+  chatId: string,
+  value: string,
+) {
+  const name = chatName(value);
+  await assertChatNameFree(client, ownerId, threadId, name, chatId);
+  const { rowCount } = await client.query(
+    'UPDATE tasks SET name=$3,name_auto=false WHERE id=$1 AND owner_id=$2 AND name_auto',
+    [chatId, ownerId, name],
+  );
+  if (!rowCount) throw failure('This chat already has its name. Only the owner renames it.');
 }
 
 export async function assertNewChat(
@@ -155,22 +174,75 @@ export async function chatOnlyPlacement(
   ).rows[0];
   if (!turn?.task_id || turn.channel !== 'web') return false;
   const { rowCount } = await client.query(
-    'SELECT 1 FROM tasks WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL AND NOT reports_to_main',
+    'SELECT 1 FROM tasks WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL',
     [turn.task_id, ownerId],
   );
   return Boolean(rowCount);
 }
 
+export async function reviveChat(
+  client: Queryable,
+  ownerId: string,
+  threadId: string,
+  chatId: string,
+) {
+  const chat = (
+    await client.query<{ name: string }>(
+      'SELECT name FROM tasks WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL AND archived_at IS NOT NULL',
+      [chatId, ownerId],
+    )
+  ).rows[0];
+  if (!chat) return;
+  await client.query('UPDATE tasks SET archived_at=NULL,name=$3 WHERE id=$1 AND owner_id=$2', [
+    chatId,
+    ownerId,
+    freeName(await namedChats(client, ownerId, threadId), chat.name),
+  ]);
+}
+
+export interface ChatRequest {
+  title: string;
+  doneWhen: string;
+  brief?: string;
+  now?: string;
+  steps?: string[];
+  waitingFor?: unknown[];
+  nextCheck?: string | null;
+  pinned?: boolean;
+}
+
+export function ownerChatRequest(text: string, name: string): ChatRequest {
+  const line = text.replace(/\s+/gu, ' ').trim();
+  return {
+    title: [...line].slice(0, 160).join('') || name,
+    doneWhen: 'This request is answered in the chat.',
+  };
+}
+
 export async function restartChatRequest(
   client: Queryable,
   ownerId: string,
+  threadId: string,
   chatId: string,
-  fromChat: boolean,
+  request: ChatRequest,
 ) {
+  await reviveChat(client, ownerId, threadId, chatId);
   await client.query(
-    `UPDATE tasks SET reports_to_main=$3,request_started_at=now(),archived_at=NULL
+    `UPDATE tasks SET title=$3,done_when=$4,brief=COALESCE($5,brief),now_text=$6,steps=$7,step_index=0,
+       waiting_for=$8,next_check=$9,result='',pinned=pinned OR $10,request_started_at=now(),updated_at=now()
      WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL`,
-    [chatId, ownerId, !fromChat],
+    [
+      chatId,
+      ownerId,
+      request.title,
+      request.doneWhen,
+      request.brief ?? null,
+      request.now ?? '',
+      JSON.stringify(request.steps ?? []),
+      JSON.stringify(request.waitingFor ?? []),
+      request.nextCheck ?? null,
+      request.pinned ?? false,
+    ],
   );
 }
 
@@ -184,28 +256,4 @@ export async function setChatRequestSource(
     'UPDATE tasks SET source_message_id=$3 WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL',
     [chatId, ownerId, messageId],
   );
-}
-
-export async function noteChatInput(
-  client: Queryable,
-  ownerId: string,
-  chatId: string,
-  fromChat: boolean,
-) {
-  await client.query(
-    `UPDATE tasks SET archived_at=NULL,reports_to_main=reports_to_main OR $3
-     WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL`,
-    [chatId, ownerId, !fromChat],
-  );
-}
-
-export async function noteSessionInput(client: Queryable, ownerId: string, sessionId: string) {
-  const turn = (
-    await client.query<{ task_id: string | null }>(
-      `SELECT to_jsonb(u)->>'task_id' AS task_id FROM turns u WHERE u.session_id=$1 AND u.owner_id=$2
-       ORDER BY u.created_at DESC,u.id DESC LIMIT 1`,
-      [sessionId, ownerId],
-    )
-  ).rows[0];
-  if (turn?.task_id) await noteChatInput(client, ownerId, turn.task_id, false);
 }

@@ -35,7 +35,7 @@ import {
   workOriginSql,
   taskMessageSql,
 } from './turn-chain.ts';
-import { chatOnlyPlacement, noteSessionInput, type MessageKind } from './chats.ts';
+import { chatOnlyPlacement, type MessageKind } from './chats.ts';
 import { dataRoot, databaseUrl, ownerId } from './config.ts';
 import { delta, refresh, working } from './events.ts';
 import {
@@ -661,13 +661,17 @@ async function repliesOutsideChat(
 
 export async function messageIntakeSignal(
   arrival: AbortSignal,
-  input: Pick<SubmitUserMessageOptions, 'threadId' | 'replyToMessageId' | 'chatClearedAt'>,
+  input: Pick<
+    SubmitUserMessageOptions,
+    'threadId' | 'replyToMessageId' | 'chatClearedAt' | 'chatId'
+  >,
   database: Pool | PoolClient = pool,
 ) {
   const chat = chatIntakes.get(arrival);
   if (!chat && input.chatClearedAt === undefined) return undefined;
   const threadId = input.threadId ?? (await activeThread(database)).id;
-  if (await repliesOutsideChat(database, threadId, input.replyToMessageId)) return undefined;
+  if (input.chatId || (await repliesOutsideChat(database, threadId, input.replyToMessageId)))
+    return undefined;
   if (input.chatClearedAt !== undefined) {
     const current = await database.query<{ current: boolean }>(
       'SELECT chat_cleared_at IS NOT DISTINCT FROM $3::timestamptz AS current FROM threads WHERE id=$1 AND owner_id=$2',
@@ -716,7 +720,7 @@ type TaskReply = (
       id: string | null;
       session_id: string;
       background: boolean;
-      record(turnId: string): Promise<boolean>;
+      record(turnId: string, text: string, live: boolean): Promise<boolean>;
       saved(messageId: string): Promise<void>;
     }
   | undefined
@@ -874,7 +878,7 @@ export async function submitUserMessage(
     const messageId = options.clientMessageId ?? randomUUID();
     const turnId = randomUUID();
     const taskTarget =
-      live && (options.replyToMessageId || options.chatId)
+      options.chatId || (live && options.replyToMessageId)
         ? await taskReply?.(client, thread.id, options.replyToMessageId, options.chatId)
         : undefined;
     const question = live
@@ -904,15 +908,15 @@ export async function submitUserMessage(
         messageId,
         options.prompt ?? text,
         channel,
-        question?.session_id ?? thread.id,
-        question?.background ?? false,
+        (question ?? taskTarget)?.session_id ?? thread.id,
+        (question ?? taskTarget)?.background ?? false,
         question?.id ?? null,
         live ? 'queued' : 'cancelled',
       ],
     );
-    const chatOnly = taskTarget ? (await taskTarget.record(turnId)) && channel === 'web' : false;
-    if (question && !taskTarget && !options.chatId && question.session_id !== thread.id)
-      await noteSessionInput(client, ownerId, question.session_id);
+    const chatOnly = taskTarget
+      ? (await taskTarget.record(turnId, options.prompt ?? text, live)) && channel === 'web'
+      : false;
     const prepared = (await options.prepareAttachments?.(client, thread.id)) ?? [];
     await client.query(
       "INSERT INTO messages(id,owner_id,role,text,display_text,thread_id,turn_id,attachments,reply_to_message_id,reply_quote,audio_caption,question_answer,chat_only) VALUES($1,$2,'user',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",

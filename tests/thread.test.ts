@@ -2386,6 +2386,15 @@ test(
               await reuse;
               return { status: 'succeeded' };
             }
+            if (context.taskContext?.nameAuto) {
+              const own = { action: 'name', id: context.taskContext.id };
+              await context.task!({ ...own, name: 'Travel' });
+              await assert.rejects(
+                context.task!({ ...own, name: 'Trips' }),
+                /already has its name/,
+              );
+              return { status: 'succeeded' };
+            }
             if (context.taskContext?.id !== chat?.id || !chat) return;
             await context.task!({
               action: 'finish',
@@ -2406,22 +2415,30 @@ test(
           const row = async () =>
             (
               await db.pool.query(
-                'SELECT state,reports_to_main,source_message_id,request_started_at FROM tasks WHERE id=$1',
+                'SELECT state,title,next_check,turn_id,source_message_id,request_started_at FROM tasks WHERE id=$1',
                 [chat!.id],
               )
             ).rows[0];
           const message = async (id: string) =>
             (await db.pool.query('SELECT chat_only,turn_id FROM messages WHERE id=$1', [id]))
               .rows[0];
-          const reported = (
-            await db.pool.query(
-              "SELECT m.chat_only FROM messages m JOIN turns u ON u.id=m.turn_id WHERE u.task_id=$1 AND m.role='assistant'",
-              [chat!.id],
-            )
-          ).rows;
-          assert.ok(reported.length);
-          assert.ok(reported.every(({ chat_only }) => chat_only === false));
+          const replies = async () =>
+            (
+              await db.pool.query(
+                "SELECT m.chat_only FROM messages m JOIN turns u ON u.id=m.turn_id WHERE u.task_id=$1 AND m.role='assistant'",
+                [chat!.id],
+              )
+            ).rows;
+          await waitFor(async () => (await replies()).length > 0);
+          const reported = await replies();
+          assert.ok(reported.every(({ chat_only }) => chat_only === true));
+          const listed = (await tasks.read()).find(({ id }) => id === chat!.id);
+          assert.equal(listed?.result, 'Synthetic chat result');
+          assert.equal(listed?.lastReply, `Synthetic chat answer: ${prompt}`);
 
+          await db.pool.query("UPDATE tasks SET next_check=now()+interval '1 day' WHERE id=$1", [
+            chat!.id,
+          ]);
           const first = await userMessages.submit('Synthetic follow-up in the chat', [], {
             chatId: chat!.id,
           });
@@ -2438,8 +2455,9 @@ test(
           });
           assert.equal((await message(first.messageId)).chat_only, true);
           const restarted = await row();
-          assert.equal(restarted.reports_to_main, false);
           assert.equal(restarted.source_message_id, first.messageId);
+          assert.equal(restarted.title, 'Synthetic follow-up in the chat');
+          assert.equal(restarted.next_check, null);
           const answer = (
             await db.pool.query(
               "SELECT id,chat_only FROM messages WHERE turn_id=$1 AND role='assistant'",
@@ -2452,10 +2470,10 @@ test(
           assert.ok(!main.some(({ id }) => id === first.messageId || id === answer.id));
           const inChat = (
             await app.inject({ method: 'GET', url: `/api/chats/${chat!.id}/messages`, headers })
-          ).json().messages as Array<{ id: string }>;
-          assert.ok(inChat.some(({ id }) => id === first.messageId));
+          ).json().messages as Array<{ id: string; inMain: boolean }>;
+          assert.equal(inChat.find(({ id }) => id === first.messageId)?.inMain, false);
           assert.ok(inChat.some(({ id }) => id === answer.id));
-          assert.ok(inChat.some(({ id }) => id === request.messageId));
+          assert.equal(inChat.find(({ id }) => id === request.messageId)?.inMain, true);
 
           const evidence = async (turnId: string) =>
             (
@@ -2545,6 +2563,24 @@ test(
           assert.equal((await message(hello.messageId)).chat_only, true);
           await waitFor(settled(hello.turnId));
 
+          const unnamed = (
+            await app.inject({
+              method: 'POST',
+              url: '/api/chats',
+              headers,
+              payload: { about: 'Synthetic travel plans for spring' },
+            })
+          ).json();
+          assert.equal(unnamed.name, 'Synthetic travel');
+          assert.equal(unnamed.nameAuto, true);
+          const trip = await userMessages.submit('Synthetic travel plans for spring', [], {
+            chatId: unnamed.id,
+          });
+          await waitFor(settled(trip.turnId));
+          const travel = (await tasks.read()).find(({ id }) => id === unnamed.id);
+          assert.equal(travel?.name, 'Travel');
+          assert.equal(travel?.nameAuto, undefined);
+
           const again = await userMessages.submit(next);
           await waitFor(settled(again.turnId));
           await reuse;
@@ -2554,8 +2590,14 @@ test(
           assert.ok(!read.includes('Synthetic first message in Finance'));
           await waitFor(async () => (await row()).state === 'done');
           const reused = await row();
-          assert.equal(reused.reports_to_main, true);
           assert.equal(reused.source_message_id, again.messageId);
+          const granted = await evidence(reused.turn_id);
+          assert.equal(granted.find(({ id }) => id === again.messageId)?.canAuthorize, true);
+          assert.equal(granted.find(({ id }) => id === second.messageId)?.canAuthorize, false);
+          const kept = (
+            await app.inject({ method: 'GET', url: `/api/chats/${chat!.id}/messages`, headers })
+          ).json().messages as Array<{ id: string }>;
+          assert.ok(kept.some(({ id }) => id === request.messageId));
           assert.equal((await tasks.read()).filter(({ name }) => name === 'Recruiter').length, 1);
         },
       );
