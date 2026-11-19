@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { syncBuiltinESMExports } from 'node:module';
 import path, { join, win32 } from 'node:path';
@@ -1100,12 +1100,14 @@ test('a context restart drops old model input once and keeps later turns through
   t.after(() => f.close());
   const sessionRoot = join(f.directory, 'sessions');
   const requests: string[] = [];
+  let manager: SessionManager | undefined;
   const agent = createPiAgent({
     provider: 'openai',
     apiKey: 'fixture',
     sessionRoot,
     createSession: async (options) => {
       const result = await createAgentSession(options);
+      manager = result.session.sessionManager;
       result.session.agent.streamFunction = (model, context) => {
         requests.push(JSON.stringify(context.messages));
         const message = {
@@ -1145,14 +1147,23 @@ test('a context restart drops old model input once and keeps later turns through
   assert.doesNotMatch(requests.at(-1)!, /old context that must not return/);
   assert.match(requests.at(-1)!, /Synthetic saved preferences/);
   const saved = join(sessionRoot, f.threadId);
-  const manager = SessionManager.continueRecent(saved, saved);
+  assert.ok(manager);
   manager.appendCustomEntry('synthetic-padding', { value: 'x'.repeat(8 * 1024 * 1024) });
   for (const prompt of ['Synthetic request after rebase.', 'Synthetic next follow-up.']) {
+    const active = manager.getSessionFile();
+    assert.ok(active);
+    for (const name of await readdir(saved)) {
+      const path = join(saved, name);
+      if (name.endsWith('.jsonl') && path !== active)
+        await utimes(path, new Date('2000-01-01T00:00:00Z'), new Date('2000-01-01T00:00:00Z'));
+    }
     const followUp = await open(marker);
     assert.equal(followUp.resumed, true);
     await followUp.prompt(prompt, []);
     await followUp.dispose();
     assert.match(requests.at(-1)!, /Synthetic request after restart/);
+    if (prompt === 'Synthetic next follow-up.')
+      assert.match(requests.at(-1)!, /Synthetic request after rebase/);
     assert.doesNotMatch(requests.at(-1)!, /old context that must not return/);
   }
   assert.match(await localText(saved), /old context that must not return/);
