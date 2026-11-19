@@ -6,9 +6,11 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import pg from 'pg';
+import { z } from 'zod';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { MemoryCurator } from '../src/ports/memory-curator.ts';
@@ -153,6 +155,7 @@ test(
     let checkCost: number | undefined;
     const connectionLabels: unknown[] = [];
     let confirmationValid = true;
+    let confirmationModel: ((input: Record<string, unknown>) => unknown) | undefined;
     const decisionInputs: Array<{ name: string; input: Record<string, any> }> = [];
     const fallbackChecks: object[] = [];
     const smallReplies: object[] = [];
@@ -198,6 +201,7 @@ test(
       { tool?: string; action: string; args: Record<string, unknown> } | undefined;
     const prompts = new Map<string, string>();
     const runtimeCommands = new Map<string, AgentSessionOptions['runTool']>();
+    const advertisedMcp = new Map<string, string>();
     const opened: Array<{ turnId: string; model?: string; helper: boolean }> = [];
     const integrationFixture = createIntegrationFixture(`http://localhost:${port}`);
     const { createModelService } = await import('../src/server/models.ts');
@@ -231,6 +235,12 @@ test(
           Object(Object(input).data).action === 'NOD_browser'
         )
           return browserWording(input as Record<string, any>);
+        if (
+          confirmationModel &&
+          'purpose' in input &&
+          ['confirmation', 'confirmation_review'].includes(String(input.purpose))
+        )
+          return confirmationModel(input as Record<string, unknown>);
         if ('purpose' in input && input.purpose === 'connection' && connectionLabels.length)
           return connectionLabels.shift();
         if ('purpose' in input && input.purpose === 'payment')
@@ -336,6 +346,8 @@ test(
         agent: {
           async open(options) {
             runtimeCommands.set(options.turnId, options.runTool);
+            for (const tool of options.tools)
+              if (tool.name.startsWith('mcp__')) advertisedMcp.set(tool.name, tool.description);
             opened.push({
               turnId: options.turnId,
               model: options.model?.modelId,
@@ -463,16 +475,18 @@ test(
                     options.tools
                       .find((tool) => tool.name === (plan.tool ?? 'manage_personal_context'))!
                       .execute(
-                        plan.tool === 'send_message' || plan.tool === 'pay'
-                          ? plan.args
-                          : plan.tool === 'read_source'
-                            ? { input: plan.args }
-                            : plan.tool === 'browser' ||
-                                plan.tool === 'sign_in' ||
-                                plan.tool === 'files' ||
-                                plan.tool === 'task'
-                              ? { action: plan.action, ...plan.args }
-                              : { action: plan.action, args: plan.args },
+                        plan.tool?.startsWith('mcp__')
+                          ? (plan.args.input as Record<string, unknown>)
+                          : plan.tool === 'send_message' || plan.tool === 'pay'
+                            ? plan.args
+                            : plan.tool === 'read_source'
+                              ? { input: plan.args }
+                              : plan.tool === 'browser' ||
+                                  plan.tool === 'sign_in' ||
+                                  plan.tool === 'files' ||
+                                  plan.tool === 'task'
+                                ? { action: plan.action, ...plan.args }
+                                : { action: plan.action, args: plan.args },
                       ),
                   );
                   results.set(options.turnId, result);
@@ -3997,6 +4011,290 @@ test(
             assert.deepEqual(form, { origin: input.origin, kind: 'method', status: 'pending' });
           } finally {
             allowMethodBrowser = false;
+          }
+        },
+      );
+      await t.test(
+        'MCP confirmations use the selected tool definition and exact input',
+        async () => {
+          const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+          const { StreamableHTTPServerTransport } =
+            await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
+          const rowsDescription = 'Read the current rows from the selected table.';
+          const executionDescription =
+            'Read an execution. includeData true returns node inputs and outputs; false returns status only.';
+          const calls: Array<{ tool: string; input: Record<string, unknown> }> = [];
+          const server = createServer(async (incoming, outgoing) => {
+            const mcp = new McpServer({ name: 'synthetic-review-context', version: '1' });
+            mcp.registerTool(
+              'data_table_rows',
+              {
+                description: rowsDescription,
+                inputSchema: { tableId: z.string().describe('The exact table ID.') },
+              },
+              async (input) => {
+                calls.push({ tool: 'data_table_rows', input });
+                return { content: [{ type: 'text', text: 'Synthetic rows: 3.' }] };
+              },
+            );
+            mcp.registerTool(
+              'get_workflow_execution',
+              {
+                description: executionDescription,
+                inputSchema: {
+                  executionId: z.string(),
+                  includeData: z
+                    .boolean()
+                    .default(false)
+                    .describe('Include node inputs and outputs when true.'),
+                },
+              },
+              async (input) => {
+                calls.push({ tool: 'get_workflow_execution', input });
+                return {
+                  content: [
+                    {
+                      type: 'text',
+                      text: input.includeData
+                        ? 'Synthetic node inputs and outputs.'
+                        : 'Synthetic execution status.',
+                    },
+                  ],
+                };
+              },
+            );
+            const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+            outgoing.on('close', () => void transport.close());
+            await mcp.connect(transport);
+            await transport.handleRequest(incoming, outgoing);
+          });
+          await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+          const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}/mcp`;
+          let connection: { id: string; service: string; paths: Array<{ id: string }> } | undefined;
+          let statusOnly = false;
+          let executionId = 'synthetic-execution';
+          let duringWording: (() => Promise<void>) | undefined;
+          let wordingCalls = 0;
+          try {
+            const started = await request('POST', '/api/apps/mcp', {
+              name: 'Synthetic review context',
+              endpoint,
+              auth: 'bearer',
+            });
+            assert.equal(started.statusCode, 200, started.body);
+            const completed = await request(
+              'POST',
+              `/api/apps/discovery/${started.json().id}/complete`,
+              { token: 'synthetic-review-context-token', accountName: 'Synthetic review account' },
+            );
+            assert.equal(completed.statusCode, 200, completed.body);
+            connection = (
+              await pool.query(
+                'SELECT id,service,paths FROM discovered_connections WHERE owner_id=$1 AND name=$2',
+                [ownerId, 'Synthetic review context'],
+              )
+            ).rows[0];
+            assert.ok(connection);
+            confirmationModel = async (input) => {
+              const data = input.data as {
+                action: string;
+                args: { tool: string; input: Record<string, unknown> };
+                details: {
+                  account: { endpoint: string };
+                  tool?: {
+                    name: string;
+                    description: string;
+                    inputSchema: {
+                      properties: Record<string, { type: string; default?: unknown }>;
+                    };
+                  };
+                };
+              };
+              assert.equal(data.action, 'CONNECTED_MCP_CALL');
+              assert.equal('connectionId' in data.args, false);
+              assert.equal('pathId' in data.args, false);
+              assert.equal('verifiedBinding' in data.details, false);
+              assert.equal(JSON.stringify(input).includes('synthetic-review-context-token'), false);
+              assert.equal(data.details.account.endpoint, endpoint);
+              const definition = data.details.tool;
+              assert.ok(definition, 'The selected MCP tool definition is missing.');
+              assert.equal(definition.name, data.args.tool);
+              wordingCalls++;
+              let text: string;
+              if (definition.name === 'data_table_rows') {
+                assert.equal(definition.description, rowsDescription);
+                assert.equal(definition.inputSchema.properties.tableId!.type, 'string');
+                assert.deepEqual(data.args.input, { tableId: 'synthetic-table' });
+                text = 'Can I read the current rows from the synthetic table?';
+              } else {
+                assert.equal(definition.description, executionDescription);
+                assert.equal(definition.inputSchema.properties.includeData!.type, 'boolean');
+                assert.equal(definition.inputSchema.properties.includeData!.default, false);
+                assert.deepEqual(data.args.input, {
+                  executionId,
+                  includeData: true,
+                });
+                text = 'Can I read the node inputs and outputs for the synthetic execution?';
+              }
+              if (input.purpose === 'confirmation_review')
+                return input.text === text
+                  ? { valid: true }
+                  : {
+                      valid: false,
+                      reason: 'The question omits the requested node inputs and outputs.',
+                    };
+              if (duringWording) {
+                const change = duringWording;
+                duringWording = undefined;
+                await change();
+              }
+              return {
+                text: statusOnly ? 'Can I read only the synthetic execution status?' : text,
+                action: 'Read data',
+              };
+            };
+            for (const [tool, input, result] of [
+              ['data_table_rows', { tableId: 'synthetic-table' }, /Synthetic rows: 3/],
+              [
+                'get_workflow_execution',
+                { executionId, includeData: true },
+                /Synthetic node inputs and outputs/,
+              ],
+            ] as const) {
+              const before = calls.length;
+              const args: Record<string, unknown> = {
+                connectionId: connection.id,
+                pathId: connection.paths[0]!.id,
+                tool,
+                input,
+              };
+              const native =
+                tool === 'get_workflow_execution'
+                  ? [...advertisedMcp].find(([, description]) =>
+                      description.includes(executionDescription),
+                    )?.[0]
+                  : undefined;
+              if (tool === 'get_workflow_execution')
+                assert.ok(native, 'The native MCP tool must be offered.');
+              const held = await propose('CONNECTED_MCP_CALL', args, native ?? 'apps');
+              const [card] = await approvalsFor(held);
+              assert.equal(card.status, 'pending');
+              assert.deepEqual(card.args, args);
+              assert.equal(calls.length, before);
+              const response = await request('POST', '/api/messages', {
+                text: 'Yes',
+                replyToMessageId: card.confirmation_message_id,
+                approvalAnswer: { approvalId: card.id, approved: true },
+              });
+              assert.equal(response.statusCode, 200, response.body);
+              await waitFor(response.json().turnId, 'succeeded');
+              const saved = (await approvalsFor(held))[0];
+              assert.equal(saved.status, 'completed');
+              assert.match(JSON.stringify(saved.result), result);
+              assert.deepEqual(calls.slice(before), [{ tool, input }]);
+            }
+            statusOnly = true;
+            const prompt = `Synthetic full execution review ${randomUUID()}`;
+            plans.set(prompt, {
+              tool: 'apps',
+              action: 'CONNECTED_MCP_CALL',
+              args: {
+                connectionId: connection.id,
+                pathId: connection.paths[0]!.id,
+                tool: 'get_workflow_execution',
+                input: { executionId, includeData: true },
+              },
+            });
+            const rejected = await request('POST', '/api/messages', { text: prompt });
+            assert.equal(rejected.statusCode, 200, rejected.body);
+            await waitFor(rejected.json().turnId, 'succeeded|failed');
+            assert.deepEqual(await approvalsFor(rejected.json().turnId), []);
+            const failed = (
+              await pool.query('SELECT error FROM turns WHERE id=$1', [rejected.json().turnId])
+            ).rows[0];
+            assert.match(
+              JSON.stringify(results.get(rejected.json().turnId)) ?? failed.error,
+              /omits the requested node inputs and outputs/,
+            );
+            assert.equal(calls.length, 2);
+            assert.equal(wordingCalls, 8);
+            statusOnly = false;
+            const nextArgs = () => ({
+              connectionId: connection!.id,
+              pathId: connection!.paths[0]!.id,
+              tool: 'get_workflow_execution',
+              input: { executionId, includeData: true },
+            });
+            for (const reason of ['rebind', 'legacy']) {
+              executionId = `synthetic-pending-${reason}`;
+              const pending = await propose('CONNECTED_MCP_CALL', nextArgs(), 'apps');
+              const [pendingCard] = await approvalsFor(pending);
+              assert.equal(typeof pendingCard.details.verifiedBinding, 'string');
+              if (reason === 'rebind')
+                await pool.query(
+                  'UPDATE discovered_connections SET account_id=gen_random_uuid() WHERE id=$1',
+                  [connection.id],
+                );
+              else
+                await pool.query(
+                  "UPDATE approvals SET details=details-'verifiedBinding' WHERE id=$1",
+                  [pendingCard.id],
+                );
+              const answer = await request('POST', '/api/messages', {
+                text: 'Yes',
+                replyToMessageId: pendingCard.confirmation_message_id,
+                approvalAnswer: { approvalId: pendingCard.id, approved: true },
+              });
+              assert.equal(answer.statusCode, 200, answer.body);
+              await waitFor(answer.json().turnId, 'succeeded|failed');
+              const [expired] = await approvalsFor(pending);
+              assert.equal(expired.status, 'expired');
+              assert.match(
+                JSON.stringify(expired.result),
+                reason === 'rebind' ? /connected account changed/ : /no saved account binding/,
+              );
+              assert.equal(calls.length, 2);
+            }
+
+            executionId = 'synthetic-wording-rebind';
+            duringWording = async () => {
+              await pool.query(
+                'UPDATE discovered_connections SET account_id=gen_random_uuid() WHERE id=$1',
+                [connection!.id],
+              );
+            };
+            const changedPrompt = `Synthetic wording change ${randomUUID()}`;
+            plans.set(changedPrompt, {
+              tool: 'apps',
+              action: 'CONNECTED_MCP_CALL',
+              args: nextArgs(),
+            });
+            const changed = await request('POST', '/api/messages', { text: changedPrompt });
+            assert.equal(changed.statusCode, 200, changed.body);
+            await waitFor(changed.json().turnId, 'succeeded|failed');
+            assert.deepEqual(await approvalsFor(changed.json().turnId), []);
+            assert.equal(duringWording, undefined);
+            const changedTurn = (
+              await pool.query('SELECT error FROM turns WHERE id=$1', [changed.json().turnId])
+            ).rows[0];
+            assert.match(
+              JSON.stringify(results.get(changed.json().turnId)) ?? changedTurn.error,
+              /connected account changed before confirmation/,
+            );
+            assert.equal(calls.length, 2);
+            assert.equal(
+              decisionInputs.some((entry) => JSON.stringify(entry).includes(executionDescription)),
+              false,
+            );
+          } finally {
+            confirmationModel = undefined;
+            if (connection)
+              await request(
+                'POST',
+                `/api/apps/${connection.service}/accounts/${connection.id}/disconnect`,
+              );
+            server.closeAllConnections();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
           }
         },
       );
