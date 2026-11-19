@@ -4628,7 +4628,15 @@ test(
         const { StreamableHTTPServerTransport } =
           await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
         let calls = 0;
+        const requestPaths = new Set<string>();
         const server = createServer(async (incoming, outgoing) => {
+          const path = new URL(incoming.url ?? '/', 'http://localhost').pathname;
+          requestPaths.add(path);
+          if (path !== '/tools(v2)') {
+            outgoing.writeHead(404);
+            outgoing.end('Synthetic MCP endpoint not found.');
+            return;
+          }
           const mcp = new McpServer({ name: 'synthetic-readiness', version: '1' });
           mcp.registerTool(
             'readiness_check',
@@ -4707,6 +4715,7 @@ test(
           assert.equal(saved.status, 'completed');
           assert.match(JSON.stringify(saved.result), /Synthetic service is ready/);
           assert.equal(calls, 1);
+          assert.deepEqual([...requestPaths], ['/tools(v2)']);
           assert.deepEqual(saved.args, args);
         } finally {
           confirmationModel = undefined;
