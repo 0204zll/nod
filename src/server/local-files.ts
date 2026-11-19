@@ -736,7 +736,17 @@ export function createLocalFiles(
         );
       return resolved;
     };
-    const target = async (path: string) => bound(await resolve(path), path);
+    const target = async (path: string) => {
+      try {
+        return bound(await resolve(path), path);
+      } catch (error) {
+        if (action === 'LOCAL_FILES_READ' || action === 'LOCAL_FILES_IMPORT')
+          throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
+            notRun: true,
+          });
+        throw error;
+      }
+    };
     if ((action === 'LOCAL_FILES_READ' || action === 'LOCAL_FILES_IMPORT') && !input.version) {
       await target(input.path);
       throw Object.assign(

@@ -1188,9 +1188,16 @@ test('local file opening failures return no bytes and permit a fresh read', asyn
       'open failure',
       'stat failure',
       'version failure',
+      'target removed',
+      'target retargeted',
     ]) {
       await writeFile(path, 'old');
       const checked = await files.prepare(action, { path });
+      assert.deepEqual(await files.prepare(action, checked), checked);
+      if (race.startsWith('target ')) {
+        await rm(path);
+        if (race === 'target retargeted') await symlink(target, path);
+      }
       const failure = Object.assign(new Error('EIO: synthetic file opening failed'), {
         code: 'EIO',
         statusCode: 503,
@@ -1198,8 +1205,10 @@ test('local file opening failures return no bytes and permit a fresh read', asyn
       let restoreStat = () => {};
       let restoreClose = () => {};
       let opened = false;
+      let opens = 0;
       const intercepted = t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
         if (args[0] !== path) return Reflect.apply(originalOpen, fs, args);
+        opens++;
         if (race === 'open failure') throw failure;
         if (['removed', 'symlink', 'replaced'].includes(race)) await rm(path);
         if (race === 'symlink') await symlink(target, path);
@@ -1232,7 +1241,7 @@ test('local file opening failures return no bytes and permit a fresh read', asyn
       try {
         await assert.rejects(files.execute(action, checked), (error: unknown) => {
           assert.ok(error instanceof Error);
-          assert.equal((error as { notRun?: boolean }).notRun, true);
+          assert.equal((error as { notRun?: boolean }).notRun, true, race);
           if (race.endsWith('failure')) {
             assert.equal(error, failure);
             assert.equal(failure.code, 'EIO');
@@ -1241,6 +1250,7 @@ test('local file opening failures return no bytes and permit a fresh read', asyn
           return true;
         });
         assert.equal(reads, 0);
+        if (race.startsWith('target ')) assert.equal(opens, 0);
         assert.equal(closes, closesBefore + Number(opened));
       } finally {
         restoreStat();
