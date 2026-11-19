@@ -4,11 +4,11 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
-import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import pg from 'pg';
@@ -102,7 +102,7 @@ function syntheticConfirmation(input: Record<string, unknown>) {
 
 test(
   'personal approvals revalidate targets before execution',
-  { skip: !process.env.TEST_DATABASE_URL, timeout: 120_000 },
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 180_000 },
   async (t) => {
     const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
     const schema = `test_personal_review_${suffix}`;
@@ -214,6 +214,12 @@ test(
     let changeRulesOnDraftRead = false;
     let changedRulesDuringDraftRead = 0;
     let repeatAfterConfirm: FixtureCall | FixtureCall[] | undefined;
+    let questionAfterConfirm: string | undefined;
+    let repeatDecision: 'new' | 'same' | 'uncertain' = 'same';
+    let holdRepeatCheck: (() => Promise<void>) | undefined;
+    let parallelRepeatWork: ((options: AgentSessionOptions) => Promise<void>) | undefined;
+    let workflowUpdate: { workflowId: string; threshold: number } | undefined;
+    const repeatChecks: Record<string, unknown>[] = [];
     const prompts = new Map<string, string>();
     const runtimeCommands = new Map<string, AgentSessionOptions['runTool']>();
     const advertisedMcp = new Map<string, string>();
@@ -242,7 +248,7 @@ test(
     const fixtureCurator: MemoryCurator = {
       id: 'fixture',
       configured: true,
-      curate: async ({ task, input }, _signal, report) => {
+      curate: async ({ task, input, instructions }, _signal, report) => {
         if (task === 'review' && heldReview?.purpose === Object(input).purpose && heldReview) {
           const held = heldReview;
           held.entered(_signal);
@@ -262,6 +268,12 @@ test(
           ['confirmation', 'confirmation_review'].includes(String(input.purpose))
         )
           return confirmationModel(input as Record<string, unknown>);
+        if (task === 'review' && 'reply' in input && 'question' in input && 'args' in input) {
+          assert.match(instructions, /"probability"/);
+          repeatChecks.push(input);
+          await holdRepeatCheck?.();
+          return { repeatedAction: repeatDecision, probability: 1 };
+        }
         if ('purpose' in input && input.purpose === 'connection' && connectionLabels.length)
           return connectionLabels.shift();
         if ('purpose' in input && input.purpose === 'payment')
@@ -415,15 +427,29 @@ test(
                 ) {
                   const calls = repeatAfterConfirm;
                   repeatAfterConfirm = undefined;
-                  for (const call of Array.isArray(calls) ? calls : [calls])
+                  for (const call of Array.isArray(calls) ? calls : [calls]) {
+                    const name =
+                      call.tool === 'synthetic_mcp'
+                        ? options.tools.find((item) => item.name.endsWith('__execute_workflow'))!
+                            .name
+                        : (call.tool ?? 'apps');
                     results.set(
                       options.turnId,
-                      await tool(call.tool ?? 'apps').execute(
-                        call.tool === 'files' || call.tool === 'sign_in'
-                          ? { action: call.action, ...call.args }
-                          : call,
+                      await tool(name).execute(
+                        call.tool === 'synthetic_mcp'
+                          ? call.args
+                          : call.tool === 'files' || call.tool === 'sign_in'
+                            ? { action: call.action, ...call.args }
+                            : call,
                       ),
                     );
+                  }
+                  if (!questionAfterConfirm) return;
+                }
+                if (questionAfterConfirm && text.includes('executed once by the trusted worker')) {
+                  const question = questionAfterConfirm;
+                  questionAfterConfirm = undefined;
+                  await tool('ask_user').execute({ question });
                   return;
                 }
                 const part = parts.get(
@@ -505,13 +531,26 @@ test(
                     return;
                   }
 
-                  const result = await activePlan.run(instruction, () =>
+                  if (plan.tool === 'synthetic_mcp' && workflowUpdate) {
+                    const update = workflowUpdate;
+                    workflowUpdate = undefined;
+                    await options.tools
+                      .find((item) => item.name.endsWith('__update_workflow'))!
+                      .execute(update);
+                  }
+                  const name =
+                    plan.tool === 'synthetic_mcp'
+                      ? options.tools.find((item) => item.name.endsWith('__execute_workflow'))!.name
+                      : (plan.tool ?? 'manage_personal_context');
+                  const pending = activePlan.run(instruction, () =>
                     options.tools
-                      .find((tool) => tool.name === (plan.tool ?? 'manage_personal_context'))!
+                      .find((tool) => tool.name === name)!
                       .execute(
                         plan.tool?.startsWith('mcp__')
                           ? (plan.args.input as Record<string, unknown>)
-                          : plan.tool === 'send_message' || plan.tool === 'pay'
+                          : plan.tool === 'synthetic_mcp' ||
+                              plan.tool === 'send_message' ||
+                              plan.tool === 'pay'
                             ? plan.args
                             : plan.tool === 'read_source'
                               ? { input: plan.args }
@@ -523,6 +562,8 @@ test(
                                 : { action: plan.action, args: plan.args },
                       ),
                   );
+                  await parallelRepeatWork?.(options);
+                  const result = await pending;
                   results.set(options.turnId, result);
                   return;
                 }
@@ -1532,6 +1573,214 @@ test(
           }
         },
       );
+
+      await t.test(
+        'a task browser repeat needs a new approval before its second click',
+        async () => {
+          const title = `Synthetic bank task ${randomUUID()}`;
+          const ownerRequest = `Start a task to inspect the synthetic bank page ${title}.`;
+          const reply = `Click Authorize payment again for ${title}.`;
+          const question = `Should I click Authorize payment again for ${title}?`;
+          const click = { tool: 'browser', action: 'click', args: { selector: '@e7' } };
+          const clicks = () => browserActs.filter((act) => act.action === 'click').length;
+          const before = clicks();
+          try {
+            batches.set(ownerRequest, {
+              subagents: false,
+              sequential: true,
+              chatOnly: true,
+              calls: [
+                {
+                  tool: 'task',
+                  action: 'start',
+                  args: {
+                    title,
+                    message: 'I will inspect the synthetic bank page.',
+                    doneWhen: 'The synthetic page has been checked.',
+                    now: 'Checking the page',
+                  },
+                },
+              ],
+              taskCalls: [click],
+            });
+            await waitFor((await submitUserMessage(ownerRequest)).turnId, 'succeeded');
+            const task = (
+              await pool.query('SELECT id,turn_id FROM tasks WHERE owner_id=$1 AND title=$2', [
+                ownerId,
+                title,
+              ])
+            ).rows[0];
+            assert.ok(task);
+            await waitFor(task.turn_id, 'waiting');
+            const [first] = await approvalsFor(task.turn_id);
+            assert.equal(first.action, 'NOD_browser');
+            assert.equal(first.status, 'pending');
+            assert.equal(clicks(), before);
+            questionAfterConfirm = question;
+            const accepted = await request('POST', '/api/messages', {
+              text: 'Click Authorize payment',
+              replyToMessageId: first.confirmation_message_id,
+              approvalAnswer: { approvalId: first.id, approved: true },
+            });
+            assert.equal(accepted.statusCode, 200, accepted.body);
+            await waitFor(accepted.json().turnId, 'waiting');
+            assert.equal(clicks(), before + 1);
+            const savedFirst = (await approvalsFor(task.turn_id))[0];
+            assert.equal(savedFirst.status, 'completed');
+            const savedQuestion = (
+              await pool.query(
+                "SELECT id FROM messages WHERE turn_id=$1 AND role='assistant' AND text=$2",
+                [accepted.json().turnId, question],
+              )
+            ).rows[0];
+            assert.ok(savedQuestion);
+            asked.add(reply);
+            plans.set(reply, click);
+            repeatDecision = 'new';
+            const repeated = await request('POST', '/api/messages', {
+              text: reply,
+              replyToMessageId: savedQuestion.id,
+            });
+            assert.equal(repeated.statusCode, 200, repeated.body);
+            await waitFor(repeated.json().turnId, 'waiting|succeeded');
+            const repeatedTurn = (
+              await pool.query('SELECT session_id FROM turns WHERE id=$1', [repeated.json().turnId])
+            ).rows[0];
+            const taskSession = (
+              await pool.query('SELECT session_id FROM turns WHERE id=$1', [task.turn_id])
+            ).rows[0];
+            assert.equal(repeatedTurn.session_id, taskSession.session_id);
+            const [second] = await approvalsFor(repeated.json().turnId);
+            assert.ok(second, 'A repeated task browser action must save a new approval.');
+            assert.ok(
+              repeatChecks.some(
+                (input) => Object(input).reply === reply && Object(input).question === question,
+              ),
+            );
+            assert.equal(second.status, 'pending');
+            assert.equal(second.source_message_id, repeated.json().messageId);
+            assert.deepEqual(second.args, first.args);
+            assert.equal(clicks(), before + 1);
+            assert.deepEqual((await approvalsFor(task.turn_id))[0].result, savedFirst.result);
+            const confirmed = await request('POST', '/api/messages', {
+              text: 'Click Authorize payment',
+              replyToMessageId: second.confirmation_message_id,
+              approvalAnswer: { approvalId: second.id, approved: true },
+            });
+            assert.equal(confirmed.statusCode, 200, confirmed.body);
+            await waitFor(confirmed.json().turnId, 'succeeded');
+            assert.equal(clicks(), before + 2);
+            assert.equal((await approvalsFor(repeated.json().turnId))[0].status, 'completed');
+            assert.deepEqual((await approvalsFor(task.turn_id))[0].result, savedFirst.result);
+          } finally {
+            questionAfterConfirm = undefined;
+            repeatDecision = 'same';
+            batches.delete(ownerRequest);
+            plans.delete(reply);
+            asked.delete(reply);
+          }
+        },
+      );
+
+      await t.test('a legacy browser repeat checks its target before wording', async (t) => {
+        for (const [kind, command] of [
+          ['y coordinate', { y: 0.5 }],
+          [
+            'points',
+            {
+              points: [
+                { x: 0.5, y: 0.5 },
+                { x: 0.5, y: 0.5 },
+              ],
+            },
+          ],
+        ] as const)
+          await t.test(kind, async () => {
+            const question = `Should I repeat the synthetic ${kind} click?`;
+            const reply = `Repeat the synthetic ${kind} click ${randomUUID()}.`;
+            const clicks = () => browserActs.filter((act) => act.action === 'click').length;
+            const before = clicks();
+            try {
+              const initial = await propose('click', { selector: '@e7' }, 'browser');
+              const [first] = await approvalsFor(initial);
+              assert.equal(first.action, 'NOD_browser');
+              questionAfterConfirm = question;
+              const accepted = await request('POST', '/api/messages', {
+                text: 'Click Authorize payment',
+                replyToMessageId: first.confirmation_message_id,
+                approvalAnswer: { approvalId: first.id, approved: true },
+              });
+              assert.equal(accepted.statusCode, 200, accepted.body);
+              await waitFor(accepted.json().turnId, 'waiting');
+              const saved = (await approvalsFor(initial))[0];
+              assert.equal(saved.status, 'completed');
+              assert.equal(clicks(), before + 1);
+              const savedQuestion = (
+                await pool.query(
+                  "SELECT id FROM messages WHERE turn_id=$1 AND role='assistant' AND text=$2",
+                  [accepted.json().turnId, question],
+                )
+              ).rows[0];
+              assert.ok(savedQuestion);
+              browserControls = [
+                { role: 'RootWebArea', name: 'Synthetic bank' },
+                { role: 'button', name: 'Secondary control' },
+              ];
+              const legacy = {
+                ...first.args,
+                control: browserControls,
+                command: { action: 'click', ...command },
+              };
+              await pool.query('UPDATE approvals SET args=$2::jsonb WHERE id=$1', [
+                first.id,
+                legacy,
+              ]);
+              let wording = 0;
+              browserWording = (input) => {
+                wording++;
+                return input.purpose === 'confirmation_review'
+                  ? { valid: true }
+                  : syntheticConfirmation(input);
+              };
+              asked.add(reply);
+              plans.set(reply, { tool: 'browser', action: 'click', args: { ...command } });
+              repeatDecision = 'new';
+              const repeated = await request('POST', '/api/messages', {
+                text: reply,
+                replyToMessageId: savedQuestion.id,
+              });
+              assert.equal(repeated.statusCode, 200, repeated.body);
+              await waitFor(repeated.json().turnId, 'waiting|failed');
+              assert.deepEqual(repeatChecks.at(-1), {
+                action: 'NOD_browser',
+                args: legacy,
+                reply,
+                question,
+              });
+              const turn = (
+                await pool.query('SELECT status,error FROM turns WHERE id=$1', [
+                  repeated.json().turnId,
+                ])
+              ).rows[0];
+              assert.equal(turn.status, 'failed');
+              assert.match(turn.error, /click target is not identified/);
+              assert.deepEqual(await approvalsFor(repeated.json().turnId), []);
+              assert.equal(wording, 0);
+              assert.equal(clicks(), before + 1);
+              const retained = (await approvalsFor(initial))[0];
+              assert.equal(retained.status, 'completed');
+              assert.deepEqual(retained.args, legacy);
+              assert.deepEqual(retained.result, saved.result);
+            } finally {
+              browserControls = [{ role: 'button', name: 'Authorize payment' }];
+              browserWording = undefined;
+              questionAfterConfirm = undefined;
+              repeatDecision = 'same';
+              plans.delete(reply);
+              asked.delete(reply);
+            }
+          });
+      });
 
       await t.test(
         'a labeled click keeps its replay command out of wording and waits for approval',
@@ -4542,7 +4791,73 @@ test(
               /connected account changed before confirmation/,
             );
             assert.equal(calls.length, 3);
+
+            const body = { label: 'Synthetic repeated record', count: 4 };
+            const args = { ...nextArgs(), method: 'POST', body };
+            expected = { method: 'POST', url, body };
+            const initial = await propose('CONNECTED_HTTP', args, 'apps');
+            const [first] = await approvalsFor(initial);
+            const question = 'Should I send the same synthetic request again?';
+            questionAfterConfirm = question;
+            const accepted = await request('POST', '/api/messages', {
+              text: 'Make request',
+              replyToMessageId: first.confirmation_message_id,
+              approvalAnswer: { approvalId: first.id, approved: true },
+            });
+            assert.equal(accepted.statusCode, 200, accepted.body);
+            await waitFor(accepted.json().turnId, 'waiting');
+            assert.equal(calls.length, 4);
+            const savedQuestion = (
+              await pool.query(
+                "SELECT id FROM messages WHERE turn_id=$1 AND role='assistant' AND text=$2",
+                [accepted.json().turnId, question],
+              )
+            ).rows[0];
+            assert.ok(savedQuestion);
+            const reply = 'Send the same synthetic request again.';
+            plans.set(reply, { tool: 'apps', action: 'CONNECTED_HTTP', args });
+            repeatDecision = 'new';
+            httpReview = async () => ({ run: true, because: 'read' });
+            wording.length = 0;
+            const repeated = await request('POST', '/api/messages', {
+              text: reply,
+              replyToMessageId: savedQuestion.id,
+            });
+            assert.equal(repeated.statusCode, 200, repeated.body);
+            await waitFor(repeated.json().turnId, 'waiting');
+            const [second] = await approvalsFor(repeated.json().turnId);
+            assert.equal(second.status, 'pending');
+            assert.equal(second.source_message_id, repeated.json().messageId);
+            assert.deepEqual(second.details.request, expected);
+            assert.equal(second.details.verifiedBinding, first.details.verifiedBinding);
+            assert.equal(calls.length, 4);
+            assert.deepEqual(
+              wording.map((input) => input.purpose),
+              ['confirmation', 'confirmation_review'],
+            );
+            for (const input of wording) {
+              assert.equal(input.data.action, 'HTTP request');
+              assert.deepEqual(input.data.args, expected);
+            }
+            const confirmed = await request('POST', '/api/messages', {
+              text: 'Make request',
+              replyToMessageId: second.confirmation_message_id,
+              approvalAnswer: { approvalId: second.id, approved: true },
+            });
+            assert.equal(confirmed.statusCode, 200, confirmed.body);
+            await waitFor(confirmed.json().turnId, 'succeeded');
+            assert.equal(calls.length, 5);
+            assert.deepEqual(
+              { ...calls.at(-1), body: JSON.parse(calls.at(-1)!.body) },
+              {
+                method: 'POST',
+                url: `/v2${route}`,
+                body,
+              },
+            );
           } finally {
+            questionAfterConfirm = undefined;
+            repeatDecision = 'same';
             httpReview = undefined;
             confirmationModel = undefined;
             await pool.query('DELETE FROM vault_app_grants WHERE owner_id=$1 AND id=$2', [
@@ -5342,6 +5657,302 @@ test(
         );
       });
 
+      await t.test(
+        'an explicit MCP workflow repeat asks again and returns the new execution',
+        async () => {
+          const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
+          const { StreamableHTTPServerTransport } =
+            await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
+          const { z } = await import('zod');
+          let threshold = 3;
+          const updates: number[] = [];
+          const executions: Array<{ executionId: string; threshold: number }> = [];
+          const server = createServer(async (request, response) => {
+            const mcp = new McpServer({ name: 'synthetic-workflow', version: '1' });
+            mcp.registerTool(
+              'update_workflow',
+              {
+                description: 'Set the threshold in the named synthetic workflow.',
+                inputSchema: { workflowId: z.string(), threshold: z.number() },
+              },
+              async (input) => {
+                assert.equal(input.workflowId, 'synthetic-workflow');
+                threshold = input.threshold;
+                updates.push(threshold);
+                return { content: [{ type: 'text', text: JSON.stringify({ threshold }) }] };
+              },
+            );
+            mcp.registerTool(
+              'execute_workflow',
+              {
+                description: 'Run the named synthetic workflow once.',
+                inputSchema: { workflowId: z.string() },
+              },
+              async ({ workflowId }) => {
+                assert.equal(workflowId, 'synthetic-workflow');
+                const result = { executionId: `synthetic-${executions.length + 1}`, threshold };
+                executions.push(result);
+                return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+              },
+            );
+            const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+            response.on('close', () => void transport.close());
+            await mcp.connect(transport);
+            await transport.handleRequest(request, response);
+          });
+          await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+          let connectionId: string | undefined;
+          let connectionService: string | undefined;
+          try {
+            const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}/mcp`;
+            const setup = await request('POST', '/api/apps/mcp', {
+              name: 'Synthetic workflow',
+              endpoint,
+              auth: 'bearer',
+            });
+            assert.equal(setup.statusCode, 200, setup.body);
+            const connected = await request(
+              'POST',
+              `/api/apps/discovery/${setup.json().id}/complete`,
+              { token: 'synthetic-mcp-token', accountName: 'Synthetic workspace' },
+            );
+            assert.equal(connected.statusCode, 200, connected.body);
+            const account = (
+              await pool.query(
+                'SELECT id,service FROM discovered_connections WHERE owner_id=$1 AND name=$2',
+                [ownerId, 'Synthetic workflow'],
+              )
+            ).rows[0];
+            connectionId = account.id;
+            connectionService = account.service;
+            const input = { workflowId: 'synthetic-workflow' };
+            const initial = await propose(
+              'execute_workflow',
+              input,
+              'synthetic_mcp',
+              'Run the synthetic workflow for the first time.',
+            );
+            const [first] = await approvalsFor(initial);
+            assert.equal(first.action, 'CONNECTED_MCP_CALL');
+            assert.equal(executions.length, 0);
+            const question =
+              'Which threshold should I use for a new run of the synthetic workflow?';
+            questionAfterConfirm = question;
+            const accepted = await request('POST', '/api/messages', {
+              text: 'Run workflow',
+              replyToMessageId: first.confirmation_message_id,
+              approvalAnswer: { approvalId: first.id, approved: true },
+            });
+            assert.equal(accepted.statusCode, 200, accepted.body);
+            await waitFor(accepted.json().turnId, 'waiting');
+            assert.deepEqual(executions, [{ executionId: 'synthetic-1', threshold: 3 }]);
+            const savedFirst = (await approvalsFor(initial))[0];
+            assert.equal(savedFirst.status, 'completed');
+            const savedQuestion = (
+              await pool.query(
+                "SELECT id FROM messages WHERE turn_id=$1 AND role='assistant' AND text=$2",
+                [accepted.json().turnId, question],
+              )
+            ).rows[0];
+            assert.ok(savedQuestion);
+            const reply = 'Set the threshold to 7 and run the synthetic workflow again.';
+            workflowUpdate = { workflowId: 'synthetic-workflow', threshold: 7 };
+            asked.add(reply);
+            plans.set(reply, { tool: 'synthetic_mcp', action: 'execute_workflow', args: input });
+            repeatDecision = 'new';
+            let repeatEntered!: () => void;
+            const checkingRepeat = new Promise<void>((resolve) => {
+              repeatEntered = resolve;
+            });
+            let releaseRepeat!: () => void;
+            const repeatReady = new Promise<void>((resolve) => {
+              releaseRepeat = resolve;
+            });
+            holdRepeatCheck = async () => {
+              repeatEntered();
+              await repeatReady;
+            };
+            const commandsBefore = workspaceDispatches.length;
+            parallelRepeatWork = async (options) => {
+              parallelRepeatWork = undefined;
+              await checkingRepeat;
+              const queued = options.runTool(
+                'bash',
+                { command: 'cat synthetic-repeat.txt' },
+                async () => {
+                  workspaceDispatches.push('synthetic-repeat');
+                  return { content: [] };
+                },
+              );
+              try {
+                await delay(30);
+                assert.equal(workspaceDispatches.length, commandsBefore);
+              } finally {
+                releaseRepeat();
+                holdRepeatCheck = undefined;
+                await queued.catch(() => {});
+              }
+            };
+            const repeated = await request('POST', '/api/messages', {
+              text: reply,
+              replyToMessageId: savedQuestion.id,
+            });
+            assert.equal(repeated.statusCode, 200, repeated.body);
+            await waitFor(repeated.json().turnId, 'waiting|succeeded');
+            const [second] = await approvalsFor(repeated.json().turnId);
+            assert.ok(second, 'A new explicit run must save a new confirmation.');
+            assert.equal(second.status, 'pending');
+            assert.equal(second.source_message_id, repeated.json().messageId);
+            assert.deepEqual(second.args, first.args);
+            assert.equal(executions.length, 1);
+            assert.equal(workspaceDispatches.length, commandsBefore);
+            assert.deepEqual(updates, [7]);
+            assert.equal(threshold, 7);
+            assert.deepEqual(second.details.account, {
+              name: 'Synthetic workflow',
+              identity: 'Synthetic workspace',
+              method: 'mcp',
+              endpoint,
+            });
+            assert.equal(second.details.tool.name, 'execute_workflow');
+            assert.deepEqual(second.details.tool, first.details.tool);
+            assert.equal(second.details.verifiedBinding, first.details.verifiedBinding);
+            assert.deepEqual(repeatChecks.at(-1), {
+              action: 'CONNECTED_MCP_CALL',
+              args: first.args,
+              reply,
+              question,
+            });
+            assert.ok(ownerWords.includes(reply));
+            repeatAfterConfirm = { tool: 'synthetic_mcp', action: 'execute_workflow', args: input };
+            const thirdQuestion = 'Should I run the synthetic workflow a third time?';
+            questionAfterConfirm = thirdQuestion;
+            const answer = {
+              text: 'Run workflow',
+              replyToMessageId: second.confirmation_message_id,
+              clientMessageId: randomUUID(),
+              approvalAnswer: { approvalId: second.id, approved: true },
+            };
+            const approved = await request('POST', '/api/messages', answer);
+            assert.equal(approved.statusCode, 200, approved.body);
+            await waitFor(approved.json().turnId, 'waiting');
+            assert.deepEqual(
+              (await request('POST', '/api/messages', answer)).json(),
+              approved.json(),
+            );
+            assert.deepEqual(executions, [
+              { executionId: 'synthetic-1', threshold: 3 },
+              { executionId: 'synthetic-2', threshold: 7 },
+            ]);
+            assert.match(JSON.stringify(results.get(approved.json().turnId)), /synthetic-2/);
+            assert.doesNotMatch(JSON.stringify(results.get(approved.json().turnId)), /synthetic-1/);
+            assert.deepEqual((await approvalsFor(initial))[0].result, savedFirst.result);
+            assert.match(
+              JSON.stringify((await approvalsFor(repeated.json().turnId))[0].result),
+              /synthetic-2/,
+            );
+            const ledger = (
+              await pool.query(
+                "SELECT basis FROM app_actions WHERE owner_id=$2 AND turn_id=ANY($1::uuid[]) AND action='CONNECTED_MCP_CALL'",
+                [[accepted.json().turnId, approved.json().turnId], ownerId],
+              )
+            ).rows;
+            assert.equal(ledger.length, 2);
+            assert.deepEqual(
+              ledger.map((row) => row.basis),
+              [{ kind: 'approved' }, { kind: 'approved' }],
+            );
+            const cards = await request(
+              'GET',
+              `/api/messages/around/${second.confirmation_message_id}`,
+            );
+            assert.equal(cards.statusCode, 200, cards.body);
+            assert.equal(
+              cards
+                .json()
+                .find((message: { id: string }) => message.id === second.confirmation_message_id)
+                .approval.state,
+              'done',
+            );
+            const thirdQuestionId = (
+              await pool.query(
+                "SELECT id FROM messages WHERE turn_id=$1 AND role='assistant' AND text=$2",
+                [approved.json().turnId, thirdQuestion],
+              )
+            ).rows[0].id;
+            const thirdReply = 'Run the synthetic workflow a third time.';
+            plans.set(thirdReply, {
+              tool: 'synthetic_mcp',
+              action: 'execute_workflow',
+              args: input,
+            });
+            asked.add(thirdReply);
+            repeatDecision = 'uncertain';
+            const third = await request('POST', '/api/messages', {
+              text: thirdReply,
+              replyToMessageId: thirdQuestionId,
+            });
+            assert.equal(third.statusCode, 200, third.body);
+            await waitFor(third.json().turnId, 'failed');
+            const failed = (
+              await pool.query('SELECT error FROM turns WHERE id=$1', [third.json().turnId])
+            ).rows[0];
+            assert.match(failed.error, /did not run again/);
+            assert.equal(results.has(third.json().turnId), false);
+            assert.deepEqual(await approvalsFor(third.json().turnId), []);
+            assert.equal(executions.length, 2);
+            assert.deepEqual(updates, [7]);
+            assert.deepEqual((await approvalsFor(initial))[0].result, savedFirst.result);
+            let visibleError = false;
+            for (let attempt = 0; attempt < 300; attempt++) {
+              const visible = await request(
+                'GET',
+                `/api/messages/around/${third.json().messageId}`,
+              );
+              assert.equal(visible.statusCode, 200, visible.body);
+              visibleError = visible
+                .json()
+                .some(
+                  (message: { role: string; turnId: string; text: string }) =>
+                    message.role === 'assistant' &&
+                    message.turnId === third.json().turnId &&
+                    message.text.includes('did not run again'),
+                );
+              if (visibleError) break;
+              await delay(20);
+            }
+            assert.equal(visibleError, true, 'The chat must show the specific repeat refusal.');
+            assert.equal(
+              (
+                await pool.query('SELECT 1 FROM app_actions WHERE turn_id=$1', [
+                  third.json().turnId,
+                ])
+              ).rowCount,
+              0,
+            );
+          } finally {
+            holdRepeatCheck = undefined;
+            parallelRepeatWork = undefined;
+            questionAfterConfirm = undefined;
+            workflowUpdate = undefined;
+            repeatAfterConfirm = undefined;
+            repeatDecision = 'same';
+            if (connectionId)
+              assert.equal(
+                (
+                  await request(
+                    'POST',
+                    `/api/apps/${connectionService}/accounts/${connectionId}/disconnect`,
+                    {},
+                  )
+                ).statusCode,
+                200,
+              );
+            server.closeAllConnections();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+          }
+        },
+      );
       await t.test(
         'a connect whose sign-in label cannot be written leaves no attempt behind',
         async () => {
