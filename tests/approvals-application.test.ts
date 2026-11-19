@@ -1608,6 +1608,36 @@ test(
             submits?: BrowserPage['submits'];
           }> = [
             {
+              step: { action: 'click', selector: '#blank-button' },
+              controls: [
+                { role: 'button', name: '' },
+                { role: 'form', name: 'Payment form' },
+              ],
+            },
+            {
+              step: { action: 'press', key: 'Enter' },
+              controls: [
+                { role: 'textbox', name: '' },
+                { role: 'region', name: 'Account settings' },
+              ],
+              submits: 'unknown',
+            },
+            {
+              step: { action: 'type', text: 'synthetic\n' },
+              controls: [
+                { role: 'textbox', name: ' ' },
+                { role: 'button', name: 'Submit request' },
+              ],
+            },
+            {
+              step: { action: 'click', x: 0.5, y: 0.5 },
+              controls: [
+                { role: 'generic', name: '' },
+                { role: 'region', name: 'Payment details' },
+              ],
+              submits: { method: 'POST', to: 'https://review.example.test/submit' },
+            },
+            {
               step: {
                 action: 'click',
                 points: [
@@ -1672,6 +1702,13 @@ test(
                 assert.match(batchErrors.slice(errors).join('\n'), /typed line break/);
             }
             for (const entry of [
+              {
+                step: { action: 'click', selector: '#named-custom' },
+                controls: [
+                  { role: 'generic', name: 'Submit custom request' },
+                  { role: 'region', name: 'Request details' },
+                ],
+              },
               {
                 step: { action: 'click', x: 0.5, y: 0.5 },
                 controls: [{ role: 'button', name: 'Submit request' }],

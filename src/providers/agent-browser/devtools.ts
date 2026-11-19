@@ -606,14 +606,15 @@ export async function openDevtools(url: string, targetId: string, signal?: Abort
       }>;
     };
     const byId = new Map(nodes.map((node) => [node.nodeId, node]));
+    const target = nodes.find((item) => item.backendDOMNodeId === backendNodeId);
     const controls: Array<{ role: string; name: string }> = [];
     for (
-      let node = nodes.find((item) => item.backendDOMNodeId === backendNodeId);
+      let node = target;
       node && controls.length < 3;
       node = node.parentId ? byId.get(node.parentId) : undefined
     ) {
-      const name = String(node.name?.value ?? '').trim();
-      if (!node.ignored && name) controls.push({ role: String(node.role?.value ?? ''), name });
+      const name = node.ignored ? '' : String(node.name?.value ?? '').trim();
+      if (node === target || name) controls.push({ role: String(node.role?.value ?? ''), name });
     }
     return controls;
   };

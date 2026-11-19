@@ -2711,6 +2711,91 @@ test('a password typed through the handoff in several pauses hides only the fini
 });
 
 test(
+  'native browser targets keep their own name before named ancestor context',
+  { skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true', timeout: 60_000 },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'nod-target-name-native-'));
+    const server = createHttpServer((_request, response) => {
+      response.setHeader('content-type', 'text/html');
+      response.end(`<title>Synthetic target names</title>
+        <style>#blank{position:fixed;left:0;top:0;width:20vw;height:20vh}body{padding-top:25vh}</style>
+        <form aria-label="Named form"><button type="button" id="form-button"></button></form>
+        <section role="region" aria-label="Named region"><button id="blank"></button><input id="field"></section>
+        <button id="named">Named exact button<div id="child"></div></button>
+        <div id="custom" role="treeitem" aria-label="Named custom target" tabindex="0"></div>
+        <form action="/submit" method="post" aria-label="Known form"><input id="known"></form>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const origin = `http://127.0.0.1:${address.port}`;
+    const computer = createAgentBrowserComputer({
+      dataRoot: directory,
+      browserExecutable: process.env.NOD_TEST_BROWSER_EXECUTABLE,
+      privateNetwork: true,
+      headless: true,
+    });
+    try {
+      await computer.act('target-name', { action: 'open', url: origin });
+      for (const [selector, ancestor] of [
+        ['#form-button', 'Named form'],
+        ['#blank', 'Named region'],
+        ['#child', 'Named exact button'],
+      ]) {
+        const page = await computer.currentPage('target-name', { action: 'click', selector });
+        assert.equal(page.controls?.[0]?.name, '', selector);
+        assert.ok(
+          page.controls?.slice(1).some(({ name }) => name === ancestor),
+          selector,
+        );
+        assert.match(page.target!, /^[0-9a-f]{64}$/);
+      }
+      for (const step of [
+        { action: 'click', x: 0.05, y: 0.05 },
+        {
+          action: 'click',
+          points: [
+            { x: 0.05, y: 0.05 },
+            { x: 0.05, y: 0.05 },
+          ],
+        },
+      ] satisfies BrowserAction[]) {
+        const page = await computer.currentPage('target-name', step);
+        assert.equal(page.controls?.[0]?.name, '');
+        assert.equal(page.controls?.[1]?.name, 'Named region');
+      }
+      await computer.act('target-name', { action: 'fill', selector: '#field', text: 'synthetic' });
+      for (const step of [
+        { action: 'press', key: 'Enter' },
+        { action: 'type', text: 'synthetic\n' },
+      ] satisfies BrowserAction[]) {
+        const page = await computer.currentPage('target-name', step);
+        assert.deepEqual(page.controls?.[0], { role: 'textbox', name: '' });
+        assert.equal(page.controls?.[1]?.name, 'Named region');
+        assert.equal(page.submits, undefined);
+      }
+      for (const [selector, name] of [
+        ['#named', 'Named exact button'],
+        ['#custom', 'Named custom target'],
+      ]) {
+        const page = await computer.currentPage('target-name', { action: 'click', selector });
+        assert.equal(page.controls?.[0]?.name, name);
+      }
+      await computer.act('target-name', { action: 'fill', selector: '#known', text: 'synthetic' });
+      const known = await computer.currentPage('target-name', { action: 'press', key: 'Enter' });
+      assert.deepEqual(known.controls?.[0], { role: 'textbox', name: '' });
+      assert.equal(known.controls?.[1]?.name, 'Known form');
+      assert.deepEqual(known.submits, { method: 'POST', to: `${origin}/submit` });
+    } finally {
+      await computer.dispose();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   'native secure entry completes single and split OTP controls without maxlength hints',
   { skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true', timeout: 60_000 },
   async () => {

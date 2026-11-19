@@ -2385,9 +2385,9 @@ async function initializeApplication(
               ? handoff
               : { result: handoff };
         }
-        const namedControl = request.page.controls?.some(
-          ({ role, name }) => name.trim() && !['RootWebArea', 'WebArea', 'document'].includes(role),
-        );
+        const control = request.page.controls?.[0];
+        const namedControl =
+          control?.name.trim() && !['RootWebArea', 'WebArea', 'document'].includes(control.role);
         const form = request.page.submits;
         const knownForm = typeof form === 'object' && form.method.trim() && form.to.trim();
         const enter =
