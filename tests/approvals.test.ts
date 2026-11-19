@@ -261,6 +261,54 @@ test('local file confirmation reviews the visible path and rejects a different p
   }
 });
 
+test('confirmation review keeps visible line and paragraph breaks', async () => {
+  let reviewedText = '';
+  const communication = createCommunication({
+    pool: { query: async () => ({ rows: [] }) } as unknown as pg.Pool,
+    ownerId: 'synthetic-owner',
+    review: async (_instructions, input) => {
+      const request = input as Record<string, any>;
+      if (request.purpose === 'confirmation_review') {
+        reviewedText = request.text;
+        return { valid: true };
+      }
+      return {
+        text: 'Can I submit the request?  \nAmount: 12 EUR.\n\nRecipient: Synthetic Recipient.',
+        action: 'Submit request',
+      };
+    },
+  });
+  const result = await communication.describe({
+    turn: { threadId: 'synthetic-thread', turnId: 'synthetic-turn' },
+    action: 'SYNTHETIC_SUBMIT',
+    args: { amount: '12 EUR', recipient: 'Synthetic Recipient' },
+  });
+  assert.equal(
+    reviewedText,
+    'Can I submit the request?\nAmount: 12 EUR.\n\nRecipient: Synthetic Recipient.',
+  );
+  const rendered = parseFragment(
+    renderToStaticMarkup(createElement(MessageText, { text: result.question })),
+  );
+  const message = rendered.childNodes.find(
+    (node) =>
+      'attrs' in node &&
+      node.attrs.some(
+        (attribute) => attribute.name === 'class' && attribute.value === 'message-text',
+      ),
+  );
+  assert.ok(message && 'childNodes' in message);
+  const paragraphs = message.childNodes.filter(
+    (node): node is DefaultTreeAdapterMap['element'] => 'tagName' in node && node.tagName === 'p',
+  );
+  assert.deepEqual(
+    paragraphs.map((node) =>
+      node.childNodes.map((child) => ('value' in child ? child.value : child.nodeName)),
+    ),
+    [['Can I submit the request?', 'br', 'Amount: 12 EUR.'], ['Recipient: Synthetic Recipient.']],
+  );
+});
+
 test('browser confirmation uses the page as context without displaying its action data', async () => {
   const question =
     'Can I submit order SYNTHETIC-42 to the ticket shop to check whether these tickets can be cancelled?';
