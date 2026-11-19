@@ -2796,6 +2796,67 @@ test(
 );
 
 test(
+  'native coordinate targets follow normal pointer hit testing',
+  { skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true', timeout: 60_000 },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'nod-pointer-target-native-'));
+    const requests: string[] = [];
+    const server = createHttpServer((request, response) => {
+      if (request.method === 'POST' || request.url?.startsWith('/overlay')) {
+        requests.push(`${request.method} ${request.url}`);
+        response.writeHead(204).end();
+        return;
+      }
+      const named = request.url === '/named';
+      response.setHeader('content-type', 'text/html');
+      response.end(`<title>Synthetic pointer target</title>
+        <style>button{position:fixed;inset:0;width:100vw;height:100vh;border:0}#overlay{pointer-events:none;opacity:.2}</style>
+        <form method="post" action="/actual-${named ? 'named' : 'blank'}"><button${named ? ' aria-label="Named actual target"' : ''}></button></form>
+        <form method="get" action="/overlay"><button id="overlay" aria-label="Named overlay">Named overlay</button></form>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const computer = createAgentBrowserComputer({
+      dataRoot: directory,
+      browserExecutable: process.env.NOD_TEST_BROWSER_EXECUTABLE,
+      privateNetwork: true,
+      headless: true,
+    });
+    try {
+      const expected: string[] = [];
+      for (const named of [false, true]) {
+        await computer.act('pointer-target', {
+          action: 'open',
+          url: `http://127.0.0.1:${address.port}/${named ? 'named' : 'blank'}`,
+        });
+        const step: BrowserAction = { action: 'click', x: 0.5, y: 0.5 };
+        const page = await computer.currentPage('pointer-target', step);
+        assert.ok(page.target);
+        assert.deepEqual(page.controls?.[0], {
+          role: 'button',
+          name: named ? 'Named actual target' : '',
+        });
+        assert.deepEqual(page.submits, {
+          method: 'POST',
+          to: `http://127.0.0.1:${address.port}/actual-${named ? 'named' : 'blank'}`,
+        });
+        assert.deepEqual(requests, expected);
+        await computer.act('pointer-target', { ...step, expectTarget: page.target });
+        expected.push(`POST /actual-${named ? 'named' : 'blank'}`);
+        for (let i = 0; i < 500 && requests.length < expected.length; i++) await delay(10);
+        assert.deepEqual(requests, expected);
+      }
+    } finally {
+      await computer.dispose();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   'native secure entry completes single and split OTP controls without maxlength hints',
   { skip: process.env.NOD_TEST_NATIVE_DOWNLOAD !== 'true', timeout: 60_000 },
   async () => {

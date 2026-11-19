@@ -620,7 +620,7 @@ export async function openDevtools(url: string, targetId: string, signal?: Abort
   };
 
   const controlTarget = async (query: ControlQuery) => {
-    const found = await locate(query);
+    const found = await locate(query, true);
     const [frame] = found ? await tree(found.session) : [];
     return found && frame?.loaderId
       ? {
@@ -1122,7 +1122,7 @@ export async function openDevtools(url: string, targetId: string, signal?: Abort
       }
     },
     async submits(query: ControlQuery, enter: boolean) {
-      const target = await locate(query);
+      const target = await locate(query, true);
       if (target) return formOf(target, enter);
       if (query.focused) return null;
       throw new Error('The control could not be found.');
