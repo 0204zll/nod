@@ -2380,7 +2380,7 @@ test(
                 action: 'start',
                 chat: chat!.id,
                 title: 'Find a synthetic copywriter',
-                message: 'Sent to Recruiter.',
+                message: 'On it.',
                 doneWhen: 'A synthetic copywriter shortlist exists',
                 now: 'Searching',
               });
@@ -2595,6 +2595,26 @@ test(
           await waitFor(async () => (await row()).state === 'done');
           const reused = await row();
           assert.equal(reused.source_message_id, again.messageId);
+          assert.equal(
+            (
+              await db.pool.query(
+                'SELECT m.text FROM messages m JOIN tasks t ON t.message_id=m.id WHERE t.id=$1',
+                [chat!.id],
+              )
+            ).rows[0].text,
+            'Recruiter: On it.',
+          );
+          const chatList = await transaction(
+            (client) => tasks.chatCommand(client, 'tasks'),
+            db.pool,
+          );
+          assert.ok(
+            chatList.replies.some(
+              ({ presentation }) =>
+                (presentation as { data?: { task?: { chat?: string } } })?.data?.task?.chat ===
+                'Recruiter',
+            ),
+          );
           const granted = await evidence(reused.turn_id);
           assert.equal(granted.find(({ id }) => id === again.messageId)?.canAuthorize, true);
           assert.equal(granted.find(({ id }) => id === second.messageId)?.canAuthorize, false);

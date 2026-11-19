@@ -163,6 +163,9 @@ function status(row: Row): TaskStatus {
   return 'needs_you';
 }
 
+const idleStatuses = new Set<TaskStatus>(['done', 'cancelled']);
+const startLine = (name: string | undefined, message: string) =>
+  name && !message.toLowerCase().includes(name.toLowerCase()) ? `${name}: ${message}` : message;
 const shown = (task: Task): Task =>
   task.name && task.result.length > chatResultLimit ? { ...task, result: '' } : task;
 
@@ -765,7 +768,11 @@ export function createTasks(options: {
         ? null
         : prior && resemblesTaskAcknowledgement(prior.text, request.message, priorHandoff)
           ? prior.id
-          : await insertAssistantMessage(client, turn, request.message);
+          : await insertAssistantMessage(
+              client,
+              turn,
+              startLine(request.name ?? reused?.name, request.message),
+            );
       const sessionId = independent ? id : current.session_id;
       if (reused) {
         id = reused.id;
@@ -1327,7 +1334,21 @@ export function createTasks(options: {
           ? await stop(client, target.task_id, thread.id, capture, 'owner')
           : await cancelTurns(client, thread.id, {}, capture)
         : undefined;
-    const tasks = await read(client, target ? { id: target.task_id, closed: true } : {});
+    const recent = Date.now() - 86_400_000;
+    const tasks = target
+      ? await read(client, { id: target.task_id, closed: true })
+      : command === 'tasks'
+        ? (await read(client, { closed: true, thread: thread.id }))
+            .filter(
+              (task) =>
+                !idleStatuses.has(task.status) ||
+                (task.name &&
+                  !task.archivedAt &&
+                  (task.pinned || Date.parse(task.closedAt ?? '') > recent)),
+            )
+            .slice(0, 12)
+            .map(shown)
+        : await read(client);
     return {
       threadId: thread.id,
       replies:

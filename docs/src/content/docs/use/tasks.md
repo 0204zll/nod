@@ -54,7 +54,7 @@ Each new request in a finished chat stands alone. An earlier message in that cha
 
 A chat you keep stays in the list, and Nod gives it new work on its subject. Nod never keeps a chat on its own. Other chats leave the list a day after they finish and move to **Earlier**. When a reply arrives only in a chat while Nod is in the background, the browser notification opens that chat.
 
-Chats are part of Nod web and desktop. Telegram and WhatsApp keep one conversation: reply to a chat's message there to continue it.
+Telegram and WhatsApp keep one conversation, and your chats work inside it. Nod's first message for a chat carries its name, and the chat's questions and results reply to that message, so you can see which chat is talking. To talk to a chat, reply to any of its messages or just say what you need: Nod sends it to the chat that covers the subject. `/tasks` lists your chats.
 
 ## Scheduled work
 
@@ -146,7 +146,7 @@ Use the chat app's **Reply** control to send an update or answer to a task. Othe
 
 | Command   | Result                                                                                                             |
 | --------- | ------------------------------------------------------------------------------------------------------------------ |
-| `/tasks`  | List open tasks and their current state.                                                                           |
+| `/tasks`  | List open tasks, the chats you keep and chats that finished in the last day, one message each.                     |
 | `/status` | Show each open task's goal, steps and current state. Reply to a task message to see only that task.                |
 | `/stop`   | Stop all active work and close open tasks. Reply to a task message with `/stop` to stop only that task.            |
 | `/clear`  | Start fresh main-chat context and a clean view. Independent tasks keep running. Previous messages stay searchable. |
