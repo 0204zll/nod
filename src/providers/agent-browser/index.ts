@@ -1402,11 +1402,23 @@ export function createAgentBrowserComputer(options: {
                 assertOpen();
                 if ((await devtools.document()) !== document)
                   throw new BrowserActionError('browser_card_changed');
-                const { enabled } = z
-                  .object({ enabled: z.boolean() })
-                  .parse(
-                    await command(state, { action: 'isenabled', selector: control }, { signal }),
-                  );
+                const { enabled } = z.object({ enabled: z.boolean() }).parse(
+                  await command(
+                    state,
+                    { action: 'isenabled', selector: control },
+                    { signal },
+                  ).catch(async (error) => {
+                    signal?.throwIfAborted();
+                    if (!(error instanceof DaemonCommandError)) throw error;
+                    const changed = await devtools.document().then(
+                      (current) => current !== document,
+                      () => false,
+                    );
+                    signal?.throwIfAborted();
+                    if (changed) throw new BrowserActionError('browser_card_changed');
+                    throw error;
+                  }),
+                );
                 if (enabled) break;
                 if (performance.now() >= readyBy)
                   throw new BrowserActionError('browser_card_disabled');

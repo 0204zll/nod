@@ -753,10 +753,14 @@ test(
 );
 
 test(
-  'private submission refuses a disabled control and a page change without submission',
+  'private submission refuses disabled or changed targets and preserves query errors',
   { timeout: 60_000 },
   async () => {
     let submissions = 0;
+    let mode: 'disabled' | 'early' | 'moving' | 'missing' = 'disabled';
+    let interrupted = false;
+    let failedQuery: unknown;
+    let queries = 0;
     const secret = 'Synthetic disabled-submit password';
     const server = createHttpServer((request, response) => {
       response.setHeader('content-type', 'text/html');
@@ -767,7 +771,7 @@ test(
         response.end('<h1>Changed page</h1>');
       } else {
         response.end(`<h1>Private entry fixture</h1><form action="/submit" method="post"><input id="password" type="password"><button id="submit" disabled>Continue</button></form><script>
-          document.querySelector('input').oninput=()=>{${request.url === '/moving' ? "if (!window.moving) { window.moving=true; setTimeout(()=>location.assign('/changed'),500); }" : ''}};
+          document.querySelector('input').oninput=()=>{${request.url === '/early' ? "if (!window.moving) { window.moving=true; setTimeout(()=>location.assign('/changed'),500); }" : ''}};
         </script>`);
       }
     });
@@ -779,13 +783,57 @@ test(
       browserExecutable: process.env.NOD_TEST_BROWSER_EXECUTABLE,
       privateNetwork: true,
       headless: true,
+      daemonCommand: async (path, command, signal, timeout, maxBytes) => {
+        if (command.action === 'isenabled' && command.selector === '#submit') {
+          queries++;
+          if ((mode === 'moving' || mode === 'missing') && !interrupted) {
+            interrupted = true;
+            if (mode === 'moving') {
+              const connection = await existingDaemonCommand(path, { action: 'cdp_url' });
+              const tabs = await existingDaemonCommand(path, { action: 'tab_list' });
+              const tab = (tabs.tabs as { active: boolean; targetId: string }[]).find(
+                (value) => value.active,
+              )!;
+              const probe = await openDevtools(String(connection.cdpUrl), tab.targetId);
+              try {
+                const before = await probe.document();
+                await existingDaemonCommand(path, {
+                  action: 'evaluate',
+                  script: "setTimeout(() => location.assign('/changed'), 0)",
+                });
+                const deadline = performance.now() + 5000;
+                while (
+                  (await probe.document().catch(() => before)) === before &&
+                  performance.now() < deadline
+                )
+                  await delay(20);
+                assert.notEqual(await probe.document(), before);
+              } finally {
+                probe.close();
+              }
+            } else {
+              await existingDaemonCommand(path, {
+                action: 'evaluate',
+                script: "document.querySelector('#submit').remove()",
+              });
+            }
+          }
+        }
+        try {
+          return await existingDaemonCommand(path, command, signal, timeout, maxBytes);
+        } catch (error) {
+          if (command.action === 'isenabled') failedQuery = error;
+          throw error;
+        }
+      },
     });
     try {
-      for (const moving of [false, true]) {
-        await computer.act('disabled', {
-          action: 'open',
-          url: `${origin}/${moving ? 'moving' : 'disabled'}`,
-        });
+      for (const value of ['disabled', 'early', 'moving', 'missing'] as const) {
+        mode = value;
+        interrupted = false;
+        failedQuery = undefined;
+        queries = 0;
+        await computer.act('disabled', { action: 'open', url: `${origin}/${mode}` });
         await assert.rejects(
           computer.injectCredentials({
             threadId: 'disabled',
@@ -796,14 +844,26 @@ test(
             submitSelector: '#submit',
           }),
           (error: unknown) => {
-            assert.ok(error instanceof BrowserActionError);
-            assert.equal(error.code, moving ? 'browser_card_changed' : 'browser_card_disabled');
-            assert.equal(error.message.includes(secret), false);
+            if (mode === 'missing') {
+              assert.ok(failedQuery);
+              assert.equal(error, failedQuery);
+            } else {
+              assert.ok(
+                error instanceof BrowserActionError,
+                `Expected ${mode} refusal; received ${error instanceof Error ? error.constructor.name : typeof error}.`,
+              );
+              assert.equal(
+                error.code,
+                mode === 'disabled' ? 'browser_card_disabled' : 'browser_card_changed',
+              );
+            }
+            assert.equal((error as Error).message.includes(secret), false);
             return true;
           },
         );
         assert.equal(submissions, 0);
-        if (moving) {
+        if (mode === 'moving' || mode === 'missing') assert.equal(queries, 1);
+        if (mode === 'early' || mode === 'moving') {
           const page = await computer.act('disabled', { action: 'snapshot' });
           assert.match(page.text, /Changed page/);
           assert.equal(page.text.includes(secret), false);
