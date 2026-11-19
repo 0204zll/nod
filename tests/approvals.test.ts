@@ -44,6 +44,7 @@ import { createErrorRedactor } from '../src/server/redaction.ts';
 import {
   approvalContent,
   approvalTitle,
+  calendarEventTarget,
   gmailDraftTarget,
   gmailMessageTarget,
 } from '../src/server/action-presentation.ts';
@@ -988,6 +989,123 @@ test('payment presentation repairs a missing action label', async () => {
   assert.equal(calls, 2);
 });
 
+test('Calendar approval binds the private event version before projecting its target', () => {
+  const event = {
+    id: 'synthetic-event',
+    etag: '"synthetic-private-version-1"',
+    summary: 'Synthetic plan',
+    start: { dateTime: '2030-11-24T09:00:00Z' },
+    end: { dateTime: '2030-11-24T10:00:00Z' },
+    attendeesOmitted: true,
+  };
+  const before = calendarEventTarget(event, event.id);
+  const after = calendarEventTarget({ ...event, etag: '"synthetic-private-version-2"' }, event.id);
+  assert.ok(before && after);
+  assert.deepEqual(before.target, after.target);
+  assert.notEqual(before.revision, after.revision);
+  assert.equal(JSON.stringify(before).includes('synthetic-private-version'), false);
+  for (const etag of [undefined, null, 17, '', ' ', 'x'.repeat(1025)])
+    assert.equal(calendarEventTarget({ ...event, etag }, event.id), undefined);
+});
+
+test('Calendar approval does not claim an unspecified end and marks known ends exclusive', () => {
+  const event = {
+    id: 'synthetic-event',
+    etag: '"synthetic-calendar-version"',
+    start: { date: '2030-11-24' },
+    end: { date: '2030-11-25' },
+  };
+  assert.equal(calendarEventTarget({ ...event, endTimeUnspecified: true }, event.id), undefined);
+  const known = calendarEventTarget({ ...event, endTimeUnspecified: false }, event.id);
+  assert.ok(known);
+  assert.equal(known.target.startsAt, '2030-11-24');
+  assert.equal(known.target.endsAt, '2030-11-25');
+  assert.equal(known.target.endExclusive, true);
+});
+
+test('Calendar local times use the event zones instead of the host zone', () => {
+  const event = {
+    id: 'synthetic-event',
+    etag: '"synthetic-calendar-version-1"',
+    summary: 'Synthetic travel plan',
+    start: { dateTime: '2030-11-24T10:00:00', timeZone: 'Europe/Paris' },
+    end: { dateTime: '2030-11-24T05:00:00', timeZone: 'America/New_York' },
+    recurringEventId: 'synthetic-series',
+    originalStartTime: { dateTime: '2030-11-24T11:00:00', timeZone: 'Europe/Helsinki' },
+  };
+  const target = calendarEventTarget({ data: event }, event.id)?.target;
+  assert.ok(target);
+  assert.equal(Date.parse(target.startsAt), Date.parse('2030-11-24T09:00:00Z'));
+  assert.equal(Date.parse(target.endsAt), Date.parse('2030-11-24T10:00:00Z'));
+  assert.equal(Date.parse(target.originalStartsAt!), Date.parse('2030-11-24T09:00:00Z'));
+  assert.equal(target.timeZone, 'Europe/Paris');
+  assert.equal(target.endTimeZone, 'America/New_York');
+  assert.equal(target.originalTimeZone, 'Europe/Helsinki');
+  assert.equal(target.scope, 'occurrence');
+  assert.equal(
+    calendarEventTarget(
+      { data: { ...event, end: { ...event.end, dateTime: '2030-11-24T03:00:00' } } },
+      event.id,
+    ),
+    undefined,
+  );
+});
+
+test('Calendar local times refuse missing zones, clock gaps and repeated clock times', () => {
+  for (const start of [
+    { dateTime: '2030-11-24T10:00:00' },
+    { dateTime: '2030-03-31T02:30:00', timeZone: 'Europe/Paris' },
+    { dateTime: '2030-10-27T02:30:00', timeZone: 'Europe/Paris' },
+  ]) {
+    assert.equal(
+      calendarEventTarget(
+        {
+          id: 'synthetic-event',
+          etag: '"synthetic-calendar-version-1"',
+          start,
+          end: { dateTime: '2030-11-25T10:00:00Z' },
+        },
+        'synthetic-event',
+      ),
+      undefined,
+    );
+  }
+  const target = calendarEventTarget(
+    {
+      id: 'synthetic-event',
+      etag: '"synthetic-calendar-version-1"',
+      start: { dateTime: '2030-10-27T02:30:00+02:00', timeZone: 'Europe/Paris' },
+      end: { dateTime: '2030-10-27T02:30:00+01:00', timeZone: 'Europe/Paris' },
+    },
+    'synthetic-event',
+  )?.target;
+  assert.ok(target);
+  assert.equal(Date.parse(target.endsAt) - Date.parse(target.startsAt), 3_600_000);
+});
+
+test('Calendar approval keeps the end and occurrence zones when offsets are present', () => {
+  const event = {
+    id: 'synthetic-event',
+    etag: '"synthetic-calendar-version-1"',
+    start: { dateTime: '2030-11-24T10:00:00+01:00', timeZone: 'Europe/Paris' },
+    end: { dateTime: '2030-11-24T05:00:00-05:00', timeZone: 'America/New_York' },
+    recurringEventId: 'synthetic-series',
+    originalStartTime: { dateTime: '2030-11-24T11:00:00+02:00', timeZone: 'Europe/Helsinki' },
+  };
+  const target = calendarEventTarget(event, event.id)?.target;
+  assert.ok(target);
+  assert.equal(target.endTimeZone, 'America/New_York');
+  assert.equal(target.originalTimeZone, 'Europe/Helsinki');
+  for (const part of ['end', 'originalStartTime'] as const)
+    assert.equal(
+      calendarEventTarget(
+        { ...event, [part]: { ...event[part], timeZone: 'Invalid/Synthetic' } },
+        event.id,
+      ),
+      undefined,
+    );
+});
+
 test('Gmail delete target metadata must match the bound message ID', () => {
   const target = gmailMessageTarget(
     {
@@ -1923,7 +2041,7 @@ test(
         verdict: Awaited<ReturnType<typeof trust.check>>,
         expected: Record<string, unknown>,
       ) => {
-        const { chatRevision, ...result } = verdict;
+        const { chatRevision, instructionRevision, ...result } = verdict;
         assert.deepEqual(result, expected);
       };
       const email = (to: string) => ({
@@ -3327,6 +3445,10 @@ test(
           );
           compareVerdict(unrelated, { confirm: true, reason: 'unrequested' });
           assert.equal(unrelated.chatRevision, originalMessageId);
+          assert.deepEqual(unrelated.instructionRevision, {
+            rules: '',
+            chat: { threadId: resumed.threadId, id: originalMessageId },
+          });
           aligned = () => ({ run: true, because: requestText });
           const followOn = await trust.check(
             resumed,
@@ -4038,10 +4160,12 @@ test(
             await begin('Synthetic event', { source: 'event' }),
             await attachSchedule(await begin('Synthetic scheduled work', { source: 'schedule' })),
           ]) {
-            compareVerdict(await trust.check(turn, 'GMAIL_SEND_EMAIL', send), {
+            const checked = await trust.check(turn, 'GMAIL_SEND_EMAIL', send);
+            compareVerdict(checked, {
               confirm: true,
               reason: 'rule',
             });
+            assert.equal(checked.instructionRevision.rules, rules);
             assert.equal(reviews.at(-1)?.userRules, rules);
             assert.ok(prompts.at(-1)!.startsWith(plain));
             assert.match(prompts.at(-1)!, /userRules/);
@@ -4264,7 +4388,15 @@ test(
             [summaryMessageId, ownerId, hotel.threadId, hotel.turnId],
           );
           await finish(hotel.turnId, 'succeeded');
-          await trust.check(turn, 'GMAIL_SEND_EMAIL', { to: 'hotel@example.test' });
+          const checked = await trust.check(turn, 'GMAIL_SEND_EMAIL', { to: 'hotel@example.test' });
+          assert.deepEqual(checked.instructionRevision, {
+            rules: '',
+            task: {
+              id: task.id,
+              revision: (await db.pool.query('SELECT revision FROM tasks WHERE id=$1', [task.id]))
+                .rows[0].revision,
+            },
+          });
           const started = reviews.at(-1)!.userMessages.map((item: { text: string }) => item.text);
           assert.deepEqual(started.slice(-2), [
             'Read my fixture flight dates.',

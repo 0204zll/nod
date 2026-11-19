@@ -12,7 +12,9 @@ import {
   validateOwnerInstructions,
   validateScheduledInstructions,
   instructionMessages,
+  instructionSourceMessageIds,
   type InstructionChange,
+  type InstructionRevision,
   type OwnerInstructions,
 } from './owner-instructions.ts';
 
@@ -72,12 +74,14 @@ export function createTrust(options: {
         basis: TrustBasis;
         chatRevision?: string;
         instructionChange?: InstructionChange;
+        instructionRevision: InstructionRevision;
       }
     | {
         confirm: true;
         reason: TrustReason;
         chatRevision?: string;
         instructionChange?: InstructionChange;
+        instructionRevision: InstructionRevision;
       }
   > {
     signal?.throwIfAborted();
@@ -97,6 +101,18 @@ export function createTrust(options: {
       const standing =
         origin.source === 'event' ? preferences?.notification_rule.trim() : undefined;
       const rules = preferences?.rules.trim();
+      const task = origin.taskId
+        ? (
+            await pool.query<{ revision: number }>(
+              'SELECT revision FROM tasks WHERE id=$1 AND owner_id=$2',
+              [origin.taskId, ownerId],
+            )
+          ).rows[0]
+        : undefined;
+      const chatRevision =
+        origin.source === 'user' && !origin.taskId
+          ? await ownerChatRevision(pool, ownerId, turn.threadId)
+          : undefined;
       const said =
         origin.source === 'user'
           ? await captureOwnerInstructions(
@@ -108,10 +124,6 @@ export function createTrust(options: {
               since,
               turn.turnId,
             )
-          : undefined;
-      const chatRevision =
-        origin.source === 'user' && !origin.taskId
-          ? await ownerChatRevision(pool, ownerId, turn.threadId)
           : undefined;
       const words: TrustWords = {
         timeZone: preferences?.time_zone ?? 'UTC',
@@ -129,15 +141,6 @@ export function createTrust(options: {
         ...(standing ? { standingInstruction: standing } : {}),
         ...(rules ? { userRules: rules } : {}),
       };
-      const task =
-        origin.taskId && change
-          ? (
-              await pool.query<{ revision: number }>(
-                'SELECT revision FROM tasks WHERE id=$1 AND owner_id=$2',
-                [origin.taskId, ownerId],
-              )
-            ).rows[0]
-          : undefined;
       return {
         words,
         ...(task ? { task: { id: origin.taskId!, revision: task.revision } } : {}),
@@ -149,7 +152,22 @@ export function createTrust(options: {
       };
     };
     const captured = await context();
-    const revision = captured.chatRevision ? { chatRevision: captured.chatRevision } : {};
+    const revision = {
+      ...(captured.chatRevision ? { chatRevision: captured.chatRevision } : {}),
+      instructionRevision: {
+        rules: captured.words.userRules ?? '',
+        ...(origin.source === 'event'
+          ? { standingInstruction: captured.words.standingInstruction ?? '' }
+          : {}),
+        ...(origin.source === 'schedule' && instruction
+          ? { sourceMessageIds: instructionSourceMessageIds(instruction) }
+          : {}),
+        ...(captured.task ? { task: captured.task } : {}),
+        ...(captured.chatRevision
+          ? { chat: { threadId: turn.threadId, id: captured.chatRevision } }
+          : {}),
+      },
+    };
     const { words } = captured;
     let previousEvidence = change?.evidence;
     let replacementNeedsApproval = false;

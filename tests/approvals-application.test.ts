@@ -18,7 +18,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { MemoryCurator } from '../src/ports/memory-curator.ts';
 import type { AgentToolResult, AgentSessionOptions } from '../src/ports/agent.ts';
 import type { MessagingTransport } from '../src/ports/messaging.ts';
-import type { IntegrationBackoff } from '../src/ports/integrations.ts';
+import type { IntegrationBackoff, IntegrationSession } from '../src/ports/integrations.ts';
 import { createIntegrationFixture } from '../scripts/e2e-fixtures.ts';
 import { fakeComputer, fakeWorkspace } from './runtime-fixtures.ts';
 import { accessCookie, accessKey } from '../src/server/access.ts';
@@ -80,6 +80,10 @@ function syntheticConfirmation(input: Record<string, unknown>) {
       : '';
     text = `Can I ${actionTarget(action, args, details) || 'continue on the website'}?`;
     if (args.step === 'click' && control) label = `Click “${control.slice(0, 45)}”`;
+  } else if (action.startsWith('GOOGLECALENDAR_')) {
+    text = target.title
+      ? `Can I change ${value(target.title)} on ${value(target.startsAt)} ${value(target.timeZone)} to response ${value(args.rsvp_response)}?`
+      : 'Can I change this calendar event?';
   } else if (action === 'NOD_vault_allow') {
     text = `Can I use the saved sign-in for ${account || 'this account'} at ${value(args.origin)}?`;
   } else if (action === 'NOD_memory_forget') {
@@ -102,7 +106,7 @@ function syntheticConfirmation(input: Record<string, unknown>) {
 
 test(
   'personal approvals revalidate targets before execution',
-  { skip: !process.env.TEST_DATABASE_URL, timeout: 180_000 },
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 240_000 },
   async (t) => {
     const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
     const schema = `test_personal_review_${suffix}`;
@@ -211,6 +215,11 @@ test(
     let appSessions = 0;
     let unoffered: string | undefined;
     let appResult: unknown;
+    let calendarExecute: IntegrationSession['execute'] | undefined;
+    let calendarSession: (() => Promise<void>) | undefined;
+    let calendarReadReview: (() => Promise<void>) | undefined;
+    const calendarWording: Array<Record<string, any>> = [];
+    const calendarTrust: Array<Record<string, any>> = [];
     let changeRulesOnDraftRead = false;
     let changedRulesDuringDraftRead = 0;
     let repeatAfterConfirm: FixtureCall | FixtureCall[] | undefined;
@@ -249,12 +258,21 @@ test(
       id: 'fixture',
       configured: true,
       curate: async ({ task, input, instructions }, _signal, report) => {
+        if (task === 'review' && Object(input).action?.name === 'GOOGLECALENDAR_EVENTS_GET')
+          await calendarReadReview?.();
+        if (String(Object(input).action?.name).startsWith('GOOGLECALENDAR_'))
+          calendarTrust.push(structuredClone(input));
         if (task === 'review' && heldReview?.purpose === Object(input).purpose && heldReview) {
           const held = heldReview;
           held.entered(_signal);
           await held.release;
           _signal?.throwIfAborted();
         }
+        if (
+          ['confirmation', 'confirmation_review'].includes(String(Object(input).purpose)) &&
+          String(Object(Object(input).data).action).startsWith('GOOGLECALENDAR_')
+        )
+          calendarWording.push(structuredClone(input));
         if (
           browserWording &&
           'purpose' in input &&
@@ -357,9 +375,13 @@ test(
                 const metadataRead = [
                   'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID',
                   'GMAIL_GET_DRAFT',
+                  'GOOGLECALENDAR_EVENTS_GET',
                 ].includes(words.action?.name ?? '');
                 const readRequiresConsent =
-                  metadataRead && words.userRules === 'Ask before reading Gmail.';
+                  metadataRead &&
+                  (words.action?.name === 'GOOGLECALENDAR_EVENTS_GET'
+                    ? words.userRules === 'Ask before reading Calendar.'
+                    : words.userRules === 'Ask before reading Gmail.');
                 const run =
                   !readRequiresConsent &&
                   (Boolean(fileRequest) ||
@@ -680,6 +702,7 @@ test(
           createSession: async (...args) => {
             appSessions++;
             const session = await integrationFixture.provider.createSession(...args);
+            await calendarSession?.();
             session.upload = async (_action, file) => {
               uploadAttempts++;
               if (uploadFailure) throw uploadFailure;
@@ -695,6 +718,8 @@ test(
               executedApps.push(input[0]);
               if (input[0] === 'GMAIL_GET_DRAFT') draftReadArgs.push({ ...input[1] });
               if (appOutage) throw new Error('Synthetic provider outage.');
+              if (calendarExecute && input[0].startsWith('GOOGLECALENDAR_'))
+                return calendarExecute(...input);
               if (appResult) return appResult;
               return execute(...input);
             };
@@ -6502,6 +6527,1463 @@ test(
           assert.equal(await readFile(source, 'utf8'), 'Synthetic local report');
         },
       );
+      await t.test('calendar approvals identify the exact occurrence before consent', async (t) => {
+        await pool.query(
+          'INSERT INTO preferences(owner_id) VALUES($1) ON CONFLICT (owner_id) DO NOTHING',
+          [ownerId],
+        );
+        const event = {
+          id: 'abc123def456_20301124T090000Z',
+          etag: '"synthetic-calendar-version-1"',
+          summary: 'Synthetic planning',
+          start: { dateTime: '2030-11-24T10:00:00+01:00', timeZone: 'Europe/Paris' },
+          end: { dateTime: '2030-11-24T10:30:00+01:00', timeZone: 'Europe/Paris' },
+          recurringEventId: 'abc123def456',
+          originalStartTime: { dateTime: '2030-11-24T10:00:00+01:00', timeZone: 'Europe/Paris' },
+          description: 'Synthetic private description that is not target metadata.',
+          attendees: [{ email: 'hidden-attendee@example.test', responseStatus: 'accepted' }],
+          htmlLink: 'https://calendar.example.test/private-event',
+        };
+        const calls: Array<{ action: string; args: Record<string, unknown>; accountId?: string }> =
+          [];
+        let observed: unknown = { data: structuredClone(event), successful: true };
+        let readFailure: Error | undefined;
+        let onRead: ((signal?: AbortSignal) => Promise<void>) | undefined;
+        calendarExecute = async (action, args, accountId, signal) => {
+          calls.push({ action, args: structuredClone(args), accountId });
+          const result = structuredClone(observed);
+          if (action === 'GOOGLECALENDAR_EVENTS_GET') {
+            await onRead?.(signal);
+            if (readFailure) throw readFailure;
+          }
+          return result;
+        };
+        let connectionId: string | undefined;
+        let turn: string | undefined;
+        const decline = async (id: string) => {
+          const [pending] = await approvalsFor(id);
+          if (pending?.status !== 'pending') return;
+          const declined = await request('POST', '/api/messages', {
+            text: 'No',
+            replyToMessageId: pending.confirmation_message_id,
+            clientMessageId: randomUUID(),
+          });
+          assert.equal(declined.statusCode, 200, declined.body);
+          await waitFor(declined.json().turnId, 'succeeded');
+        };
+        try {
+          const connect = await request('POST', '/api/apps/googlecalendar/connect', {});
+          assert.equal(connect.statusCode, 200, connect.body);
+          const accountId = new URL(connect.json().url).pathname.split('/').pop();
+          const consent = await application.app.inject({
+            method: 'POST',
+            url: `/e2e/connect/${accountId}`,
+            headers,
+          });
+          const callback = new URL(String(consent.headers.location));
+          await application.app.inject({ url: `${callback.pathname}${callback.search}`, headers });
+          connectionId = (
+            await pool.query(
+              "SELECT id FROM app_connections WHERE owner_id=$1 AND slug='googlecalendar' AND NOT revoked",
+              [ownerId],
+            )
+          ).rows[0].id;
+          const args = {
+            connectionId,
+            calendar_id: 'primary',
+            event_id: event.id,
+            rsvp_response: 'accepted',
+            send_updates: 'none',
+          };
+          const submit = async (
+            action = 'GOOGLECALENDAR_PATCH_EVENT',
+            input: Record<string, unknown> = args,
+          ) => {
+            const text = `Synthetic Calendar change ${randomUUID()}`;
+            plans.set(text, { tool: 'apps', action, args: input });
+            const response = await request('POST', '/api/messages', { text });
+            assert.equal(response.statusCode, 200, response.body);
+            turn = response.json().turnId as string;
+            ids.push(response.json().threadId as string);
+            await waitFor(turn, 'waiting|succeeded|failed|cancelled');
+            return { turn, approval: (await approvalsFor(turn))[0] };
+          };
+          const accept = (approval: any) =>
+            request('POST', '/api/messages', {
+              text: approval.title,
+              replyToMessageId: approval.confirmation_message_id,
+              clientMessageId: randomUUID(),
+              approvalAnswer: { approvalId: approval.id, approved: true },
+            });
+          const submitEvent = async () => {
+            const text = `Synthetic Calendar event ${randomUUID()}`;
+            plans.set(text, { tool: 'apps', action: 'GOOGLECALENDAR_PATCH_EVENT', args });
+            const id = await enqueueTurn(text, { source: 'event', background: true });
+            turn = id;
+            await waitFor(id, 'waiting|succeeded|failed');
+            return { turn: id, approval: (await approvalsFor(id))[0] };
+          };
+          const submitSchedule = async (approvalBacked = false) => {
+            const schedule = await reminder({
+              title: 'Synthetic Calendar schedule',
+              prompt: `Review the synthetic Calendar ${randomUUID()}.`,
+            });
+            const warm = await request('POST', `/api/schedules/${schedule.id}/run`, {
+              requestId: randomUUID(),
+              expectedRevision: 0,
+            });
+            assert.equal(warm.statusCode, 200, warm.body);
+            await waitFor(warm.json().turnId, 'succeeded');
+            const prompt = (
+              await pool.query('SELECT prompt FROM turns WHERE id=$1', [warm.json().turnId])
+            ).rows[0].prompt;
+            plans.set(prompt, { tool: 'apps', action: 'GOOGLECALENDAR_PATCH_EVENT', args });
+            const sourceTurn = randomUUID();
+            const sourceMessage = randomUUID();
+            const contextMessage = randomUUID();
+            const threadId = (await request('GET', '/api/state')).json().threadId;
+            const text =
+              'Read the synthetic Calendar. Never send an event update without approval.';
+            await pool.query(
+              "INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,finished_at) VALUES($1,$2,$3,$3,'user',$4,'succeeded',now())",
+              [sourceTurn, ownerId, threadId, text],
+            );
+            await pool.query(
+              "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'user',$5),($6,$2,$3,$4,'assistant','Synthetic schedule proposal')",
+              [sourceMessage, ownerId, threadId, sourceTurn, text, contextMessage],
+            );
+            const authority = approvalBacked
+              ? {
+                  messages: [],
+                  approvals: [
+                    {
+                      id: randomUUID(),
+                      at: new Date().toISOString(),
+                      definition: {
+                        title: 'Synthetic Calendar schedule',
+                        prompt: text,
+                        kind: 'once',
+                        runAt: '2099-01-01T09:00:00Z',
+                        timeZone: 'UTC',
+                        enabled: true,
+                      },
+                    },
+                  ],
+                }
+              : {
+                  messages: [
+                    {
+                      id: sourceMessage,
+                      at: new Date().toISOString(),
+                      text,
+                      replyTo: { id: contextMessage, text: 'Synthetic schedule proposal' },
+                    },
+                  ],
+                };
+            await pool.query('UPDATE schedules SET authority=$2 WHERE id=$1', [
+              schedule.id,
+              JSON.stringify(authority),
+            ]);
+            const run = await request('POST', `/api/schedules/${schedule.id}/run`, {
+              requestId: randomUUID(),
+              expectedRevision: 0,
+            });
+            assert.equal(run.statusCode, 200, run.body);
+            const id = run.json().turnId;
+            turn = id;
+            await waitFor(id, 'waiting|succeeded|failed');
+            return {
+              turn: id,
+              approval: (await approvalsFor(id))[0],
+              schedule,
+              sourceTurn,
+              sourceMessage,
+              contextMessage,
+              authority,
+              prompt,
+            };
+          };
+          const writeCount = () =>
+            calls.filter((call) => call.action !== 'GOOGLECALENDAR_EVENTS_GET').length;
+          const readCount = () =>
+            calls.filter((call) => call.action === 'GOOGLECALENDAR_EVENTS_GET').length;
+          const settledApproval = async (id: string) => {
+            for (let attempt = 0; attempt < 100; attempt++) {
+              const [saved] = await approvalsFor(id);
+              if (!['pending', 'confirmed', 'executing'].includes(saved.status)) return saved;
+              await delay(20);
+            }
+            return (await approvalsFor(id))[0];
+          };
+          const failure = async (id: string) =>
+            (await pool.query('SELECT error FROM turns WHERE id=$1', [id])).rows[0].error;
+          await t.test(
+            'an unavailable Calendar metadata action is refused before its read',
+            async () => {
+              unoffered = 'GOOGLECALENDAR_EVENTS_GET';
+              const before = calendarWording.length;
+              try {
+                const { turn: id, approval: card } = await submit();
+                assert.equal(card, undefined);
+                assert.match(await failure(id), /not an action the connection service offers/);
+                assert.equal(calls.length, 0);
+                assert.equal(calendarWording.length, before);
+              } finally {
+                unoffered = undefined;
+              }
+            },
+          );
+          const before = calendarWording.length;
+          turn = await propose('GOOGLECALENDAR_PATCH_EVENT', args, 'apps');
+          const [approval] = await approvalsFor(turn);
+          assert.equal(approval.status, 'pending');
+          assert.deepEqual(approval.args, args);
+          assert.equal(approval.details.target?.eventId, event.id);
+          const wording = calendarWording.slice(before);
+          assert.deepEqual(
+            wording.map((item) => item.purpose),
+            ['confirmation', 'confirmation_review'],
+          );
+          for (const item of wording) {
+            assert.equal(item.data.details?.target?.title, event.summary);
+            assert.equal(item.data.details?.target?.startsAt, event.start.dateTime);
+            assert.equal(item.data.details?.target?.timeZone, event.start.timeZone);
+            assert.equal(JSON.stringify(item).includes(event.description), false);
+            assert.equal(JSON.stringify(item).includes(event.attendees[0]!.email), false);
+            assert.equal(JSON.stringify(item).includes(event.htmlLink), false);
+            assert.equal('verifiedCalendarRevision' in item.data.details, false);
+            assert.equal('verifiedInstructionRevision' in item.data.details, false);
+          }
+          assert.deepEqual(
+            [...calls],
+            [
+              {
+                action: 'GOOGLECALENDAR_EVENTS_GET',
+                args: { calendar_id: 'primary', event_id: event.id, max_attendees: 1 },
+                accountId,
+              },
+            ],
+          );
+          assert.equal(
+            calls.some((call) => call.action === 'GOOGLECALENDAR_PATCH_EVENT'),
+            false,
+          );
+          assert.equal(
+            (
+              await pool.query('SELECT basis FROM app_actions WHERE turn_id=$1 AND action=$2', [
+                turn,
+                'GOOGLECALENDAR_EVENTS_GET',
+              ])
+            ).rows[0]?.basis.kind,
+            'read',
+          );
+          await decline(turn);
+
+          for (const [action, fields] of [
+            [
+              'GOOGLECALENDAR_UPDATE_EVENT',
+              { start_datetime: event.start.dateTime, summary: 'A new synthetic title' },
+            ],
+            ['GOOGLECALENDAR_DELETE_EVENT', {}],
+            ['GOOGLECALENDAR_REMOVE_ATTENDEE', { attendee_email: 'guest@example.test' }],
+            ['GOOGLECALENDAR_EVENTS_MOVE', { destination: 'secondary@example.test' }],
+          ] as const)
+            await t.test(
+              `${action} keeps the proposed arguments and reads the current target`,
+              async () => {
+                const input = {
+                  connectionId,
+                  event_id: event.id,
+                  ...(action === 'GOOGLECALENDAR_DELETE_EVENT' ? {} : { calendar_id: 'primary' }),
+                  ...fields,
+                };
+                const writes = writeCount();
+                const reads = readCount();
+                const { turn: id, approval: card } = await submit(action, input);
+                assert.equal(card.status, 'pending');
+                assert.deepEqual(card.args, input);
+                assert.equal(card.details.target.title, event.summary);
+                assert.equal(card.details.target.scope, 'occurrence');
+                assert.equal(readCount(), reads + 1);
+                assert.equal(writeCount(), writes);
+                const accepted = await accept(card);
+                assert.equal(accepted.statusCode, 200, accepted.body);
+                await waitFor(accepted.json().turnId, 'succeeded');
+                assert.equal((await approvalsFor(id))[0].status, 'completed');
+                assert.equal(readCount(), reads + 2);
+                assert.equal(writeCount(), writes + 1);
+                const { connectionId: _connectionId, ...providerArgs } = input;
+                assert.deepEqual(calls.at(-1), { action, args: providerArgs, accountId });
+                assert.equal((await accept(card)).statusCode, 409);
+                assert.equal(writeCount(), writes + 1);
+              },
+            );
+
+          for (const [name, data, expected] of [
+            [
+              'all-day event',
+              {
+                id: event.id,
+                summary: 'Synthetic all-day plan',
+                start: { date: '2030-11-24' },
+                end: { date: '2030-11-25' },
+              },
+              { allDay: true, startsAt: '2030-11-24', endsAt: '2030-11-25', scope: 'event' },
+            ],
+            [
+              'timed event without a named zone',
+              {
+                id: event.id,
+                summary: 'Synthetic timed plan',
+                start: { dateTime: '2030-11-24T10:00:00-05:00' },
+                end: { dateTime: '2030-11-24T10:30:00-05:00' },
+              },
+              { allDay: false, startsAt: '2030-11-24T10:00:00-05:00', scope: 'event' },
+            ],
+            [
+              'local recurring occurrence',
+              {
+                id: event.id,
+                summary: 'Synthetic local plan',
+                start: { dateTime: '2030-11-24T10:00:00', timeZone: 'Europe/Paris' },
+                end: { dateTime: '2030-11-24T10:30:00', timeZone: 'Europe/Paris' },
+                recurringEventId: 'abc123def456',
+                originalStartTime: { dateTime: '2030-11-24T10:00:00', timeZone: 'Europe/Paris' },
+              },
+              {
+                startsAt: '2030-11-24T09:00:00.000Z',
+                endsAt: '2030-11-24T09:30:00.000Z',
+                originalStartsAt: '2030-11-24T09:00:00.000Z',
+                timeZone: 'Europe/Paris',
+                originalTimeZone: 'Europe/Paris',
+                scope: 'occurrence',
+              },
+            ],
+            [
+              'recurring series',
+              {
+                id: event.id,
+                summary: 'Synthetic recurring plan',
+                start: event.start,
+                end: event.end,
+                recurrence: ['RRULE:FREQ=WEEKLY'],
+              },
+              { scope: 'series' },
+            ],
+            [
+              'untitled event',
+              { id: event.id, start: event.start, end: event.end },
+              { title: 'Untitled event', scope: 'event' },
+            ],
+          ] as const)
+            await t.test(`Calendar metadata keeps the meaning of an ${name}`, async () => {
+              observed = { data: { etag: event.etag, ...structuredClone(data) }, successful: true };
+              try {
+                const { turn: id, approval: card } = await submit();
+                assert.equal(card.status, 'pending');
+                assert.equal(card.details.target.endExclusive, true);
+                for (const item of calendarWording.slice(-2))
+                  assert.equal(item.data.details.target.endExclusive, true);
+                for (const [key, value] of Object.entries(expected))
+                  assert.equal(card.details.target[key], value);
+                if (name === 'all-day event')
+                  assert.equal('timeZone' in card.details.target, false);
+                await decline(id);
+              } finally {
+                observed = { data: structuredClone(event), successful: true };
+              }
+            });
+
+          for (const [name, data] of [
+            ['another event', { ...event, id: 'abc999' }],
+            ['missing event version', { ...event, etag: undefined }],
+            ['empty event version', { ...event, etag: '' }],
+            ['invalid event version', { ...event, etag: 17 }],
+            ['oversize event version', { ...event, etag: 'x'.repeat(1025) }],
+            ['missing start', { ...event, start: {} }],
+            ['missing end', { ...event, end: {} }],
+            ['invalid title', { ...event, summary: 17 }],
+            ['unspecified end', { ...event, endTimeUnspecified: true }],
+            ['invalid end flag', { ...event, endTimeUnspecified: 'false' }],
+            ['mixed date forms', { ...event, start: { date: '2030-11-24' } }],
+            ['reversed dates', { ...event, end: { dateTime: '2030-11-23T10:00:00+01:00' } }],
+            [
+              'invalid zone',
+              { ...event, start: { ...event.start, timeZone: 'Invalid/Synthetic' } },
+            ],
+            ['invalid zone type', { ...event, start: { ...event.start, timeZone: 17 } }],
+            ['invalid series ID', { ...event, recurringEventId: 'x'.repeat(1025) }],
+            ['cancelled event', { ...event, status: 'cancelled' }],
+            ['missing occurrence anchor', { ...event, originalStartTime: undefined }],
+            ['conflicting recurrence', { ...event, recurrence: ['RRULE:FREQ=WEEKLY'] }],
+          ] as const)
+            await t.test(`Calendar metadata refuses ${name} before asking`, async () => {
+              observed = { data: structuredClone(data), successful: true };
+              const writes = writeCount();
+              const before = calendarWording.length;
+              try {
+                const { turn: id, approval: card } = await submit();
+                assert.equal(card, undefined);
+                assert.match(await failure(id), /cannot verify the Calendar event/);
+                assert.equal(writeCount(), writes);
+                assert.equal(calendarWording.length, before);
+              } finally {
+                observed = { data: structuredClone(event), successful: true };
+              }
+            });
+
+          await t.test('Calendar read failures keep the provider status and reason', async () => {
+            readFailure = Object.assign(new Error('Synthetic Calendar service unavailable.'), {
+              status: 503,
+            });
+            const writes = writeCount();
+            try {
+              const { turn: id, approval: card } = await submit();
+              assert.equal(card, undefined);
+              const reason = await failure(id);
+              assert.match(reason, /503/);
+              assert.match(reason, /Synthetic Calendar service unavailable/);
+              assert.equal(writeCount(), writes);
+            } finally {
+              readFailure = undefined;
+            }
+          });
+
+          await t.test('Calendar metadata reads obey an ask-first rule', async () => {
+            const rules = (
+              await pool.query('SELECT rules FROM preferences WHERE owner_id=$1', [ownerId])
+            ).rows[0].rules;
+            const reads = readCount();
+            const writes = writeCount();
+            await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+              ownerId,
+              'Ask before reading Calendar.',
+            ]);
+            try {
+              const { turn: id, approval: card } = await submit();
+              assert.equal(card, undefined);
+              assert.match(await failure(id), /rules require confirmation before reading/);
+              assert.equal(readCount(), reads);
+              assert.equal(writeCount(), writes);
+            } finally {
+              await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+                ownerId,
+                rules,
+              ]);
+            }
+          });
+
+          for (const phase of ['preparation', 'execution'])
+            for (const [before, after] of [
+              ['', 'Read Calendar only. Never change an event.'],
+              ['Read Calendar only. Never change an event.', ''],
+            ])
+              await t.test(
+                `Calendar event ${phase} binds a changed standing instruction ${Boolean(before)}`,
+                async () => {
+                  const original = (
+                    await pool.query(
+                      'SELECT notification_rule FROM preferences WHERE owner_id=$1',
+                      [ownerId],
+                    )
+                  ).rows[0].notification_rule;
+                  const writes = writeCount();
+                  let changed = false;
+                  const change = async () => {
+                    changed = true;
+                    await pool.query(
+                      'UPDATE preferences SET notification_rule=$2 WHERE owner_id=$1',
+                      [ownerId, after],
+                    );
+                  };
+                  await pool.query(
+                    'UPDATE preferences SET notification_rule=$2 WHERE owner_id=$1',
+                    [ownerId, before],
+                  );
+                  if (phase === 'preparation') onRead = change;
+                  try {
+                    const { turn: id, approval: card } = await submitEvent();
+                    if (phase === 'preparation') {
+                      assert.equal(card, undefined);
+                      assert.match(await failure(id), /standing instruction changed/);
+                    } else {
+                      assert.equal(card.status, 'pending');
+                      assert.equal(
+                        card.details.verifiedInstructionRevision.standingInstruction,
+                        before,
+                      );
+                      onRead = change;
+                      const accepted = await accept(card);
+                      assert.equal(accepted.statusCode, 200, accepted.body);
+                      await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
+                      const [saved] = await approvalsFor(id);
+                      assert.equal(saved.status, 'expired');
+                      assert.match(JSON.stringify(saved), /standing instruction changed/);
+                    }
+                    assert.equal(changed, true);
+                    assert.equal(writeCount(), writes);
+                  } finally {
+                    onRead = undefined;
+                    await pool.query(
+                      'UPDATE preferences SET notification_rule=$2 WHERE owner_id=$1',
+                      [ownerId, original],
+                    );
+                  }
+                },
+              );
+
+          for (const background of [false, true])
+            await t.test(
+              `Calendar final read keeps ${background ? 'background' : 'foreground'} service-wait policy`,
+              async () => {
+                const { turn: id, approval: card } = await (background ? submitEvent() : submit());
+                assert.equal(card.status, 'pending');
+                const writes = writeCount();
+                const reads = readCount();
+                let held = false;
+                calendarReadReview = async () => {
+                  held = true;
+                  connectionWait = {
+                    until: Date.now() + 120_000,
+                    status: 429,
+                    code: 'installation_busy',
+                  };
+                };
+                try {
+                  const accepted = await accept(card);
+                  assert.equal(accepted.statusCode, 200, accepted.body);
+                  await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
+                  const [saved] = await approvalsFor(id);
+                  assert.equal(held, true);
+                  assert.equal(saved.status, background ? 'expired' : 'completed');
+                  assert.equal(readCount(), reads + (background ? 0 : 1));
+                  assert.equal(writeCount(), writes + (background ? 0 : 1));
+                  if (background)
+                    assert.match(JSON.stringify(saved), /Nod did not read this source/);
+                } finally {
+                  calendarReadReview = undefined;
+                  connectionWait = undefined;
+                }
+              },
+            );
+
+          await t.test(
+            'an event Calendar approval without its standing snapshot cannot dispatch',
+            async () => {
+              const { turn: id, approval: card } = await submitEvent();
+              assert.equal(card.status, 'pending');
+              const reads = readCount();
+              const writes = writeCount();
+              await pool.query(
+                "UPDATE approvals SET details=jsonb_set(details,'{verifiedInstructionRevision}',(details->'verifiedInstructionRevision')-'standingInstruction') WHERE id=$1",
+                [card.id],
+              );
+              const accepted = await accept(card);
+              assert.equal(accepted.statusCode, 200, accepted.body);
+              await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
+              assert.equal((await approvalsFor(id))[0].status, 'expired');
+              assert.equal(readCount(), reads);
+              assert.equal(writeCount(), writes);
+            },
+          );
+
+          for (const change of [
+            'source withdrawn',
+            'context hidden',
+            'parent edit',
+            'approval-backed',
+            'legacy snapshot',
+          ])
+            await t.test(
+              `Calendar schedule approval handles ${change} with frozen authority`,
+              async () => {
+                const fixture = await submitSchedule(change === 'approval-backed');
+                const { turn: id, approval: card } = fixture;
+                assert.equal(card.status, 'pending');
+                assert.deepEqual(
+                  card.details.verifiedInstructionRevision.sourceMessageIds,
+                  change === 'approval-backed'
+                    ? []
+                    : [fixture.sourceMessage, fixture.contextMessage],
+                );
+                const writes = writeCount();
+                const reads = readCount();
+                const succeeds = ['parent edit', 'approval-backed'].includes(change);
+                if (change === 'legacy snapshot')
+                  await pool.query(
+                    "UPDATE approvals SET details=jsonb_set(details,'{verifiedInstructionRevision}',(details->'verifiedInstructionRevision')-'sourceMessageIds') WHERE id=$1",
+                    [card.id],
+                  );
+                onRead = async () => {
+                  if (change === 'source withdrawn')
+                    await pool.query('UPDATE turns SET withdrawn=true WHERE id=$1', [
+                      fixture.sourceTurn,
+                    ]);
+                  else if (change === 'context hidden')
+                    await pool.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [
+                      fixture.contextMessage,
+                    ]);
+                  else if (change === 'parent edit') {
+                    const edited = await request('PATCH', `/api/schedules/${fixture.schedule.id}`, {
+                      prompt: 'A different future instruction.',
+                      expectedRevision: 0,
+                    });
+                    assert.equal(edited.statusCode, 200, edited.body);
+                  }
+                };
+                try {
+                  const accepted = await accept(card);
+                  assert.equal(accepted.statusCode, 200, accepted.body);
+                  await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
+                  const [saved] = await approvalsFor(id);
+                  assert.equal(saved.status, succeeds ? 'completed' : 'expired');
+                  assert.equal(writeCount(), writes + (succeeds ? 1 : 0));
+                  assert.equal(readCount(), reads + (change === 'legacy snapshot' ? 0 : 1));
+                  const frozen = (
+                    await pool.query('SELECT authority FROM schedule_runs WHERE turn_id=$1', [id])
+                  ).rows[0].authority;
+                  assert.deepEqual(frozen, fixture.authority);
+                  if (['source withdrawn', 'context hidden'].includes(change))
+                    assert.match(JSON.stringify(saved), /withdrawn or unavailable/);
+                } finally {
+                  onRead = undefined;
+                  await pool.query('UPDATE turns SET withdrawn=false WHERE id=$1', [
+                    fixture.sourceTurn,
+                  ]);
+                  await pool.query('UPDATE messages SET hidden_at=NULL WHERE id=$1', [
+                    fixture.contextMessage,
+                  ]);
+                  plans.delete(fixture.prompt);
+                  await request('DELETE', `/api/schedules/${fixture.schedule.id}`);
+                }
+              },
+            );
+
+          for (const changeRules of [false, true])
+            await t.test(
+              changeRules
+                ? 'Calendar repeat keeps the instruction revision captured before its read'
+                : 'Calendar repeat reads a fresh target before its new approval',
+              async () => {
+                const writes = writeCount();
+                const reads = readCount();
+                const rules = (
+                  await pool.query('SELECT rules FROM preferences WHERE owner_id=$1', [ownerId])
+                ).rows[0].rules;
+                const reply = `Repeat the synthetic Calendar update ${randomUUID()}.`;
+                const question = `Should I repeat the same synthetic Calendar update ${randomUUID()}?`;
+                try {
+                  const { turn: firstTurn, approval: first } = await submit();
+                  assert.equal(first.status, 'pending');
+                  questionAfterConfirm = question;
+                  const accepted = await accept(first);
+                  assert.equal(accepted.statusCode, 200, accepted.body);
+                  await waitFor(accepted.json().turnId, 'waiting');
+                  assert.equal(writeCount(), writes + 1);
+                  assert.equal(readCount(), reads + 2);
+                  const original = (await approvalsFor(firstTurn))[0];
+                  assert.equal(original.status, 'completed');
+                  const askedQuestion = (
+                    await pool.query(
+                      "SELECT id FROM messages WHERE turn_id=$1 AND role='assistant' AND text=$2",
+                      [accepted.json().turnId, question],
+                    )
+                  ).rows[0];
+                  assert.ok(askedQuestion);
+                  observed = {
+                    data: {
+                      ...structuredClone(event),
+                      etag: '"synthetic-calendar-repeat-version"',
+                      summary: 'Synthetic revised planning',
+                    },
+                    successful: true,
+                  };
+                  asked.add(reply);
+                  plans.set(reply, { tool: 'apps', action: 'GOOGLECALENDAR_PATCH_EVENT', args });
+                  repeatDecision = 'new';
+                  let ruleChanges = 0;
+                  if (changeRules)
+                    onRead = async () => {
+                      ruleChanges++;
+                      await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+                        ownerId,
+                        'Do not change the synthetic Calendar event.',
+                      ]);
+                    };
+                  const wording = calendarWording.length;
+                  const repeated = await request('POST', '/api/messages', {
+                    text: reply,
+                    replyToMessageId: askedQuestion.id,
+                  });
+                  assert.equal(repeated.statusCode, 200, repeated.body);
+                  const repeatedTurn = repeated.json().turnId;
+                  turn = repeatedTurn;
+                  await waitFor(repeatedTurn, 'waiting|succeeded|failed');
+                  assert.ok(
+                    repeatChecks.some(
+                      (input) =>
+                        Object(input).reply === reply && Object(input).question === question,
+                    ),
+                  );
+                  assert.equal(readCount(), reads + 3);
+                  assert.equal(writeCount(), writes + 1);
+                  const [second] = await approvalsFor(repeatedTurn);
+                  if (changeRules) {
+                    assert.equal(ruleChanges, 1);
+                    assert.equal(second, undefined);
+                    assert.match(await failure(repeatedTurn), /owner rules changed/);
+                  } else {
+                    assert.ok(second);
+                    assert.equal(second.status, 'pending');
+                    assert.equal(second.details.reason, undefined);
+                    assert.equal(second.source_message_id, repeated.json().messageId);
+                    assert.deepEqual(second.args, first.args);
+                    assert.equal(second.details.target.title, 'Synthetic revised planning');
+                    assert.match(await confirmationFor(second), /Synthetic revised planning/);
+                    assert.equal(second.details.target.eventId, event.id);
+                    assert.notEqual(
+                      second.details.verifiedCalendarRevision,
+                      first.details.verifiedCalendarRevision,
+                    );
+                    assert.equal(
+                      second.details.verifiedInstructionRevision.chat.id,
+                      repeated.json().messageId,
+                    );
+                    for (const item of calendarWording.slice(wording)) {
+                      assert.equal(item.data.details.target.title, 'Synthetic revised planning');
+                      assert.equal('verifiedCalendarRevision' in item.data.details, false);
+                      assert.equal('verifiedInstructionRevision' in item.data.details, false);
+                      assert.equal(JSON.stringify(item).includes(event.description), false);
+                    }
+                    const confirmed = await accept(second);
+                    assert.equal(confirmed.statusCode, 200, confirmed.body);
+                    await waitFor(confirmed.json().turnId, 'succeeded');
+                    assert.equal(readCount(), reads + 4);
+                    assert.equal(writeCount(), writes + 2);
+                    assert.equal((await approvalsFor(repeatedTurn))[0].status, 'completed');
+                    assert.equal((await accept(second)).statusCode, 409);
+                    assert.equal(writeCount(), writes + 2);
+                  }
+                  assert.deepEqual((await approvalsFor(firstTurn))[0].result, original.result);
+                  assert.equal((await approvalsFor(firstTurn))[0].status, 'completed');
+                } finally {
+                  onRead = undefined;
+                  observed = { data: structuredClone(event), successful: true };
+                  questionAfterConfirm = undefined;
+                  repeatDecision = 'same';
+                  plans.delete(reply);
+                  asked.delete(reply);
+                  await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+                    ownerId,
+                    rules,
+                  ]);
+                }
+              },
+            );
+
+          await t.test(
+            'Calendar approval rechecks the target and dispatches once after yes',
+            async () => {
+              const writes = writeCount();
+              const reads = readCount();
+              const { turn: id, approval: card } = await submit();
+              assert.equal(writeCount(), writes);
+              const accepted = await accept(card);
+              assert.equal(accepted.statusCode, 200, accepted.body);
+              await waitFor(accepted.json().turnId, 'succeeded');
+              assert.equal(readCount(), reads + 2);
+              assert.equal(writeCount(), writes + 1);
+              assert.equal((await approvalsFor(id))[0].status, 'completed');
+              assert.deepEqual(calls.at(-1), {
+                action: 'GOOGLECALENDAR_PATCH_EVENT',
+                args: {
+                  calendar_id: 'primary',
+                  event_id: event.id,
+                  rsvp_response: 'accepted',
+                  send_updates: 'none',
+                },
+                accountId,
+              });
+              const repeated = await accept(card);
+              assert.equal(repeated.statusCode, 409);
+              assert.equal(writeCount(), writes + 1);
+            },
+          );
+
+          for (const changed of [false, true])
+            await t.test(
+              changed
+                ? 'Calendar approval preserves a guest added while consent waits'
+                : 'Calendar approval applies the checked guest list exactly once',
+              async () => {
+                const execute = calendarExecute;
+                const writes = writeCount();
+                const trustStart = calendarTrust.length;
+                const ledgerWrites = async () =>
+                  Number(
+                    (
+                      await pool.query(
+                        "SELECT count(*) FROM app_actions WHERE action='GOOGLECALENDAR_PATCH_EVENT'",
+                      )
+                    ).rows[0].count,
+                  );
+                const recorded = await ledgerWrites();
+                const current = {
+                  ...structuredClone(event),
+                  attendees: [
+                    { email: 'owner@example.test', self: true, responseStatus: 'accepted' },
+                    { email: 'existing-guest@example.test', responseStatus: 'accepted' },
+                  ],
+                };
+                const added = { email: 'later-guest@example.test', responseStatus: 'needsAction' };
+                const input = {
+                  connectionId,
+                  calendar_id: 'primary',
+                  event_id: event.id,
+                  attendees: [
+                    ...structuredClone(current.attendees),
+                    { email: 'requested-guest@example.test', responseStatus: 'needsAction' },
+                  ],
+                  send_updates: 'all',
+                };
+                calendarExecute = async (action, args, account, signal) => {
+                  signal?.throwIfAborted();
+                  calls.push({ action, args: structuredClone(args), accountId: account });
+                  if (action === 'GOOGLECALENDAR_EVENTS_GET') {
+                    assert.equal(args.max_attendees, 1);
+                    return {
+                      data: {
+                        ...structuredClone(current),
+                        attendees: [current.attendees[0]],
+                        attendeesOmitted: true,
+                      },
+                      successful: true,
+                    };
+                  }
+                  assert.equal(action, 'GOOGLECALENDAR_PATCH_EVENT');
+                  assert.deepEqual(args.attendees, input.attendees);
+                  current.attendees = structuredClone(args.attendees as typeof current.attendees);
+                  current.etag = '"synthetic-calendar-written"';
+                  return { data: structuredClone(current), successful: true };
+                };
+                try {
+                  const { turn: id, approval: card } = await submit(
+                    'GOOGLECALENDAR_PATCH_EVENT',
+                    input,
+                  );
+                  assert.equal(card.status, 'pending');
+                  assert.deepEqual(card.args, input);
+                  assert.equal(writeCount(), writes);
+                  const shown = JSON.stringify(calendarWording.slice(-2));
+                  assert.equal(shown.includes('synthetic-calendar-version'), false);
+                  assert.equal(shown.includes('attendeesOmitted'), false);
+                  if (changed) {
+                    current.attendees.push(added);
+                    current.etag = '"synthetic-calendar-guest-added"';
+                  }
+                  const accepted = await accept(card);
+                  assert.equal(accepted.statusCode, 200, accepted.body);
+                  await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
+                  const saved = (await approvalsFor(id))[0];
+                  assert.equal((await approvalsFor(id)).length, 1);
+                  assert.equal(await ledgerWrites(), recorded + (changed ? 0 : 1));
+                  const trust = calendarTrust.slice(trustStart);
+                  assert.ok(
+                    trust.some((input) => input.action.name === 'GOOGLECALENDAR_PATCH_EVENT'),
+                  );
+                  assert.ok(
+                    trust.some((input) => input.action.name === 'GOOGLECALENDAR_EVENTS_GET'),
+                  );
+                  const checked = JSON.stringify(trust);
+                  assert.equal(checked.includes('synthetic-calendar-version'), false);
+                  assert.equal(checked.includes('synthetic-calendar-guest-added'), false);
+                  assert.equal(checked.includes(added.email), false);
+                  const messages = await pool.query(
+                    'SELECT text FROM messages WHERE turn_id = ANY($1::uuid[])',
+                    [[id, accepted.json().turnId]],
+                  );
+                  assert.equal(JSON.stringify(messages.rows).includes(added.email), false);
+                  assert.equal(
+                    JSON.stringify(messages.rows).includes('synthetic-calendar-version'),
+                    false,
+                  );
+                  assert.deepEqual(
+                    {
+                      status: saved.status,
+                      writes: writeCount() - writes,
+                      laterGuestKept: current.attendees.some(
+                        (guest) => guest.email === added.email,
+                      ),
+                    },
+                    changed
+                      ? { status: 'expired', writes: 0, laterGuestKept: true }
+                      : { status: 'completed', writes: 1, laterGuestKept: false },
+                  );
+                  if (changed) assert.match(JSON.stringify(saved), /Calendar event changed/);
+                  else assert.deepEqual(current.attendees, input.attendees);
+                  assert.equal((await accept(card)).statusCode, 409);
+                  assert.equal(writeCount(), writes + (changed ? 0 : 1));
+                } finally {
+                  calendarExecute = execute;
+                }
+              },
+            );
+
+          for (const [name, data] of [
+            ['missing event version', { ...event, etag: undefined }],
+            ['blank event version', { ...event, etag: '' }],
+            ['unspecified end', { ...event, endTimeUnspecified: true }],
+          ] as const)
+            await t.test(`Calendar approval refuses ${name} on its final read`, async () => {
+              const writes = writeCount();
+              const { turn: id, approval: card } = await submit();
+              assert.equal(card.status, 'pending');
+              observed = { data: structuredClone(data), successful: true };
+              try {
+                const accepted = await accept(card);
+                assert.equal(accepted.statusCode, 200, accepted.body);
+                await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
+                const [saved] = await approvalsFor(id);
+                assert.equal(saved.status, 'expired');
+                assert.match(JSON.stringify(saved), /cannot verify the Calendar event/);
+                assert.equal(writeCount(), writes);
+              } finally {
+                observed = { data: structuredClone(event), successful: true };
+              }
+            });
+
+          await t.test('Calendar approval refuses a changed target before dispatch', async () => {
+            const writes = writeCount();
+            const { turn: id, approval: card } = await submit();
+            observed = {
+              data: {
+                ...event,
+                start: { ...event.start, dateTime: '2030-11-25T10:00:00+01:00' },
+                end: { ...event.end, dateTime: '2030-11-25T10:30:00+01:00' },
+              },
+              successful: true,
+            };
+            try {
+              const accepted = await accept(card);
+              assert.equal(accepted.statusCode, 200, accepted.body);
+              await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
+              const [saved] = await approvalsFor(id);
+              assert.equal(saved.status, 'expired');
+              assert.equal(JSON.stringify(saved).includes('Calendar event changed'), true);
+              assert.equal(writeCount(), writes);
+            } finally {
+              observed = { data: structuredClone(event), successful: true };
+            }
+          });
+
+          for (const [name, before, after] of [
+            [
+              'recurrence',
+              {
+                ...event,
+                recurringEventId: undefined,
+                originalStartTime: undefined,
+                recurrence: ['RRULE:FREQ=WEEKLY;COUNT=2'],
+              },
+              {
+                ...event,
+                recurringEventId: undefined,
+                originalStartTime: undefined,
+                recurrence: ['RRULE:FREQ=DAILY;COUNT=100'],
+              },
+            ],
+            [
+              'title after its display limit',
+              { ...event, summary: `${'Synthetic plan '.repeat(24)}before` },
+              { ...event, summary: `${'Synthetic plan '.repeat(24)}after` },
+            ],
+          ] as const)
+            await t.test(`Calendar approval refuses changed ${name}`, async () => {
+              const writes = writeCount();
+              observed = { data: structuredClone(before), successful: true };
+              try {
+                const { turn: id, approval: card } = await submit('GOOGLECALENDAR_DELETE_EVENT', {
+                  connectionId,
+                  event_id: event.id,
+                });
+                observed = { data: structuredClone(after), successful: true };
+                const accepted = await accept(card);
+                assert.equal(accepted.statusCode, 200, accepted.body);
+                await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
+                assert.equal((await approvalsFor(id))[0].status, 'expired');
+                assert.equal(writeCount(), writes);
+              } finally {
+                observed = { data: structuredClone(event), successful: true };
+              }
+            });
+
+          await t.test(
+            'an owner correction during the final Calendar read prevents dispatch',
+            async () => {
+              const writes = writeCount();
+              const { turn: id, approval: card } = await submit();
+              let entered!: () => void;
+              const reading = new Promise<void>((resolve) => {
+                entered = resolve;
+              });
+              let release!: () => void;
+              const held = new Promise<void>((resolve) => {
+                release = resolve;
+              });
+              onRead = async () => {
+                entered();
+                await held;
+              };
+              let accepted: any;
+              let correction: any;
+              try {
+                accepted = await accept(card);
+                assert.equal(accepted.statusCode, 200, accepted.body);
+                await reading;
+                correction = await request('POST', '/api/messages', {
+                  text: 'Do not change the Calendar event.',
+                });
+                assert.equal(correction.statusCode, 200, correction.body);
+                release();
+                await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
+                assert.equal((await approvalsFor(id))[0].status, 'expired');
+                assert.equal(writeCount(), writes);
+              } finally {
+                release();
+                onRead = undefined;
+                if (correction?.statusCode === 200)
+                  await waitFor(correction.json().turnId, 'succeeded');
+              }
+            },
+          );
+
+          await t.test(
+            'Stop during the final Calendar read records that the write did not run',
+            async () => {
+              const { turn: id, approval: card } = await submit();
+              const writes = writeCount();
+              let entered!: (signal?: AbortSignal) => void;
+              const reading = new Promise<AbortSignal | undefined>((resolve) => {
+                entered = resolve;
+              });
+              let release!: () => void;
+              const held = new Promise<void>((resolve) => {
+                release = resolve;
+              });
+              onRead = async (signal) => {
+                entered(signal);
+                await held;
+              };
+              try {
+                const accepted = await accept(card);
+                assert.equal(accepted.statusCode, 200, accepted.body);
+                const signal = await reading;
+                assert.equal((await request('POST', '/api/thread/stop', {})).statusCode, 200);
+                assert.equal(signal?.aborted, true);
+                release();
+                await waitFor(accepted.json().turnId, 'cancelled');
+                assert.equal((await settledApproval(id)).status, 'expired');
+                assert.equal(writeCount(), writes);
+                assert.equal((await approvalsFor(id)).length, 1);
+              } finally {
+                release();
+                onRead = undefined;
+              }
+            },
+          );
+
+          const createCalendarTask = async (taskId: string, progressId = randomUUID()) => {
+            const parentId = randomUUID();
+            const ownerMessageId = randomUUID();
+            const prompt = `Synthetic task Calendar change ${randomUUID()}`;
+            const threadId = (await request('GET', '/api/state')).json<AppState>().threadId;
+            plans.set(prompt, { tool: 'apps', action: 'GOOGLECALENDAR_PATCH_EVENT', args });
+            const id = await transaction(async (client) => {
+              await client.query(
+                `INSERT INTO turns(id,owner_id,thread_id,session_id,source,message_id,prompt,status,finished_at) VALUES($1,$2,$3,$3,'user',$4,$5,'succeeded',now())`,
+                [
+                  parentId,
+                  ownerId,
+                  threadId,
+                  ownerMessageId,
+                  'Review the synthetic Calendar response.',
+                ],
+              );
+              await client.query(
+                `INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'user',$5)`,
+                [
+                  ownerMessageId,
+                  ownerId,
+                  threadId,
+                  parentId,
+                  'Review the synthetic Calendar response.',
+                ],
+              );
+              const id = await enqueueTurn(prompt, {
+                source: 'task',
+                sessionId: taskId,
+                parentTurnId: parentId,
+                background: true,
+                client,
+              });
+              await client.query(
+                `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,title,done_when,now_text,applied_revision) VALUES($1,$2,$3,$1,$4,'Synthetic Calendar task','Response checked','Waiting for approval',1)`,
+                [taskId, ownerId, id, ownerMessageId],
+              );
+              await client.query('UPDATE turns SET task_id=$1,task_revision=1 WHERE id=$2', [
+                taskId,
+                id,
+              ]);
+              await client.query(
+                "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'assistant','Synthetic Calendar progress')",
+                [progressId, ownerId, threadId, id],
+              );
+              return id;
+            }, pool);
+            return { id, progressId };
+          };
+
+          for (const taskCorrection of [false, true])
+            await t.test(
+              taskCorrection
+                ? 'a task correction during the final Calendar read prevents dispatch'
+                : 'main chat does not change a task Calendar approval',
+              async () => {
+                const taskId = randomUUID();
+                const { id } = await createCalendarTask(taskId);
+                await waitFor(id, 'waiting');
+                const [card] = await approvalsFor(id);
+                assert.equal(card.status, 'pending');
+                assert.equal(card.details.verifiedInstructionRevision.task.id, taskId);
+                assert.equal(card.details.verifiedInstructionRevision.chat, undefined);
+                let entered!: () => void;
+                const reading = new Promise<void>((resolve) => {
+                  entered = resolve;
+                });
+                let release!: () => void;
+                const held = new Promise<void>((resolve) => {
+                  release = resolve;
+                });
+                onRead = async () => {
+                  entered();
+                  await held;
+                };
+                const writes = writeCount();
+                let correction: any;
+                try {
+                  const accepted = await accept(card);
+                  assert.equal(accepted.statusCode, 200, accepted.body);
+                  await reading;
+                  correction = await request('POST', '/api/messages', {
+                    text: taskCorrection
+                      ? 'Do not change the Calendar event.'
+                      : 'Tell me the synthetic local status.',
+                    ...(taskCorrection ? { replyToMessageId: card.confirmation_message_id } : {}),
+                  });
+                  assert.equal(correction.statusCode, 200, correction.body);
+                  release();
+                  await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
+                  assert.equal(
+                    (await approvalsFor(id))[0].status,
+                    taskCorrection ? 'expired' : 'completed',
+                  );
+                  assert.equal(writeCount(), writes + (taskCorrection ? 0 : 1));
+                  await waitFor(correction.json().turnId, 'succeeded');
+                } finally {
+                  release();
+                  onRead = undefined;
+                  await pool.query("UPDATE tasks SET state='done',closed_at=now() WHERE id=$1", [
+                    taskId,
+                  ]);
+                }
+              },
+            );
+
+          await t.test(
+            'Calendar authority cannot join old task words to a new revision',
+            async () => {
+              const taskId = randomUUID();
+              const query = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
+              const progressId = randomUUID();
+              let changed = false;
+              let correction: any;
+              const writes = writeCount();
+              pool.query = (async (...input: any[]) => {
+                const result = await query(...input);
+                if (
+                  !changed &&
+                  typeof input[0] === 'string' &&
+                  input[0].startsWith('WITH authority AS') &&
+                  input[1]?.[3] === taskId
+                ) {
+                  changed = true;
+                  assert.ok(progressId);
+                  correction = await request('POST', '/api/messages', {
+                    text: 'Do not change the Calendar event.',
+                    replyToMessageId: progressId,
+                  });
+                  assert.equal(correction.statusCode, 200, correction.body);
+                }
+                return result;
+              }) as typeof pool.query;
+              try {
+                const task = await createCalendarTask(taskId, progressId);
+                await waitFor(task.id, 'waiting|succeeded|failed');
+                assert.equal(changed, true);
+                assert.deepEqual(await approvalsFor(task.id), []);
+                assert.equal(writeCount(), writes);
+              } finally {
+                pool.query = query as typeof pool.query;
+                if (correction?.statusCode === 200)
+                  await waitFor(correction.json().turnId, 'succeeded');
+                await pool.query("UPDATE tasks SET state='done',closed_at=now() WHERE id=$1", [
+                  taskId,
+                ]);
+              }
+            },
+          );
+
+          for (const change of ['rules', 'account', 'Stop'])
+            await t.test(`Calendar dispatch refuses ${change} during session startup`, async () => {
+              const { turn: id, approval: card } = await submit();
+              const writes = writeCount();
+              const reads = readCount();
+              const original = (
+                await pool.query('SELECT rules FROM preferences WHERE owner_id=$1', [ownerId])
+              ).rows[0].rules;
+              let changed = false;
+              calendarSession = async () => {
+                if (changed || readCount() !== reads + 1) return;
+                changed = true;
+                if (change === 'rules')
+                  await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+                    ownerId,
+                    'Do not change Calendar events.',
+                  ]);
+                else if (change === 'account')
+                  await pool.query('UPDATE app_connections SET account_id=$2 WHERE id=$1', [
+                    connectionId,
+                    randomUUID(),
+                  ]);
+                else assert.equal((await request('POST', '/api/thread/stop', {})).statusCode, 200);
+              };
+              try {
+                const accepted = await accept(card);
+                assert.equal(accepted.statusCode, 200, accepted.body);
+                await waitFor(accepted.json().turnId, 'waiting|succeeded|failed|cancelled');
+                assert.equal(changed, true);
+                assert.equal((await settledApproval(id)).status, 'expired');
+                assert.equal(writeCount(), writes);
+              } finally {
+                calendarSession = undefined;
+                await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+                  ownerId,
+                  original,
+                ]);
+                await pool.query('UPDATE app_connections SET account_id=$2 WHERE id=$1', [
+                  connectionId,
+                  accountId,
+                ]);
+              }
+            });
+
+          for (const field of [
+            'target',
+            'verifiedBinding',
+            'verifiedCalendarRevision',
+            'verifiedInstructionRevision',
+          ])
+            await t.test(`an old Calendar approval without ${field} cannot dispatch`, async () => {
+              const writes = writeCount();
+              const { turn: id, approval: card } = await submit();
+              await pool.query('UPDATE approvals SET details=details-$2 WHERE id=$1', [
+                card.id,
+                field,
+              ]);
+              const reads = readCount();
+              const accepted = await accept(card);
+              assert.equal(accepted.statusCode, 200, accepted.body);
+              await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
+              assert.equal((await approvalsFor(id))[0].status, 'expired');
+              assert.equal(readCount(), reads);
+              assert.equal(writeCount(), writes);
+            });
+
+          await t.test('Calendar metadata refuses an account changed during the read', async () => {
+            const original = (
+              await pool.query('SELECT account_id FROM app_connections WHERE id=$1', [connectionId])
+            ).rows[0].account_id;
+            const writes = writeCount();
+            onRead = async () => {
+              await pool.query('UPDATE app_connections SET account_id=$2 WHERE id=$1', [
+                connectionId,
+                randomUUID(),
+              ]);
+            };
+            try {
+              const { turn: id, approval: card } = await submit();
+              assert.equal(card, undefined);
+              assert.match(await failure(id), /Calendar account changed/);
+              assert.equal(writeCount(), writes);
+            } finally {
+              onRead = undefined;
+              await pool.query('UPDATE app_connections SET account_id=$2 WHERE id=$1', [
+                connectionId,
+                original,
+              ]);
+            }
+          });
+
+          await t.test(
+            'Calendar dispatch keeps the binding after its final metadata read',
+            async () => {
+              const writes = writeCount();
+              const { turn: id, approval: card } = await submit();
+              const original = (
+                await pool.query('SELECT account_id FROM app_connections WHERE id=$1', [
+                  connectionId,
+                ])
+              ).rows[0].account_id;
+              const query = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
+              let swap = false;
+              let swapped = false;
+              onRead = async () => {
+                swap = true;
+              };
+              pool.query = (async (...input: any[]) => {
+                const result = await query(...input);
+                if (
+                  swap &&
+                  typeof input[0] === 'string' &&
+                  input[0].startsWith('INSERT INTO app_actions') &&
+                  input[1]?.[2] === 'GOOGLECALENDAR_EVENTS_GET'
+                ) {
+                  swap = false;
+                  swapped = true;
+                  await query('UPDATE app_connections SET account_id=$2 WHERE id=$1', [
+                    connectionId,
+                    randomUUID(),
+                  ]);
+                }
+                return result;
+              }) as typeof pool.query;
+              try {
+                const accepted = await accept(card);
+                assert.equal(accepted.statusCode, 200, accepted.body);
+                await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
+                assert.equal(swapped, true);
+                assert.equal((await approvalsFor(id))[0].status, 'expired');
+                assert.equal(writeCount(), writes);
+              } finally {
+                pool.query = query as typeof pool.query;
+                onRead = undefined;
+                await pool.query('UPDATE app_connections SET account_id=$2 WHERE id=$1', [
+                  connectionId,
+                  original,
+                ]);
+              }
+            },
+          );
+
+          await t.test('Calendar approval obeys a read rule added after the question', async () => {
+            const { turn: id, approval: card } = await submit();
+            const rules = (
+              await pool.query('SELECT rules FROM preferences WHERE owner_id=$1', [ownerId])
+            ).rows[0].rules;
+            const writes = writeCount();
+            const reads = readCount();
+            await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+              ownerId,
+              'Ask before reading Calendar.',
+            ]);
+            try {
+              const accepted = await accept(card);
+              assert.equal(accepted.statusCode, 200, accepted.body);
+              await waitFor(accepted.json().turnId, 'waiting|succeeded|failed');
+              assert.equal((await approvalsFor(id))[0].status, 'expired');
+              assert.equal(readCount(), reads);
+              assert.equal(writeCount(), writes);
+            } finally {
+              await pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+                ownerId,
+                rules,
+              ]);
+            }
+          });
+
+          for (const stop of [false, true])
+            await t.test(
+              stop
+                ? 'Stop refuses a late Calendar metadata result'
+                : 'an owner correction during Calendar metadata cannot save the old question',
+              async () => {
+                let entered!: (signal?: AbortSignal) => void;
+                const reading = new Promise<AbortSignal | undefined>((resolve) => {
+                  entered = resolve;
+                });
+                let release!: () => void;
+                const held = new Promise<void>((resolve) => {
+                  release = resolve;
+                });
+                onRead = async (signal) => {
+                  entered(signal);
+                  await held;
+                };
+                const writes = writeCount();
+                const pending = submit();
+                const signal = await reading;
+                try {
+                  const response = stop
+                    ? await request('POST', '/api/thread/stop', {})
+                    : await request('POST', '/api/messages', {
+                        text: 'Do not change the Calendar event.',
+                      });
+                  assert.equal(response.statusCode, 200, response.body);
+                  if (stop) assert.equal(signal?.aborted, true);
+                  release();
+                  const { turn: id, approval: card } = await pending;
+                  assert.equal(card, undefined);
+                  if (!stop) await waitFor(response.json().turnId, 'succeeded');
+                  await delay(30);
+                  assert.deepEqual(await approvalsFor(id), []);
+                  assert.equal(writeCount(), writes);
+                } finally {
+                  release();
+                  onRead = undefined;
+                  await pending.catch(() => {});
+                }
+              },
+            );
+
+          await t.test('an authorized Calendar change keeps its direct path', async () => {
+            const text = `Accept the synthetic planning invitation ${randomUUID()}`;
+            const reads = readCount();
+            const writes = writeCount();
+            asked.add(text);
+            plans.set(text, { tool: 'apps', action: 'GOOGLECALENDAR_PATCH_EVENT', args });
+            try {
+              const response = await request('POST', '/api/messages', { text });
+              assert.equal(response.statusCode, 200, response.body);
+              await waitFor(response.json().turnId, 'succeeded');
+              assert.deepEqual(await approvalsFor(response.json().turnId), []);
+              assert.equal(readCount(), reads);
+              assert.equal(writeCount(), writes + 1);
+            } finally {
+              asked.delete(text);
+            }
+          });
+        } finally {
+          if (turn) await decline(turn);
+          if (connectionId)
+            await request(
+              'POST',
+              `/api/apps/googlecalendar/accounts/${connectionId}/disconnect`,
+              {},
+            );
+          calendarExecute = undefined;
+        }
+      });
+
       await calendarRetry();
       await t.test(
         'shutdown cancels private entry and command admission before cleanup and saves final usage',
