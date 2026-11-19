@@ -1688,7 +1688,9 @@ test(
               assert.equal(answer.statusCode, 200, answer.body);
               await waitFor(answer.json().turnId, 'succeeded');
               assert.equal((await approvalsFor(held))[0].status, 'completed');
-              assert.equal(seen.filter((step) => step.action !== 'evaluate').length, before + 1);
+              assert.deepEqual(seen.filter((step) => step.action !== 'evaluate').slice(before), [
+                { ...entry.step, expectOrigin: page.origin, expectUrl: page.url },
+              ]);
             }
             page = { origin: page.origin, url: page.url, controls, submits: 'unknown' };
             const text = `Click the synthetic owner-approved control ${randomUUID()}`;
