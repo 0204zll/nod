@@ -2271,16 +2271,15 @@ function waitForMacInstaller() {
 
 function refreshUpdateMenu() {
   if (quitting) return;
-  const label =
-    macInstallerBusy
-      ? 'Waiting for update installer…'
-      : updatePhase === 'downloading' && updateProgress !== undefined
-        ? `Downloading update… ${updateProgress}%`
-        : {
-            checking: 'Checking for updates…',
-            preparing: 'Preparing update…',
-            downloading: 'Downloading update…',
-          }[updatePhase] || (updateFailure ? 'Update Failed. Try Again…' : 'Check for Updates…');
+  const label = macInstallerBusy
+    ? 'Waiting for update installer…'
+    : updatePhase === 'downloading' && updateProgress !== undefined
+      ? `Downloading update… ${updateProgress}%`
+      : {
+          checking: 'Checking for updates…',
+          preparing: 'Preparing update…',
+          downloading: 'Downloading update…',
+        }[updatePhase] || (updateFailure ? 'Update Failed. Try Again…' : 'Check for Updates…');
   const item = Menu.getApplicationMenu?.()?.getMenuItemById('desktop-update');
   if (item) {
     item.label = label;
