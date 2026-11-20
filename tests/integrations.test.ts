@@ -4309,6 +4309,7 @@ test(
       'authorize-failure',
       'wrong-email',
       'wrong-owner',
+      'inactive',
       'unknown-identity',
       'foreign-target',
       'superseded',
@@ -4505,7 +4506,7 @@ test(
             completedTokens.add(query.state);
             const account = remote.get(query.account_ref);
             assert.ok(account);
-            if (query.outcome === 'ok') account.active = true;
+            if (query.outcome === 'ok' && variant !== 'inactive') account.active = true;
             if (
               ['restart-during-callback', 'claim-during-start'].includes(variant) &&
               !holdingParse
@@ -4786,7 +4787,7 @@ test(
             ),
             false,
           );
-        if (['wrong-email', 'disconnected'].includes(variant))
+        if (['wrong-email', 'disconnected', 'inactive'].includes(variant))
           assert.equal(remote.has('new-account-1'), false);
         if (variant === 'wrong-owner') assert.equal(removed.includes('new-account-1'), false);
         assert.ok(removed.every((id) => !id.startsWith('old-')));
