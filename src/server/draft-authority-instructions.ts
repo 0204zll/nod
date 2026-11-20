@@ -1,9 +1,17 @@
-import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
 import { presentationSchema, presentationText } from '../shared/presentation.ts';
-import { instructionSourceMessageIds, type OwnerInstructions } from './owner-instructions.ts';
+import {
+  instructionSourceMessageIds,
+  ownerMessageContentSql,
+  type OwnerInstructions,
+} from './owner-instructions.ts';
 import { withdrawnSql } from './turn-chain.ts';
-import { chatDraftInstructionBindings } from './chat-draft-instructions.ts';
+import {
+  chatDraftInstructionBindings,
+  draftConditionBindingStates,
+  draftSourceRevision,
+  type DraftConditionSource,
+} from './chat-draft-instructions.ts';
 import type { TrustWords } from './trust-basis.ts';
 
 type Database = Pick<Pool, 'query'>;
@@ -15,11 +23,13 @@ type Authority = {
   context: unknown;
   sourceIds: string[];
   bindings: Array<{ id: string; state: string; revision: string }>;
+  conditionSources?: DraftConditionSource[];
   empty?: boolean;
   unavailable?: boolean;
 };
 type Source = {
   key: string;
+  base_key: string;
   owner_id: string;
   thread_id: string;
   task_id: string | null;
@@ -33,12 +43,12 @@ type Source = {
   attempted: boolean;
   created_at: Date;
 };
-const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const digest = draftSourceRevision;
 
 export async function initializeDraftAuthorityInstructions(database: Database) {
   await database.query(`
     CREATE TABLE IF NOT EXISTS draft_authority_instructions (
-      key text PRIMARY KEY, owner_id text NOT NULL, thread_id uuid NOT NULL, task_id uuid,
+      key text PRIMARY KEY, base_key text NOT NULL, owner_id text NOT NULL, thread_id uuid NOT NULL, task_id uuid,
       kind text NOT NULL CHECK (kind IN ('schedule','standing','rules')), authority_scope text NOT NULL,
       payload jsonb NOT NULL, source_ids uuid[] NOT NULL, source_revision text NOT NULL,
       policy_revision text NOT NULL, state text NOT NULL DEFAULT 'pending'
@@ -46,6 +56,7 @@ export async function initializeDraftAuthorityInstructions(database: Database) {
       created_at timestamptz NOT NULL DEFAULT now()
     );
     CREATE INDEX IF NOT EXISTS draft_authority_instructions_owner ON draft_authority_instructions(owner_id,created_at,key);
+    CREATE INDEX IF NOT EXISTS draft_authority_instructions_base ON draft_authority_instructions(owner_id,base_key);
     CREATE TABLE IF NOT EXISTS draft_authority_turns (
       owner_id text NOT NULL, turn_id uuid NOT NULL, source_key text NOT NULL,
       PRIMARY KEY(owner_id,turn_id,source_key)
@@ -97,8 +108,9 @@ async function snapshots(database: Database, ownerId: string, payloads: Authorit
           hidden_at: Date | null;
           withdrawn: boolean;
           presentation: unknown;
+          owner_authored: boolean;
         }>(
-          `SELECT m.id,m.role,m.text,m.created_at,m.hidden_at,m.presentation,${withdrawnSql('m')} AS withdrawn
+          `SELECT m.id,m.role,m.text,m.created_at,m.hidden_at,m.presentation,${withdrawnSql('m')} AS withdrawn,${ownerMessageContentSql('m')} AS owner_authored
      FROM messages m WHERE m.owner_id=$1 AND m.id=ANY($2::uuid[]) ORDER BY m.id${lock ? ' FOR SHARE OF m' : ''}`,
           [ownerId, ids],
         )
@@ -109,6 +121,11 @@ async function snapshots(database: Database, ownerId: string, payloads: Authorit
     database,
     ownerId,
     payloads.flatMap((payload) => payload.bindings.map((binding) => binding.id)),
+  );
+  const conditionStates = await draftConditionBindingStates(
+    database,
+    ownerId,
+    payloads.flatMap((payload) => payload.conditionSources ?? []),
   );
   return (payload: Authority) => {
     const selectedIds = sourceIds(payload);
@@ -126,7 +143,21 @@ async function snapshots(database: Database, ownerId: string, payloads: Authorit
       !payload.evidence.requiresReplacement &&
       selected.length === selectedIds.length &&
       bindingsMatch &&
-      selected.every((row) => !row.withdrawn && row.hidden_at === null) &&
+      (payload.conditionSources ?? []).every((ref) => {
+        const live = conditionStates.get(`${ref.kind}:${ref.id}`);
+        return (
+          ref.available &&
+          live?.available &&
+          live.state === ref.state &&
+          live.revision === ref.revision
+        );
+      }) &&
+      (!Array.isArray(payload.context) ||
+        payload.context.every((entry) => !Object(entry).unavailable)) &&
+      selected.every(
+        (row) =>
+          !row.withdrawn && row.hidden_at === null && (row.role !== 'user' || row.owner_authored),
+      ) &&
       payload.evidence.messages.every((message) => {
         const own = message.id ? byId.get(message.id) : undefined;
         if (
@@ -163,8 +194,34 @@ export async function pendingDraftAuthorityInstructions(
   policyRevision: string,
 ) {
   const keys: string[] = [];
-  const currentSnapshot = await snapshots(database, ownerId, authorities);
-  for (const payload of authorities) {
+  const baseKeys = authorities.map((original) => {
+    const base = {
+      ...original,
+      context: Array.isArray(original.context)
+        ? original.context.filter((entry) => Object(entry).kind !== 'authority')
+        : original.context,
+      conditionSources: original.conditionSources?.filter((ref) => ref.kind !== 'authority'),
+    };
+    return digest({ ownerId, threadId: turn.threadId, taskId, base, policyRevision });
+  });
+  const same = (
+    await database.query<{ key: string }>(
+      'SELECT key FROM draft_authority_instructions WHERE owner_id=$1 AND base_key=ANY($2::text[])',
+      [ownerId, baseKeys],
+    )
+  ).rows.map((row) => row.key);
+  for (const [index, original] of authorities.entries()) {
+    const baseKey = baseKeys[index]!;
+    const payload = {
+      ...original,
+      context: Array.isArray(original.context)
+        ? original.context.filter((entry) => !same.includes(Object(entry).id))
+        : original.context,
+      conditionSources: original.conditionSources?.filter(
+        (ref) => ref.kind !== 'authority' || !same.includes(ref.id),
+      ),
+    };
+    const currentSnapshot = await snapshots(database, ownerId, [payload]);
     const current = currentSnapshot(payload);
     const key = digest({
       ownerId,
@@ -175,8 +232,8 @@ export async function pendingDraftAuthorityInstructions(
       policyRevision,
     });
     await database.query(
-      `INSERT INTO draft_authority_instructions(key,owner_id,thread_id,task_id,kind,authority_scope,payload,source_ids,source_revision,policy_revision,state,attempted)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT DO NOTHING`,
+      `INSERT INTO draft_authority_instructions(key,owner_id,thread_id,task_id,kind,authority_scope,payload,source_ids,source_revision,policy_revision,state,attempted,base_key)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT DO NOTHING`,
       [
         key,
         ownerId,
@@ -190,6 +247,7 @@ export async function pendingDraftAuthorityInstructions(
         policyRevision,
         payload.kind !== 'schedule' && payload.empty && current.complete ? 'clear' : 'pending',
         Boolean(payload.kind !== 'schedule' && payload.empty && current.complete),
+        baseKey,
       ],
     );
     await database.query(
@@ -231,7 +289,9 @@ export async function prepareDraftAuthorityCapture(
         ...message,
         canAuthorize: false,
       })),
-      inheritedConditions: source.payload.context,
+      inheritedConditions: Array.isArray(source.payload.context)
+        ? source.payload.context.map(({ id, baseKey, ...entry }) => entry)
+        : source.payload.context,
     },
   };
 }
@@ -326,6 +386,13 @@ export async function retainedDraftAuthorityInstructions(
         authority: source.kind,
         ...(!inScope ? { scope: 'other_work' } : {}),
         ...(available ? { ownerData: source.payload.data } : {}),
+        ...(available
+          ? {
+              inheritedConditions: Array.isArray(source.payload.context)
+                ? source.payload.context.map(({ id, baseKey, ...entry }) => entry)
+                : source.payload.context,
+            }
+          : {}),
       },
       messages: available
         ? source.payload.evidence.messages.map((message) => ({

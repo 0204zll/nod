@@ -219,6 +219,7 @@ import {
   stopSignal,
   stopThreadWorkers,
   withTurnLock,
+  withDraftLock,
   workOrigin,
   type TurnRef,
 } from './thread.ts';
@@ -1573,22 +1574,6 @@ async function initializeApplication(
       });
     return feedbackDrafts;
   };
-  const withDraftLock = <T>(
-    turn: TurnRef,
-    signal: AbortSignal | undefined,
-    write: (client: import('pg').PoolClient) => Promise<T>,
-  ) =>
-    transaction(
-      async (client) => {
-        if ((await lockThread(client)).id !== turn.threadId)
-          throw Object.assign(new Error('The instruction conversation is no longer active.'), {
-            notRun: true,
-          });
-        return withTurnLock(signal ? { turnId: turn.turnId, signal } : turn.turnId, write, client);
-      },
-      pool,
-      signal,
-    );
   const beginDraft = async (
     action: string,
     args: Record<string, unknown>,

@@ -20,6 +20,12 @@ export interface OwnerInstructions {
   approvals?: Array<{ id: string; at: string; definition: Record<string, unknown> }>;
 }
 
+export function ownerMessageContentSql(message: string) {
+  return `NOT EXISTS (SELECT 1 FROM messages offer, jsonb_array_elements(offer.suggestions->'tasks') task
+    WHERE offer.owner_id=${message}.owner_id AND offer.thread_id=${message}.thread_id AND offer.role='assistant'
+      AND (offer.created_at,offer.id)<(${message}.created_at,${message}.id) AND task->>'title'=${message}.text)`;
+}
+
 export interface InstructionChange {
   before: Record<string, unknown> | null;
   changes: Record<string, unknown>;
@@ -156,7 +162,8 @@ async function validateInstructionSources(
 ) {
   if (!ids.length) return;
   const found = await pool.query<{ id: string }>(
-    `SELECT m.id FROM messages m WHERE m.owner_id=$1 AND m.id=ANY($2::uuid[]) AND m.hidden_at IS NULL AND NOT ${withdrawnSql('m')}`,
+    `SELECT m.id FROM messages m WHERE m.owner_id=$1 AND m.id=ANY($2::uuid[]) AND m.hidden_at IS NULL AND NOT ${withdrawnSql('m')}
+       AND (m.role<>'user' OR ${ownerMessageContentSql('m')})`,
     [ownerId, ids],
   );
   if (found.rows.length !== ids.length)
@@ -277,9 +284,7 @@ export async function captureOwnerInstructions(
                SELECT 1 FROM turns r WHERE r.owner_id=$1 AND r.message_id=messages.id
                  AND r.source_id LIKE 'reaction-reply:%')))
              AND approval_answer IS NULL AND NOT ${withdrawnSql('messages')}
-             AND (created_at>CASE WHEN $4::uuid IS NULL THEN $5 ELSE LEAST($5,(SELECT created_at - interval '24 hours' FROM tasks WHERE id=$4::uuid AND owner_id=$1)) END OR id=ANY($3::uuid[]) OR id=ANY($8::uuid[])) AND text NOT IN (
-             SELECT task->>'title' FROM messages offer, jsonb_array_elements(offer.suggestions->'tasks') task
-             WHERE offer.owner_id=$1 AND offer.thread_id=$2 AND task->>'title' IS NOT NULL)),
+             AND (created_at>CASE WHEN $4::uuid IS NULL THEN $5 ELSE LEAST($5,(SELECT created_at - interval '24 hours' FROM tasks WHERE id=$4::uuid AND owner_id=$1)) END OR id=ANY($3::uuid[]) OR id=ANY($8::uuid[])) AND ${ownerMessageContentSql('messages')}),
          started AS (SELECT created_at FROM tasks WHERE id=$4::uuid AND owner_id=$1)
          (SELECT id,text,created_at,can_authorize FROM said WHERE created_at>$5
            AND CASE WHEN $4::uuid IS NULL THEN chat ELSE mine END ORDER BY created_at DESC,id DESC LIMIT 5)

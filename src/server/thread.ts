@@ -344,6 +344,29 @@ export async function withTurnLock<T>(
   return database ? execute(database) : transaction(execute, pool, signal);
 }
 
+export function withDraftLock<T>(
+  turn: { threadId: string; turnId: string },
+  signal: AbortSignal | undefined,
+  operation: (client: PoolClient) => Promise<T>,
+) {
+  signal ??= running.get(turn.turnId)?.signal;
+  return transaction(
+    async (client) => {
+      if ((await lockThread(client)).id !== turn.threadId)
+        throw Object.assign(new Error('The instruction conversation is no longer active.'), {
+          notRun: true,
+        });
+      return withTurnLock(
+        signal ? { turnId: turn.turnId, signal } : turn.turnId,
+        operation,
+        client,
+      );
+    },
+    pool,
+    signal,
+  );
+}
+
 let drainWorker: string | undefined;
 
 export async function wakeThreadAt(client: PoolClient, at: Date) {

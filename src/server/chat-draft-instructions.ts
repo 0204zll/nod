@@ -1,10 +1,28 @@
 import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
 import { presentationSchema, presentationText } from '../shared/presentation.ts';
-import type { OwnerInstructions } from './owner-instructions.ts';
+import { ownerMessageContentSql, type OwnerInstructions } from './owner-instructions.ts';
 import { withdrawnSql } from './turn-chain.ts';
 
 type Database = Pick<Pool, 'query'>;
+export function draftSourceRevision(value: unknown) {
+  return createHash('sha256')
+    .update(
+      JSON.stringify(value, (_key, entry) =>
+        entry && typeof entry === 'object' && !Array.isArray(entry)
+          ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b)))
+          : entry,
+      ),
+    )
+    .digest('hex');
+}
+export type DraftConditionSource = {
+  kind: 'chat' | 'authority';
+  id: string;
+  state: string;
+  revision: string;
+  available: boolean;
+};
 type Source = {
   message_id: string;
   owner_id: string;
@@ -18,6 +36,26 @@ type Source = {
   state: 'pending' | 'relevant' | 'clear';
   revision: string | null;
   policy_revision: string | null;
+  condition_sources: DraftConditionSource[];
+};
+type AuthoritySource = {
+  key: string;
+  base_key: string;
+  thread_id: string;
+  task_id: string | null;
+  created_at: Date;
+  state: 'pending' | 'relevant' | 'clear';
+  policy_revision: string;
+  source_ids: string[];
+  source_revision: string;
+  payload: {
+    data: unknown;
+    evidence: OwnerInstructions;
+    unavailable?: boolean;
+    bindings: Array<{ id: string; state: string; revision: string }>;
+    conditionSources?: DraftConditionSource[];
+    context: Array<{ id?: string; baseKey?: string; unavailable?: boolean }>;
+  };
 };
 type Message = {
   id: string;
@@ -30,6 +68,7 @@ type Message = {
   hidden_at: Date | null;
   approval_answer: boolean | null;
   withdrawn: boolean;
+  owner_authored: boolean;
 };
 
 export async function initializeChatDraftInstructions(database: Database) {
@@ -40,7 +79,7 @@ export async function initializeChatDraftInstructions(database: Database) {
       task_id uuid, input_at timestamptz NOT NULL, source_ids uuid[] NOT NULL,
       context_ids uuid[] NOT NULL DEFAULT '{}', inherited_ids uuid[] NOT NULL DEFAULT '{}',
       state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','relevant','clear')),
-      revision text, policy_revision text, created_at timestamptz NOT NULL DEFAULT now()
+      revision text, policy_revision text, condition_sources jsonb NOT NULL DEFAULT '[]', created_at timestamptz NOT NULL DEFAULT now()
     );
     CREATE INDEX IF NOT EXISTS chat_draft_instructions_owner ON chat_draft_instructions(owner_id,input_at,message_id);
     CREATE TABLE IF NOT EXISTS draft_artifact_sources (
@@ -54,6 +93,7 @@ export async function initializeChatDraftInstructions(database: Database) {
       FROM turns u LEFT JOIN messages m ON m.id=u.message_id AND m.owner_id=u.owner_id
       WHERE u.message_id IS NOT NULL AND (u.source='user' OR (u.source IN ('task','resume')
         AND (m.role='user' OR m.id IS NULL))) AND m.approval_answer IS NULL
+        AND (m.id IS NULL OR (m.role='user' AND ${ownerMessageContentSql('m')}))
       ORDER BY u.message_id,u.created_at DESC,u.id DESC
       ON CONFLICT(message_id) DO NOTHING;
   `);
@@ -72,9 +112,30 @@ export async function pendingChatDraftInstructions(
      SELECT m.id,$1,$2,$3,$5,m.created_at,ARRAY[m.id] FROM messages m
      WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.id=ANY($4::uuid[]) AND m.role='user'
        AND m.approval_answer IS NULL AND m.hidden_at IS NULL AND NOT ${withdrawnSql('m')}
+       AND ${ownerMessageContentSql('m')}
      ON CONFLICT(message_id) DO NOTHING`,
     [ownerId, turn.threadId, turn.turnId, messageIds, taskId],
   );
+}
+
+export async function eligibleChatDraftInputIds(
+  database: Database,
+  ownerId: string,
+  turn: { turnId: string; threadId: string },
+  originIds: string[],
+) {
+  return (
+    await database.query<{ message_id: string }>(
+      `WITH RECURSIVE chain AS (
+       SELECT id,message_id,parent_turn_id FROM turns WHERE id=$1 AND owner_id=$2
+       UNION SELECT u.id,u.message_id,u.parent_turn_id FROM turns u JOIN chain c ON u.id=c.parent_turn_id
+         WHERE u.owner_id=$2 AND u.thread_id=$3),
+     ids AS (SELECT message_id FROM chain UNION SELECT unnest($4::uuid[]))
+     SELECT DISTINCT c.message_id FROM ids c LEFT JOIN messages m ON m.id=c.message_id AND m.owner_id=$2
+     WHERE c.message_id IS NOT NULL AND (m.id IS NULL OR (m.role='user' AND m.approval_answer IS NULL AND ${ownerMessageContentSql('m')}))`,
+      [turn.turnId, ownerId, turn.threadId, originIds],
+    )
+  ).rows.map((row) => row.message_id);
 }
 
 async function load(database: Database, ownerId: string, lock: boolean, extraIds: string[] = []) {
@@ -85,21 +146,29 @@ async function load(database: Database, ownerId: string, lock: boolean, extraIds
       [ownerId],
     )
   ).rows;
+  const authorities = (
+    await database.query<AuthoritySource>(
+      `SELECT * FROM draft_authority_instructions WHERE owner_id=$1 ORDER BY created_at,key${lock ? ' FOR SHARE' : ''}`,
+      [ownerId],
+    )
+  ).rows;
   const ids = [
     ...new Set([
       ...extraIds,
       ...sources.flatMap((source) => [...source.source_ids, ...source.context_ids]),
+      ...authorities.flatMap((source) => source.source_ids),
     ]),
   ];
   const messages = ids.length
     ? (
         await database.query<Message>(
           `SELECT m.id,m.thread_id,m.role,m.text,m.created_at,m.presentation,m.hidden_at,m.approval_answer,
-             ${withdrawnSql('m')} AS withdrawn,
-             ARRAY(SELECT DISTINCT to_jsonb(u)->>'task_id' FROM turns u
-               WHERE u.owner_id=$1 AND (u.id=m.turn_id OR u.message_id=m.id)
-                 AND to_jsonb(u)->>'task_id' IS NOT NULL
-               ORDER BY to_jsonb(u)->>'task_id') AS task_ids
+             ${withdrawnSql('m')} AS withdrawn,${ownerMessageContentSql('m')} AS owner_authored,
+             ARRAY(SELECT accepted.task_id FROM (
+               SELECT to_jsonb(u)->>'task_id' AS task_id FROM turns u
+               WHERE u.owner_id=$1 AND (u.message_id=m.id OR u.id=m.turn_id)
+               ORDER BY CASE WHEN u.message_id=m.id THEN 0 ELSE 1 END,u.created_at,u.id LIMIT 1
+             ) accepted WHERE accepted.task_id IS NOT NULL) AS task_ids
            FROM messages m WHERE m.owner_id=$1 AND m.id=ANY($2::uuid[])
            ORDER BY m.created_at,m.id${lock ? ' FOR SHARE OF m' : ''}`,
           [ownerId, ids],
@@ -115,6 +184,96 @@ async function load(database: Database, ownerId: string, lock: boolean, extraIds
   const byMessage = new Map(messages.map((message) => [message.id, message]));
   const byTask = new Map(tasks.map((task) => [task.id, task]));
   const bySource = new Map(sources.map((source) => [source.message_id, source]));
+  const byAuthority = new Map(authorities.map((source) => [source.key, source]));
+  const ownerSource = (source: Source) => {
+    const own = byMessage.get(source.message_id);
+    return !own || (own.role === 'user' && own.approval_answer === null && own.owner_authored);
+  };
+  const hash = draftSourceRevision;
+  const conditionState = (ref: Pick<DraftConditionSource, 'kind' | 'id'>) => {
+    const visited = new Set<string>();
+    const pending = [ref];
+    const nodes: unknown[] = [];
+    let available = true;
+    while (pending.length) {
+      const next = pending.pop()!;
+      const key = `${next.kind}:${next.id}`;
+      if (visited.has(key)) continue;
+      visited.add(key);
+      const source = next.kind === 'chat' ? bySource.get(next.id) : byAuthority.get(next.id);
+      if (!source) {
+        available = false;
+        nodes.push({ key, unavailable: true });
+        continue;
+      }
+      if (source.state !== 'relevant') available = false;
+      const wordIds =
+        'message_id' in source ? [...source.source_ids, ...source.context_ids] : source.source_ids;
+      const words = [...new Set(wordIds)].sort().map((id) => {
+        const word = byMessage.get(id);
+        if (!word) {
+          available = false;
+          return { id, unavailable: true };
+        }
+        if (word.withdrawn || word.hidden_at !== null) available = false;
+        const { withdrawn, ...local } = word;
+        return local;
+      });
+      nodes.push({ key, source, words });
+      pending.push(
+        ...('message_id' in source
+          ? source.condition_sources
+          : (source.payload.conditionSources ?? [])),
+      );
+    }
+    return {
+      revision: hash(nodes.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))),
+      available,
+    };
+  };
+  const condition = (ref: Pick<DraftConditionSource, 'kind' | 'id'>) =>
+    conditionState(ref).revision;
+  const matches = (refs: DraftConditionSource[]) =>
+    refs.every((ref) => {
+      const source = ref.kind === 'chat' ? bySource.get(ref.id) : byAuthority.get(ref.id);
+      const live = conditionState(ref);
+      return (
+        ref.available &&
+        live.available &&
+        source?.state === ref.state &&
+        live.revision === ref.revision
+      );
+    });
+  const authorityComplete = (source: AuthoritySource) => {
+    const rows = source.source_ids.map((id) => byMessage.get(id));
+    const words = rows.map(
+      (row) =>
+        row && {
+          id: row.id,
+          role: row.role,
+          text: row.text,
+          created_at: row.created_at,
+          hidden_at: row.hidden_at,
+          presentation: row.presentation,
+          withdrawn: row.withdrawn,
+          owner_authored: row.owner_authored,
+        },
+    );
+    return (
+      !source.payload.unavailable &&
+      !source.payload.evidence.requiresReplacement &&
+      rows.every(
+        (row) =>
+          row &&
+          !row.withdrawn &&
+          row.hidden_at === null &&
+          (row.role !== 'user' || row.owner_authored),
+      ) &&
+      hash(words) === source.source_revision &&
+      matches(source.payload.conditionSources ?? []) &&
+      !source.payload.context.some((entry) => entry.unavailable)
+    );
+  };
   const snapshot = (source: Source) => {
     const task = source.task_id ? byTask.get(source.task_id) : undefined;
     const eligible = (message: Message) =>
@@ -127,7 +286,12 @@ async function load(database: Database, ownerId: string, lock: boolean, extraIds
       ids
         .map((id) => byMessage.get(id))
         .filter((message): message is Message =>
-          Boolean(message && message.role === role && eligible(message)),
+          Boolean(
+            message &&
+            message.role === role &&
+            eligible(message) &&
+            (role !== 'user' || message.owner_authored),
+          ),
         )
         .sort(
           (a, b) =>
@@ -158,29 +322,155 @@ async function load(database: Database, ownerId: string, lock: boolean, extraIds
       allContext.length === source.context_ids.length &&
       inherited.every(Boolean);
     const complete =
-      intact && owners.length === allOwners.length && context.length === allContext.length;
+      intact &&
+      owners.length === allOwners.length &&
+      context.length === allContext.length &&
+      matches(source.condition_sources);
     const localWords = (messages: Message[]) =>
       messages.map(({ withdrawn, ...message }) => message);
-    const revision = createHash('sha256')
-      .update(
-        JSON.stringify({
-          messageId: source.message_id,
-          threadId: source.thread_id,
-          taskId: source.task_id,
-          inputAt: source.input_at,
-          sourceIds: source.source_ids,
-          contextIds: source.context_ids,
-          inheritedIds: source.inherited_ids,
-          policyRevision: source.policy_revision,
-          owners: localWords(allOwners),
-          context: localWords(allContext),
-          inherited,
-        }),
-      )
-      .digest('hex');
+    const revision = draftSourceRevision({
+      messageId: source.message_id,
+      threadId: source.thread_id,
+      taskId: source.task_id,
+      inputAt: source.input_at,
+      sourceIds: source.source_ids,
+      contextIds: source.context_ids,
+      inheritedIds: source.inherited_ids,
+      policyRevision: source.policy_revision,
+      owners: localWords(allOwners),
+      context: localWords(allContext),
+      inherited,
+      conditions: source.condition_sources.map((ref) => ({ ...ref, live: condition(ref) })),
+    });
     return { owners, context, inherited, complete, intact, revision };
   };
-  return { sources, messages, tasks, snapshot };
+  return {
+    sources,
+    authorities,
+    messages,
+    tasks,
+    snapshot,
+    condition,
+    conditionState,
+    matches,
+    authorityComplete,
+    ownerSource,
+  };
+}
+
+export async function draftConditionBindingStates(
+  database: Database,
+  ownerId: string,
+  refs: DraftConditionSource[],
+) {
+  const current = await load(database, ownerId, false);
+  return new Map(
+    refs.map((ref) => [
+      `${ref.kind}:${ref.id}`,
+      {
+        state: (ref.kind === 'chat'
+          ? current.sources.find((source) => source.message_id === ref.id)
+          : current.authorities.find((source) => source.key === ref.id)
+        )?.state,
+        ...current.conditionState(ref),
+      },
+    ]),
+  );
+}
+
+export async function captureDraftConditionContext(
+  database: Database,
+  ownerId: string,
+  threadId: string,
+  taskId: string | null,
+  policyRevision: string,
+  omitChatIds: string[] = [],
+  omitTurnId?: string,
+) {
+  const current = await load(database, ownerId, false);
+  const task = current.tasks.find((candidate) => candidate.id === taskId);
+  const inScope = (source: { thread_id: string; task_id: string | null }, at: Date) =>
+    source.thread_id === threadId &&
+    (source.task_id === taskId ||
+      (taskId !== null && source.task_id === null && Boolean(task && at <= task.created_at)));
+  const conditions: DraftConditionSource[] = [];
+  const input: Array<{
+    kind: 'chat' | 'authority';
+    id: string;
+    baseKey?: string;
+    messages: Array<{ at: string; text: string; canAuthorize: false }>;
+    ownerData?: unknown;
+    unavailable: boolean;
+  }> = [];
+  for (const source of current.sources) {
+    if (
+      !current.ownerSource(source) ||
+      omitChatIds.includes(source.message_id) ||
+      source.turn_id === omitTurnId ||
+      !inScope(source, source.input_at)
+    )
+      continue;
+    const snapshot = current.snapshot(source);
+    if (
+      source.state === 'clear' &&
+      snapshot.intact &&
+      source.revision === snapshot.revision &&
+      source.policy_revision === policyRevision
+    )
+      continue;
+    const unavailable =
+      source.state !== 'relevant' ||
+      !snapshot.complete ||
+      source.revision !== snapshot.revision ||
+      source.policy_revision !== policyRevision;
+    const ref = {
+      kind: 'chat' as const,
+      id: source.message_id,
+      state: source.state,
+      revision: current.condition({ kind: 'chat', id: source.message_id }),
+      available: !unavailable,
+    };
+    conditions.push(ref);
+    input.push({
+      kind: 'chat',
+      id: ref.id,
+      messages: snapshot.owners.map((message) => ({
+        at: message.created_at.toISOString(),
+        text: message.text,
+        canAuthorize: false,
+      })),
+      unavailable,
+    });
+  }
+  for (const source of current.authorities) {
+    if (!inScope(source, source.created_at)) continue;
+    const verified = current.authorityComplete(source) && source.policy_revision === policyRevision;
+    if (source.state === 'clear' && verified) continue;
+    const unavailable = source.state !== 'relevant' || !verified;
+    const ref = {
+      kind: 'authority' as const,
+      id: source.key,
+      state: source.state,
+      revision: current.condition({ kind: 'authority', id: source.key }),
+      available: !unavailable,
+    };
+    conditions.push(ref);
+    input.push({
+      kind: 'authority',
+      id: ref.id,
+      baseKey: source.base_key,
+      messages: unavailable
+        ? []
+        : source.payload.evidence.messages.map((message) => ({
+            at: message.at,
+            text: message.text,
+            canAuthorize: false,
+          })),
+      ...(unavailable ? {} : { ownerData: source.payload.data }),
+      unavailable,
+    });
+  }
+  return { conditions, input, complete: input.every((entry) => !entry.unavailable) };
 }
 
 export async function prepareChatDraftCapture(
@@ -200,7 +490,21 @@ export async function prepareChatDraftCapture(
     ]),
   );
   const source = current.sources.find((candidate) => candidate.message_id === messageId);
-  if (!source || source.state !== 'pending' || source.revision !== null) return;
+  if (
+    !source ||
+    !current.ownerSource(source) ||
+    source.state !== 'pending' ||
+    source.revision !== null
+  )
+    return;
+  const conditionContext = await captureDraftConditionContext(
+    database,
+    ownerId,
+    source.thread_id,
+    source.task_id,
+    policyRevision,
+    [messageId],
+  );
   const ids = [
     ...new Set([
       ...source.source_ids,
@@ -211,7 +515,12 @@ export async function prepareChatDraftCapture(
     ]),
   ];
   const inherited = current.sources.filter(
-    (candidate) => candidate.state === 'relevant' && ids.includes(candidate.message_id),
+    (candidate) =>
+      candidate.state === 'relevant' &&
+      (ids.includes(candidate.message_id) ||
+        conditionContext.conditions.some(
+          (ref) => ref.kind === 'chat' && ref.id === candidate.message_id,
+        )),
   );
   source.source_ids = [
     ...new Set([...ids, ...inherited.flatMap((candidate) => candidate.source_ids)]),
@@ -226,10 +535,11 @@ export async function prepareChatDraftCapture(
     ]),
   ];
   source.inherited_ids = inherited.map((candidate) => candidate.message_id);
+  source.condition_sources = conditionContext.conditions;
   source.policy_revision = policyRevision;
   const captured = current.snapshot(source);
   await database.query(
-    `UPDATE chat_draft_instructions SET source_ids=$3,context_ids=$4,inherited_ids=$5,revision=$6,policy_revision=$7
+    `UPDATE chat_draft_instructions SET source_ids=$3,context_ids=$4,inherited_ids=$5,revision=$6,policy_revision=$7,condition_sources=$8
      WHERE owner_id=$1 AND message_id=$2 AND revision IS NULL AND state='pending'`,
     [
       ownerId,
@@ -239,12 +549,13 @@ export async function prepareChatDraftCapture(
       source.inherited_ids,
       captured.revision,
       policyRevision,
+      JSON.stringify(source.condition_sources),
     ],
   );
   return {
     messageId,
     revision: captured.revision,
-    complete: captured.complete,
+    complete: captured.complete && conditionContext.complete,
     input: {
       purpose: 'message_condition_capture',
       newMessages: captured.owners
@@ -265,17 +576,20 @@ export async function prepareChatDraftCapture(
           .filter(Boolean)
           .join('\n\n');
       }),
-      inheritedConditions: inherited.map((candidate) => {
-        const prior = current.snapshot(candidate);
-        return {
-          messages: prior.owners.map((message) => ({
-            at: message.created_at.toISOString(),
-            text: message.text,
-            canAuthorize: false,
-          })),
-          unavailable: !prior.complete || prior.revision !== candidate.revision,
-        };
-      }),
+      inheritedConditions: [
+        ...inherited.map((candidate) => {
+          const prior = current.snapshot(candidate);
+          return {
+            messages: prior.owners.map((message) => ({
+              at: message.created_at.toISOString(),
+              text: message.text,
+              canAuthorize: false,
+            })),
+            unavailable: !prior.complete || prior.revision !== candidate.revision,
+          };
+        }),
+        ...conditionContext.input.map(({ id, baseKey, ...entry }) => entry),
+      ],
     },
   };
 }
@@ -288,9 +602,10 @@ export async function pendingChatDraftMessageIds(
 ) {
   return (
     await database.query<{ message_id: string }>(
-      `SELECT message_id FROM chat_draft_instructions WHERE owner_id=$1 AND state='pending'
-     AND revision IS NULL AND (turn_id=$2 OR message_id=ANY($3::uuid[]))
-     ORDER BY input_at,message_id`,
+      `SELECT d.message_id FROM chat_draft_instructions d LEFT JOIN messages m ON m.id=d.message_id AND m.owner_id=d.owner_id WHERE d.owner_id=$1 AND d.state='pending'
+     AND d.revision IS NULL AND (d.turn_id=$2 OR d.message_id=ANY($3::uuid[]))
+     AND (m.id IS NULL OR (m.role='user' AND m.approval_answer IS NULL AND ${ownerMessageContentSql('m')}))
+     ORDER BY d.input_at,d.message_id`,
       [ownerId, turnId, messageIds],
     )
   ).rows.map((row) => row.message_id);
@@ -315,7 +630,7 @@ export async function chatDraftInstructionBindings(
     }
   }
   return current.sources
-    .filter((source) => ids.has(source.message_id))
+    .filter((source) => ids.has(source.message_id) && current.ownerSource(source))
     .map((source) => {
       const snapshot = current.snapshot(source);
       return {
@@ -366,6 +681,7 @@ export async function retainedChatDraftInstructions(
   const current = await load(database, ownerId, lock);
   const task = current.tasks.find((candidate) => candidate.id === taskId);
   return current.sources.flatMap((source) => {
+    if (!current.ownerSource(source)) return [];
     const forced = forcedIds.includes(source.message_id);
     const outsideTask =
       taskId && source.task_id !== taskId && (!task || source.input_at > task.created_at);
@@ -406,7 +722,29 @@ export async function retainedChatDraftInstructions(
         draftId: null,
         connectionId: null,
         target: inScope
-          ? {}
+          ? verified
+            ? {
+                inheritedConditions: source.condition_sources
+                  .filter((ref) => ref.kind === 'authority')
+                  .flatMap((ref) => {
+                    const authority = current.authorities.find(
+                      (candidate) => candidate.key === ref.id,
+                    );
+                    return authority
+                      ? [
+                          {
+                            ownerData: authority.payload.data,
+                            messages: authority.payload.evidence.messages.map((message) => ({
+                              at: message.at,
+                              text: message.text,
+                              canAuthorize: false,
+                            })),
+                          },
+                        ]
+                      : [];
+                  }),
+              }
+            : {}
           : { scope: source.thread_id === threadId ? 'other_task' : 'other_conversation' },
         messages: inScope
           ? snapshot.owners.map((message) => ({
@@ -477,10 +815,11 @@ export async function linkedDraftSources(
        FROM chat_draft_instructions d WHERE d.owner_id=$1 AND (
        d.turn_id IN (SELECT id FROM chain) OR d.message_id IN (SELECT message_id FROM chain))
        AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id=d.message_id AND m.owner_id=$1
-         AND (m.role<>'user' OR m.approval_answer IS NOT NULL))
+         AND (m.role<>'user' OR m.approval_answer IS NOT NULL OR NOT ${ownerMessageContentSql('m')}))
      UNION SELECT c.message_id,c.id,c.proved FROM chain c LEFT JOIN messages m ON m.id=c.message_id AND m.owner_id=$1
-       WHERE c.message_id IS NOT NULL AND (m.id IS NULL OR (m.role='user' AND m.approval_answer IS NULL))
-     UNION SELECT NULL::uuid,c.id,c.proved FROM chain c`,
+       WHERE c.message_id IS NOT NULL AND (m.id IS NULL OR (m.role='user' AND m.approval_answer IS NULL AND ${ownerMessageContentSql('m')}))
+     UNION SELECT NULL::uuid,c.id,c.proved FROM chain c LEFT JOIN messages m ON m.id=c.message_id AND m.owner_id=$1
+       WHERE c.message_id IS NULL OR m.id IS NULL OR (m.role='user' AND m.approval_answer IS NULL AND ${ownerMessageContentSql('m')})`,
       [
         ownerId,
         turn.turnId,
@@ -504,8 +843,16 @@ export async function linkedDraftSources(
     turnIds.push(...drafts.rows.map((draft) => draft.turn_id));
     provedTurnIds.push(...drafts.rows.map((draft) => draft.turn_id));
   }
+  const known = messageIds.length
+    ? (
+        await database.query<{ id: string }>(
+          `SELECT m.id FROM messages m WHERE m.owner_id=$1 AND m.id=ANY($2::uuid[]) AND (m.role<>'user' OR m.approval_answer IS NOT NULL OR NOT ${ownerMessageContentSql('m')})`,
+          [ownerId, messageIds],
+        )
+      ).rows.map((row) => row.id)
+    : [];
   return {
-    messageIds: [...new Set(messageIds)],
+    messageIds: [...new Set(messageIds.filter((id) => !known.includes(id)))],
     turnIds: [...new Set(turnIds)],
     provedTurnIds: [...new Set(provedTurnIds)],
   };

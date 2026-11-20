@@ -10,6 +10,8 @@ import {
   retainedChatDraftInstructions,
   linkedChatDraftMessageIds,
   linkedDraftSources,
+  captureDraftConditionContext,
+  eligibleChatDraftInputIds,
 } from '../src/server/chat-draft-instructions.ts';
 import {
   initializeDraftAuthorityInstructions,
@@ -50,7 +52,7 @@ test(
       task_id uuid,parent_turn_id uuid,channel text NOT NULL DEFAULT 'web',withdrawn boolean NOT NULL DEFAULT false);
     CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text NOT NULL,thread_id uuid NOT NULL,
       turn_id uuid,role text NOT NULL,text text NOT NULL,created_at timestamptz NOT NULL,
-      hidden_at timestamptz,approval_answer boolean,presentation jsonb,reply_to_message_id uuid);
+      hidden_at timestamptz,approval_answer boolean,presentation jsonb,suggestions jsonb,reply_to_message_id uuid);
     CREATE TABLE tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,title text NOT NULL,
       created_at timestamptz NOT NULL);
   `);
@@ -182,6 +184,102 @@ test(
           await retainedDraftAuthorityInstructions(database, f.ownerId, f.threadId, null, '1'),
           [],
         );
+      },
+    );
+
+    await t.test(
+      'unchanged active authority fields do not inherit each other as new versions',
+      async () => {
+        const f = await fixture();
+        const turn = { turnId: randomUUID(), threadId: f.threadId };
+        const data = [
+          {
+            kind: 'rules' as const,
+            scope: 'rules',
+            data: {
+              field: 'rules',
+              versions: [{ value: 'Show the synthetic draft before sending.' }],
+            },
+          },
+          {
+            kind: 'schedule' as const,
+            scope: randomUUID(),
+            data: {
+              messages: [
+                {
+                  id: null,
+                  at: '2026-11-19T10:00:00.000Z',
+                  text: 'Show the synthetic report before sending.',
+                },
+              ],
+            },
+          },
+        ];
+        const active = {
+          kind: 'active',
+          ownerData: data.map(({ kind, data }) => ({ kind, ownerData: data, canAuthorize: false })),
+          unavailable: false,
+        };
+        const payloads = (context: Awaited<ReturnType<typeof captureDraftConditionContext>>) =>
+          data.map((entry) => ({
+            ...entry,
+            evidence: { messages: [] },
+            sourceIds: [],
+            bindings: [],
+            conditionSources: context.conditions,
+            context: [...context.input, active],
+          }));
+        const context = await captureDraftConditionContext(
+          database,
+          f.ownerId,
+          f.threadId,
+          null,
+          '1',
+        );
+        const keys = await pendingDraftAuthorityInstructions(
+          database,
+          f.ownerId,
+          turn,
+          null,
+          payloads(context),
+          '1',
+        );
+        for (const key of keys) {
+          const captured = await prepareDraftAuthorityCapture(database, f.ownerId, key);
+          assert.ok(captured?.complete);
+          await finishDraftAuthorityCapture(database, f.ownerId, captured, 'relevant');
+        }
+        for (let index = 0; index < 3; index++) {
+          const current = await captureDraftConditionContext(
+            database,
+            f.ownerId,
+            f.threadId,
+            null,
+            '1',
+          );
+          assert.deepEqual(
+            await pendingDraftAuthorityInstructions(
+              database,
+              f.ownerId,
+              { ...turn, turnId: randomUUID() },
+              null,
+              payloads(current),
+              '1',
+            ),
+            keys,
+          );
+        }
+        assert.equal(
+          (
+            await database.query(
+              'SELECT count(*)::int AS count FROM draft_authority_instructions WHERE owner_id=$1',
+              [f.ownerId],
+            )
+          ).rows[0].count,
+          2,
+        );
+        for (const key of keys)
+          assert.equal(await prepareDraftAuthorityCapture(database, f.ownerId, key), undefined);
       },
     );
 
@@ -408,6 +506,129 @@ test(
       },
     );
 
+    for (const prior of ['chat', 'authority'] as const)
+      for (const next of ['chat', 'authority'] as const) {
+        await t.test(
+          `a new ${next} relation receives the complete older ${prior} condition`,
+          async () => {
+            const f = await fixture();
+            const condition = `Show synthetic draft X before sending. complete-${prior}-${next}`;
+            if (prior === 'chat') await f.capture(await f.add(condition), 'relevant');
+            else {
+              const a = await authority(f, condition);
+              const captured = await prepareDraftAuthorityCapture(database, f.ownerId, a.key);
+              assert.ok(captured?.complete);
+              await finishDraftAuthorityCapture(database, f.ownerId, captured, 'relevant');
+            }
+            const unrelated = [];
+            for (let index = 1; index <= 6; index++) {
+              const message = await f.add(
+                `Unrelated synthetic value ${index}.`,
+                `2026-11-19T10:0${index}:00.000Z`,
+              );
+              await f.capture(message, 'clear');
+              unrelated.push(message);
+            }
+            const message = await f.add(
+              'Use that same review step for synthetic draft Y.',
+              '2026-11-19T10:07:00.000Z',
+            );
+            const words = [...unrelated.slice(-4), message];
+            if (next === 'chat') {
+              await f.pending(message);
+              const captured = await prepareChatDraftCapture(database, f.ownerId, message.id, {
+                messages: words,
+              });
+              assert.ok(captured?.complete);
+              assert.equal(JSON.stringify(captured.input).includes(condition), true);
+              await finishChatDraftCapture(database, f.ownerId, captured, 'relevant');
+              assert.equal(JSON.stringify(await f.retained()).includes(condition), true);
+            } else {
+              const context = await captureDraftConditionContext(
+                database,
+                f.ownerId,
+                f.threadId,
+                null,
+                '1',
+                [],
+                message.turnId,
+              );
+              const payload = {
+                kind: 'schedule' as const,
+                scope: randomUUID(),
+                data: { messages: words },
+                evidence: { messages: words },
+                sourceIds: words.map((word) => word.id),
+                context: context.input,
+                conditionSources: context.conditions,
+                bindings: [],
+              };
+              const [key] = await pendingDraftAuthorityInstructions(
+                database,
+                f.ownerId,
+                { turnId: message.turnId, threadId: f.threadId },
+                null,
+                [payload],
+                '1',
+              );
+              const captured = await prepareDraftAuthorityCapture(database, f.ownerId, key!);
+              assert.ok(captured?.complete);
+              assert.equal(JSON.stringify(captured.input).includes(condition), true);
+              await finishDraftAuthorityCapture(database, f.ownerId, captured, 'relevant');
+              assert.equal(
+                JSON.stringify(
+                  await retainedDraftAuthorityInstructions(
+                    database,
+                    f.ownerId,
+                    f.threadId,
+                    null,
+                    '1',
+                  ),
+                ).includes(condition),
+                true,
+              );
+            }
+          },
+        );
+      }
+
+    await t.test('a required pending context refuses a new clear result', async () => {
+      const f = await fixture();
+      const first = await f.add('Show the synthetic unknown draft before sending.');
+      await f.pending(first);
+      const next = await f.add(
+        'Use that same step for another synthetic draft.',
+        '2026-11-19T10:01:00.000Z',
+      );
+      await f.pending(next);
+      const captured = await prepareChatDraftCapture(database, f.ownerId, next.id, {
+        messages: [next],
+      });
+      assert.ok(captured);
+      assert.equal(captured.complete, false);
+      await finishChatDraftCapture(database, f.ownerId, captured, 'clear');
+      assert.equal((await f.row(next.id)).state, 'pending');
+    });
+
+    await t.test('a changed older condition refuses a new clear after capture', async () => {
+      const f = await fixture();
+      const first = await f.add('Show the synthetic inherited draft before sending.');
+      await f.capture(first, 'relevant');
+      const next = await f.add(
+        'Use that same step for another synthetic draft.',
+        '2026-11-19T10:01:00.000Z',
+      );
+      await f.pending(next);
+      const captured = await prepareChatDraftCapture(database, f.ownerId, next.id, {
+        messages: [next],
+      });
+      assert.ok(captured?.complete);
+      await database.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [first.id]);
+      await finishChatDraftCapture(database, f.ownerId, captured, 'clear');
+      assert.equal((await f.row(next.id)).state, 'pending');
+      assert.equal(JSON.stringify(await f.retained()).includes(first.text), false);
+    });
+
     await t.test('a future condition survives without any assistant output', async () => {
       const f = await fixture();
       const message = await f.add('Show the synthetic draft before any later send.');
@@ -423,6 +644,30 @@ test(
         [[message.text, false]],
       );
     });
+
+    await t.test(
+      'a child task reference does not change a parent input scope or clear cache',
+      async () => {
+        const f = await fixture();
+        const first = await f.add('Explain a synthetic value and start its research.');
+        await f.capture(first, 'clear');
+        const later = await f.add('Use that synthetic research model.', '2026-11-19T10:01:00.000Z');
+        await f.capture(later, 'clear', [first, later]);
+        const before = await f.row(later.id);
+        const taskId = randomUUID();
+        await database.query(
+          'INSERT INTO tasks(id,owner_id,title,created_at) VALUES($1,$2,$3,$4)',
+          [taskId, f.ownerId, 'Synthetic referenced research', '2026-11-19T10:02:00.000Z'],
+        );
+        await database.query(
+          "INSERT INTO turns(id,owner_id,thread_id,message_id,task_id,source,created_at) VALUES($1,$2,$3,$4,$5,'task',$6)",
+          [randomUUID(), f.ownerId, f.threadId, first.id, taskId, '2026-11-19T10:02:00.000Z'],
+        );
+        assert.deepEqual(await f.retained(), []);
+        assert.deepEqual(await f.retained(taskId), []);
+        assert.equal((await f.row(later.id)).revision, before.revision);
+      },
+    );
 
     await t.test('a clear cache depends on its checked sources instead of later chat', async () => {
       const f = await fixture();
@@ -711,6 +956,144 @@ test(
         assert.equal(JSON.stringify(retained).includes(original.text), false);
       },
     );
+
+    await t.test(
+      'canonical capture filters clicked answers even when origin IDs include them',
+      async () => {
+        const f = await fixture();
+        const original = await f.add('Show the synthetic draft before sending.');
+        const yes = await f.add('Send', '2026-11-19T10:01:00.000Z');
+        const no = await f.add('Cancel', '2026-11-19T10:02:00.000Z');
+        const typed = await f.add(
+          'No, show the synthetic changes first.',
+          '2026-11-19T10:03:00.000Z',
+        );
+        await database.query('UPDATE messages SET approval_answer=true WHERE id=$1', [yes.id]);
+        await database.query('UPDATE messages SET approval_answer=false WHERE id=$1', [no.id]);
+        const missing = randomUUID();
+        const ids = await eligibleChatDraftInputIds(
+          database,
+          f.ownerId,
+          { turnId: typed.turnId, threadId: f.threadId },
+          [original.id, yes.id, no.id, typed.id, missing],
+        );
+        assert.deepEqual(new Set(ids), new Set([original.id, typed.id, missing]));
+      },
+    );
+
+    for (const title of [
+      'Prepare the synthetic draft and show it before sending.',
+      'Send the synthetic draft without another review.',
+    ]) {
+      await t.test(`Nod task titles stay out of condition sources: ${title}`, async () => {
+        const f = await fixture();
+        const original = await f.add(
+          'Show the original synthetic draft before sending.',
+          '2026-11-19T09:58:00.000Z',
+        );
+        await f.capture(original, 'relevant');
+        const offer = await f.add(
+          'Choose a synthetic task.',
+          '2026-11-19T09:59:00.000Z',
+          randomUUID(),
+          'assistant',
+        );
+        await database.query('UPDATE messages SET suggestions=$2 WHERE id=$1', [
+          offer.id,
+          { tasks: [{ title }] },
+        ]);
+        const tapped = await f.add(title);
+        await f.pending(tapped);
+        assert.equal(await f.row(tapped.id), undefined);
+        assert.deepEqual(
+          await eligibleChatDraftInputIds(
+            database,
+            f.ownerId,
+            { turnId: tapped.turnId, threadId: f.threadId },
+            [tapped.id],
+          ),
+          [],
+        );
+        await initializeChatDraftInstructions(database);
+        assert.equal(await f.row(tapped.id), undefined);
+        await database.query(
+          "INSERT INTO chat_draft_instructions(message_id,owner_id,thread_id,turn_id,input_at,source_ids,state,revision,policy_revision) VALUES($1,$2,$3,$4,$5,ARRAY[$1::uuid],'relevant','legacy','1')",
+          [tapped.id, f.ownerId, f.threadId, tapped.turnId, tapped.at],
+        );
+        assert.equal(
+          await prepareChatDraftCapture(database, f.ownerId, tapped.id, { messages: [] }),
+          undefined,
+        );
+        const retained = await retainedChatDraftInstructions(
+          database,
+          f.ownerId,
+          f.threadId,
+          null,
+          false,
+          '1',
+          [tapped.id],
+        );
+        assert.equal(retained.length, 1);
+        assert.equal(
+          retained[0].messages.some((message) => message.text === title),
+          false,
+        );
+        assert.equal(
+          retained[0].messages.some((message) => message.text === original.text),
+          true,
+        );
+        const answer = await f.add(
+          'Synthetic offered task response.',
+          '2026-11-19T10:00:01.000Z',
+          tapped.turnId,
+          'assistant',
+        );
+        const qualified = await f.add(
+          `${title} But show the complete synthetic message first.`,
+          '2026-11-19T10:01:00.000Z',
+        );
+        await database.query('UPDATE messages SET reply_to_message_id=$2 WHERE id=$1', [
+          qualified.id,
+          answer.id,
+        ]);
+        const links = await linkedDraftSources(database, f.ownerId, {
+          turnId: qualified.turnId,
+          threadId: f.threadId,
+        });
+        assert.equal(links.messageIds.includes(tapped.id), false);
+        assert.equal(links.provedTurnIds.includes(tapped.turnId), false);
+        await f.pending(qualified);
+        const captured = await prepareChatDraftCapture(database, f.ownerId, qualified.id, {
+          messages: [qualified],
+        });
+        assert.ok(captured?.complete);
+        assert.equal(captured.input.newMessages[0].text, qualified.text);
+        assert.equal(
+          captured.input.userMessages.some((message) => message.text === title),
+          false,
+        );
+      });
+    }
+
+    await t.test('a later Nod title does not replace earlier genuine owner words', async () => {
+      const f = await fixture();
+      const text = 'Show the synthetic complete message before sending.';
+      const original = await f.add(text, '2026-11-19T09:58:00.000Z');
+      await f.capture(original, 'relevant');
+      const offer = await f.add(
+        'Synthetic later offer.',
+        '2026-11-19T09:59:00.000Z',
+        randomUUID(),
+        'assistant',
+      );
+      await database.query('UPDATE messages SET suggestions=$2 WHERE id=$1', [
+        offer.id,
+        { tasks: [{ title: text }] },
+      ]);
+      const [source] = await f.retained();
+      assert.equal(source.unavailable, false);
+      assert.equal(source.messages[0].text, text);
+    });
 
     await t.test('a late clear cannot replace a changed source', async () => {
       const f = await fixture();

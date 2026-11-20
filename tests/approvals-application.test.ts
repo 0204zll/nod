@@ -931,6 +931,8 @@ test(
           (turn_id=$1 OR source_ids && ARRAY(SELECT id FROM roots) OR context_ids && ARRAY(SELECT id FROM roots))
         UNION SELECT d.message_id FROM chat_draft_instructions d JOIN owned o
           ON o.message_id=ANY(d.source_ids) OR o.message_id=ANY(d.inherited_ids)
+            OR EXISTS (SELECT 1 FROM jsonb_array_elements(d.condition_sources) ref
+              WHERE ref->>'kind'='chat' AND ref->>'id'=o.message_id::text)
           WHERE d.owner_id=$2
       ) DELETE FROM chat_draft_instructions WHERE owner_id=$2 AND message_id IN (SELECT message_id FROM owned) RETURNING message_id`,
         [turnId, ownerId],
@@ -2049,6 +2051,7 @@ test(
           const edit = `Change the ending and send it. ${randomUUID()}`;
           const body = 'Synthetic chat draft with the changed ending.';
           const checked: Array<Record<string, any>> = [];
+          let draftTurn: string | undefined;
           chatDrafts.set(original, 'Synthetic chat draft with the original ending.');
           reviewedSends = [];
           reviewRequirement = (input) => {
@@ -2066,7 +2069,8 @@ test(
           try {
             const initial = await request('POST', '/api/messages', { text: original });
             assert.equal(initial.statusCode, 200, initial.body);
-            const draftTurn = initial.json().turnId;
+            draftTurn = initial.json().turnId;
+            assert.ok(draftTurn);
             await waitFor(draftTurn, 'succeeded');
             const draft = (
               await pool.query(
@@ -2124,6 +2128,7 @@ test(
             chatDrafts.delete(original);
             plans.delete(edit);
             await request('POST', '/api/thread/stop');
+            if (draftTurn) await cleanupDraftSources(draftTurn);
           }
         },
       );
@@ -2374,14 +2379,85 @@ test(
               ).rows[0].state,
               'pending',
             );
-            assert.equal(inputs.length, 2);
-            assert.equal(JSON.stringify(inputs[1]).includes(original), false);
+            assert.equal(inputs.length, 1);
+            assert.equal(
+              (
+                await pool.query('SELECT state FROM chat_draft_instructions WHERE turn_id=$1', [
+                  later.json().turnId,
+                ])
+              ).rows[0].state,
+              'pending',
+            );
+            assert.equal(JSON.stringify(inputs.slice(1)).includes(original), false);
             assert.equal((prompts.get(later.json().turnId) ?? '').includes(original), false);
           } finally {
             release();
             conditionCapture = undefined;
             await request('POST', '/api/thread/stop');
             if (originalTurn) await cleanupDraftSources(originalTurn);
+          }
+        },
+      );
+
+      await t.test(
+        'unresolved condition capture needs complete review without a semantic retry',
+        async (t) => {
+          for (const mode of ['uncertain', 'provider failure', 'over bound']) {
+            await t.test(mode, async () => {
+              const original = `Show the synthetic unresolved draft before sending. ${randomUUID()}${mode === 'over bound' ? 'x'.repeat(33_000) : ''}`;
+              const edit = `Send that changed synthetic draft now. ${randomUUID()}`;
+              let originalTurn: string | undefined;
+              let captures = 0;
+              conditionCapture = () => {
+                captures++;
+                if (mode === 'provider failure')
+                  throw new Error('Synthetic condition service unavailable.');
+                return { messageCondition: 'clear', probability: 0.5 };
+              };
+              reviewRequirement = (input) =>
+                input.purpose === 'review_requirement'
+                  ? { review: 'required' }
+                  : { run: true, because: edit };
+              reviewedSends = [];
+              try {
+                const response = await request('POST', '/api/messages', { text: original });
+                assert.equal(response.statusCode, 200, response.body);
+                originalTurn = response.json().turnId;
+                await waitFor(originalTurn!, 'succeeded');
+                const before = (
+                  await pool.query(
+                    'SELECT state,revision FROM chat_draft_instructions WHERE turn_id=$1',
+                    [originalTurn],
+                  )
+                ).rows[0];
+                assert.equal(before.state, 'pending');
+                assert.ok(before.revision);
+                assert.equal(captures, mode === 'over bound' ? 0 : 1);
+                const body = 'Synthetic current message from an unresolved source.';
+                const turn = await propose(
+                  'GMAIL_SEND_EMAIL',
+                  {
+                    recipient_email: 'unresolved@example.test',
+                    subject: 'Synthetic unresolved draft',
+                    body,
+                  },
+                  'apps',
+                  edit,
+                );
+                const [card] = await approvalsFor(turn);
+                assert.equal(card.status, 'pending');
+                assert.ok((await confirmationFor(card)).includes(body));
+                assert.equal(reviewedSends.length, 0);
+                assert.equal(captures, mode === 'over bound' ? 0 : 1);
+              } finally {
+                conditionCapture = undefined;
+                reviewRequirement = undefined;
+                reviewedSends = undefined;
+                plans.delete(edit);
+                await request('POST', '/api/thread/stop');
+                if (originalTurn) await cleanupDraftSources(originalTurn);
+              }
+            });
           }
         },
       );

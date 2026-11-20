@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import { withdrawnSql } from './turn-chain.ts';
-import { captureOwnerInstructions } from './owner-instructions.ts';
+import { captureOwnerInstructions, ownerMessageContentSql } from './owner-instructions.ts';
 
 type Database = Pick<Pool, 'query'>;
 type Origin = {
@@ -117,6 +117,7 @@ export async function retainedDraftInstructions(
           `SELECT m.id,m.text,m.created_at FROM messages m
            WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.id=ANY($3::uuid[]) AND m.role='user'
              AND m.hidden_at IS NULL AND m.approval_answer IS NULL AND NOT ${withdrawnSql('m')}
+             AND ${ownerMessageContentSql('m')}
              AND (EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=$1 AND (u.id=m.turn_id OR u.message_id=m.id)
                AND to_jsonb(u)->>'task_id'=$4::text) OR (NOT EXISTS (
                  SELECT 1 FROM turns u WHERE u.owner_id=$1 AND (u.id=m.turn_id OR u.message_id=m.id)

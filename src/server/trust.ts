@@ -2,8 +2,7 @@ import { logFailure } from './failure-log.ts';
 import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import type { DecisionModel, DecisionQuestion, ModelReview } from '../ports/decisions.ts';
-import { withTurnLock, lockThread, type TurnRef } from './thread.ts';
-import { transaction } from './transaction.ts';
+import { withDraftLock, type TurnRef } from './thread.ts';
 import { turnOrigin, type ApprovalRepeat } from './approvals.ts';
 import { trustBasis, type TrustBasis, type TrustWords } from './trust-basis.ts';
 import {
@@ -32,6 +31,8 @@ import {
   linkedChatDraftMessageIds,
   linkedDraftSources,
   chatDraftInstructionBindings,
+  captureDraftConditionContext,
+  eligibleChatDraftInputIds,
 } from './chat-draft-instructions.ts';
 import {
   draftOwnerField,
@@ -376,18 +377,7 @@ export function createTrust(options: {
           { notRun: true },
         );
     };
-    const validateLocked = () =>
-      transaction(
-        async (client) => {
-          if ((await lockThread(client)).id !== turn.threadId)
-            throw Object.assign(new Error('The instruction conversation is no longer active.'), {
-              notRun: true,
-            });
-          return withTurnLock(turn.turnId, validate, client);
-        },
-        pool,
-        signal,
-      );
+    const validateLocked = () => withDraftLock(turn, signal, validate);
     const instructions =
       `${messageReviewPolicy}\n` +
       (rules || 'currentRules' in args
@@ -473,18 +463,7 @@ export function createTrust(options: {
   async function inputIds(turn: TurnRef) {
     const origin = await turnOrigin(turn.turnId);
     if (!origin) throw new Error('This turn is no longer running.');
-    const chain = (
-      await pool.query<{ message_id: string }>(
-        `WITH RECURSIVE chain AS (
-           SELECT id,message_id,parent_turn_id FROM turns WHERE id=$1 AND owner_id=$2
-           UNION SELECT u.id,u.message_id,u.parent_turn_id FROM turns u JOIN chain c ON u.id=c.parent_turn_id
-             WHERE u.owner_id=$2 AND u.thread_id=$3)
-         SELECT DISTINCT c.message_id FROM chain c LEFT JOIN messages m ON m.id=c.message_id AND m.owner_id=$2
-         WHERE c.message_id IS NOT NULL AND (m.id IS NULL OR (m.role='user' AND m.approval_answer IS NULL))`,
-        [turn.turnId, ownerId, turn.threadId],
-      )
-    ).rows.map((row) => row.message_id);
-    return { origin, ids: [...new Set([...origin.messageIds, ...chain])] };
+    return { origin, ids: await eligibleChatDraftInputIds(pool, ownerId, turn, origin.messageIds) };
   }
 
   async function authorityInputs(
@@ -520,13 +499,20 @@ export function createTrust(options: {
         ...bindings.flatMap((binding) => [...binding.sourceIds, ...binding.contextIds]),
       ]),
     ];
-    const context = bindings
-      .filter((binding) => binding.state !== 'clear')
-      .map(({ messages, unavailable }) => ({ messages, unavailable }));
+    const context = await captureDraftConditionContext(
+      client,
+      ownerId,
+      turn.threadId,
+      origin.taskId,
+      messageConditionPolicy,
+      [],
+      turn.turnId,
+    );
     const base = {
       evidence,
       sourceIds,
-      context,
+      context: context.input,
+      conditionSources: context.conditions,
       bindings: bindings.map(({ id, state, revision }) => ({ id, state, revision })),
       unavailable: bindings.some((binding) => binding.state !== 'clear' && binding.unavailable),
     };
@@ -574,12 +560,23 @@ export function createTrust(options: {
         unavailable: base.unavailable || !saved || saved.requiresReplacement || !origin.scheduleId,
       });
     }
+    const activeOwnerData = authorities.map(({ kind, data }) => ({
+      kind,
+      ownerData: data,
+      canAuthorize: false,
+    }));
+    for (const authority of authorities)
+      if (!authority.empty)
+        authority.context = [
+          ...(Array.isArray(authority.context) ? authority.context : []),
+          { kind: 'active', ownerData: activeOwnerData, unavailable: false },
+        ];
     return authorities;
   }
 
   async function pendingInstructions(turn: TurnRef) {
     const { origin, ids } = await inputIds(turn);
-    await withTurnLock(turn.turnId, async (client) => {
+    await withDraftLock(turn, undefined, async (client) => {
       await pendingChatDraftInstructions(client, ownerId, turn, ids, origin.taskId);
       await pendingDraftAuthorityInstructions(
         client,
@@ -599,7 +596,7 @@ export function createTrust(options: {
   ) {
     const { origin, ids } = await inputIds(turn);
     const pending = await pendingChatDraftMessageIds(pool, ownerId, turn.turnId, ids);
-    const authorities = await withTurnLock({ turnId: turn.turnId, signal }, async (client) =>
+    const authorities = await withDraftLock(turn, signal, async (client) =>
       pendingDraftAuthorityInstructions(
         client,
         ownerId,
@@ -639,7 +636,7 @@ export function createTrust(options: {
         ]);
         deadline.throwIfAborted();
         if (answer === 'uncertain') return;
-        await withTurnLock({ turnId: turn.turnId, signal }, (client) =>
+        await withDraftLock(turn, signal, (client) =>
           finish(client, answer === 'clear' ? 'clear' : 'relevant'),
         );
       } catch (error) {
@@ -649,10 +646,21 @@ export function createTrust(options: {
         if (aborted) deadline.removeEventListener('abort', aborted);
       }
     };
+    for (const key of authorities) {
+      signal.throwIfAborted();
+      if (!canContinue()) return;
+      const captured = await withDraftLock(turn, signal, (client) =>
+        prepareDraftAuthorityCapture(client, ownerId, key),
+      );
+      if (captured?.complete)
+        await classify(captured.input, (client, state) =>
+          finishDraftAuthorityCapture(client, ownerId, captured, state),
+        );
+    }
     for (const id of pending) {
       signal.throwIfAborted();
       if (!canContinue()) return;
-      const captured = await withTurnLock({ turnId: turn.turnId, signal }, async (client) => {
+      const captured = await withDraftLock(turn, signal, async (client) => {
         const linked = await linkedChatDraftMessageIds(client, ownerId, turn);
         const said = await captureOwnerInstructions(
           client,
@@ -683,17 +691,6 @@ export function createTrust(options: {
       await classify(captured.input, (client, state) =>
         finishChatDraftCapture(client, ownerId, captured, state),
       );
-    }
-    for (const key of authorities) {
-      signal.throwIfAborted();
-      if (!canContinue()) return;
-      const captured = await withTurnLock({ turnId: turn.turnId, signal }, (client) =>
-        prepareDraftAuthorityCapture(client, ownerId, key),
-      );
-      if (captured?.complete)
-        await classify(captured.input, (client, state) =>
-          finishDraftAuthorityCapture(client, ownerId, captured, state),
-        );
     }
   }
 
