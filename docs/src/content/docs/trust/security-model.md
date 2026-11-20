@@ -139,6 +139,8 @@ A complete schedule approval is bound to the exact future work described in its 
 
 Each run keeps its execution request, run time and owner-evidence copy. Missing or withdrawn required sources refuse the work; they do not restore older grants. A complete replacement can establish a new instruction. The server does not summarize permission or erase it after a fixed number of changes. A request that exceeds the selected provider's input context limit fails without saving the update. Existing schedules migrate their known instruction without guessed context. Old correction lists have no complete source records and require a complete replacement instruction.
 
+If Nod stops work because a source is withdrawn, a failure to save that withdrawal does not restart work it already stopped. Ask for that work again to continue.
+
 Source checks establish where evidence came from. A model still judges whether that evidence covers the action, which corrections apply, and whether background describes the same work. A valid quote alone does not establish permission.
 
 ## Related resources

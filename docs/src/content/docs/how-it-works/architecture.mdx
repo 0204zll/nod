@@ -17,6 +17,8 @@ The main chat session coordinates work. It answers short requests and starts a s
 
 The `tasks` table is the task ledger. All sessions share the owner's workspace and memory, with separate saved histories and task folders. The server routes replies and delivers addressed owner updates to the correct session.
 
+Related-message recall reads the active conversation. It excludes hidden messages and owner messages from withdrawn requests.
+
 See [Task sessions](/how-it-works/task-sessions/) for the architecture diagram, records, context sharing and lifecycle.
 
 ## One process and a few containers

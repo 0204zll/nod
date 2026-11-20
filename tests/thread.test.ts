@@ -9347,6 +9347,14 @@ test(
           );
           await add('My passport expires in June', '2019-05-02T10:00:00Z');
           await hidden('My passport expires next week', '2019-05-03T10:00:00Z');
+          const hiddenPassport = await add(
+            'My passport expires in July. fixturePassportCanary.',
+            '2019-05-03T11:00:00Z',
+          );
+          await db.pool.query('UPDATE messages SET hidden_at=now() WHERE id=$1 AND owner_id=$2', [
+            hiddenPassport,
+            ownerId,
+          ]);
           const current = await add('Passport photos are booked', '2019-05-05T10:00:00Z');
           const recalled = await personal.recall(
             'when does my passport expire',

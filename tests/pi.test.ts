@@ -601,15 +601,29 @@ test('model checks fit the output limit of the selected text model', async (t) =
 });
 
 test('draft-condition capture uses byte limits', async (t) => {
-  for (const mode of ['complete', 'context overflow', 'provider refusal', 'over byte limit'])
+  for (const mode of [
+    'complete',
+    'context overflow',
+    'provider refusal',
+    'over byte limit',
+    'multibyte over byte limit',
+  ])
     await t.test(mode, async (t) => {
       const access = smallContextAccess('compatible', 'fixture-source-capture', 8192);
       const instructions = 'Classify the complete synthetic source as JSON.';
       const input = {
         purpose: 'message_condition_capture',
-        message: 'Complete synthetic draft. '.repeat(mode === 'over byte limit' ? 3000 : 300),
+        message:
+          mode === 'multibyte over byte limit'
+            ? 'é'.repeat(33_000)
+            : 'Complete synthetic draft. '.repeat(mode === 'over byte limit' ? 3000 : 300),
         tail: 'synthetic-source-end',
       };
+      if (mode === 'multibyte over byte limit') {
+        const complete = instructions + JSON.stringify(input);
+        assert.ok(complete.length < 64_000);
+        assert.ok(Buffer.byteLength(complete) > 64_000);
+      }
       const requests: Array<{
         max_tokens: number;
         messages: Array<{ role: string; content: string }>;
@@ -651,7 +665,7 @@ test('draft-condition capture uses byte limits', async (t) => {
         resolve: async () => access,
       });
       const capture = curator.curate({ task: 'review', instructions, input });
-      if (mode === 'over byte limit') {
+      if (mode === 'over byte limit' || mode === 'multibyte over byte limit') {
         await assert.rejects(capture, /source capture limit is 64000 bytes/);
         assert.equal(requests.length, 0);
         return;
