@@ -10,7 +10,9 @@ import { withdrawnSql } from './turn-chain.ts';
 import {
   chatDraftInstructionBindings,
   draftConditionBindingStates,
+  draftOwnerFieldHistoryGaps,
   draftSourceRevision,
+  isDraftOwnerFieldSource,
   type DraftConditionSource,
 } from './chat-draft-instructions.ts';
 import type { TrustWords } from './trust-basis.ts';
@@ -93,7 +95,12 @@ export async function draftOwnerField(
       [ownerId, kind, JSON.stringify(row.versions)],
     );
   }
-  return { field: kind === 'standing' ? 'notification_rule' : 'rules', versions: row.versions };
+  return {
+    field: kind === 'standing' ? 'notification_rule' : 'rules',
+    version: row.versions.length,
+    versions: [{ value }],
+    everNonEmpty: row.versions.some((entry) => Boolean(entry.value.trim())),
+  };
 }
 
 function instructionContexts(payload: Authority) {
@@ -230,7 +237,24 @@ async function snapshots(database: Database, ownerId: string, payloads: Authorit
               .join('\n\n') === message.replyTo.text
           );
         });
-    return { ids: selectedIds, complete, revision: digest(selected) };
+    return {
+      ids: selectedIds,
+      complete,
+      revision: digest(selected),
+      sourceIds: [
+        ...new Set([
+          ...selectedIds,
+          ...liveBindings.flatMap((binding) =>
+            payload.bindings.some(({ id }) => id === binding.id)
+              ? [...binding.sourceIds, ...binding.contextIds]
+              : [],
+          ),
+          ...(payload.conditionSources ?? []).flatMap(
+            (ref) => conditionStates.get(`${ref.kind}:${ref.id}`)?.sourceIds ?? [],
+          ),
+        ]),
+      ],
+    };
   };
 }
 
@@ -266,12 +290,42 @@ export async function pendingDraftAuthorityInstructions(
     }),
   );
   const same = baseKeys;
+  const fields = authorities.flatMap((authority) => {
+    const data = Object(authority.data);
+    return authority.kind !== 'schedule' && Number.isSafeInteger(data.version)
+      ? [{ kind: authority.kind, version: data.version as number }]
+      : [];
+  });
+  const existing = fields.length
+    ? (
+        await database.query<Source>(
+          'SELECT * FROM draft_authority_instructions WHERE owner_id=$1',
+          [ownerId],
+        )
+      ).rows
+    : [];
+  const gaps = fields.length
+    ? await draftOwnerFieldHistoryGaps(
+        database,
+        ownerId,
+        existing,
+        Object.fromEntries(fields.map((field) => [field.kind, field.version - 1])),
+      )
+    : [];
   for (const [index, original] of authorities.entries()) {
     const baseKey = baseKeys[index]!;
     const payload = {
       ...original,
       context: Array.isArray(original.context)
-        ? original.context.filter((entry) => !same.includes(Object(entry).id))
+        ? [
+            ...original.context.filter((entry) => !same.includes(Object(entry).id)),
+            ...gaps.map((gap) => ({
+              kind: 'authority',
+              field: gap.kind,
+              messages: [],
+              unavailable: true,
+            })),
+          ]
         : original.context,
       conditionSources: original.conditionSources?.filter(
         (ref) => ref.kind !== 'authority' || !same.includes(ref.id),
@@ -337,6 +391,7 @@ export async function prepareDraftAuthorityCapture(
     key,
     turnId,
     revision: source.source_revision,
+    sourceIds: current.sourceIds,
     complete,
     input: {
       purpose: 'message_condition_capture',
@@ -354,11 +409,10 @@ export async function prepareDraftAuthorityCapture(
   };
 }
 
-export async function finishDraftAuthorityCapture(
+export async function currentDraftAuthorityCapture(
   database: Database,
   ownerId: string,
   capture: { key: string; revision: string; turnId: string },
-  state: 'clear' | 'relevant',
 ) {
   const source = (
     await database.query<Source>(
@@ -373,9 +427,18 @@ export async function finishDraftAuthorityCapture(
     source.attempt_turn_id !== capture.turnId ||
     source.source_revision !== capture.revision
   )
-    return;
+    return false;
   const current = await snapshot(database, ownerId, source.payload, true);
-  if (!current.complete || current.revision !== capture.revision) return;
+  return current.complete && current.revision === capture.revision;
+}
+
+export async function finishDraftAuthorityCapture(
+  database: Database,
+  ownerId: string,
+  capture: { key: string; revision: string; turnId: string },
+  state: 'clear' | 'relevant',
+) {
+  if (!(await currentDraftAuthorityCapture(database, ownerId, capture))) return;
   await database.query(
     "UPDATE draft_authority_instructions SET state=$3 WHERE owner_id=$1 AND key=$2 AND state='pending'",
     [ownerId, capture.key, state],
@@ -407,7 +470,10 @@ export async function retainedDraftAuthorityInstructions(
       ).rows[0]
     : undefined;
   const retained: Array<
-    NonNullable<TrustWords['messageDrafts']>[number] & { sourceRevision: string }
+    NonNullable<TrustWords['messageDrafts']>[number] & {
+      sourceRevision: string;
+      sourceIds: string[];
+    }
   > = [];
   const currentSnapshot = await snapshots(
     database,
@@ -422,7 +488,7 @@ export async function retainedDraftAuthorityInstructions(
         (taskId !== null &&
           source.task_id === null &&
           Boolean(task && source.created_at <= task.created_at)));
-    if (!inScope && !source.forced) continue;
+    if (!inScope && !source.forced && !isDraftOwnerFieldSource(source)) continue;
     const current = currentSnapshot(source.payload);
     const verified =
       current.complete &&
@@ -439,6 +505,7 @@ export async function retainedDraftAuthorityInstructions(
         policyRevision,
       }),
       kind: 'authority' as const,
+      sourceIds: current.sourceIds,
       draftId: null,
       connectionId: null,
       target: {
@@ -463,6 +530,17 @@ export async function retainedDraftAuthorityInstructions(
       unavailable: !available,
     });
   }
+  for (const gap of await draftOwnerFieldHistoryGaps(database, ownerId, sources))
+    retained.push({
+      sourceRevision: gap.revision,
+      sourceIds: [],
+      kind: 'authority',
+      draftId: null,
+      connectionId: null,
+      target: { authority: gap.kind, history: 'unavailable' },
+      messages: [],
+      unavailable: true,
+    });
   if (forcedTurnIds.length) {
     const linked = (
       await database.query<{ turn_id: string }>(
@@ -474,6 +552,7 @@ export async function retainedDraftAuthorityInstructions(
     if (missing.length)
       retained.push({
         sourceRevision: digest({ missing, policyRevision }),
+        sourceIds: [],
         kind: 'authority' as const,
         draftId: null,
         connectionId: null,

@@ -5,6 +5,22 @@ import { ownerMessageContentSql, type OwnerInstructions } from './owner-instruct
 import { withdrawnSql } from './turn-chain.ts';
 
 type Database = Pick<Pool, 'query'>;
+export async function draftSourceTurnIds(
+  database: Database,
+  ownerId: string,
+  messageIds: string[],
+) {
+  if (!messageIds.length) return [];
+  return (
+    await database.query<{ id: string }>(
+      `SELECT u.id FROM turns u WHERE u.owner_id=$1 AND (u.message_id=ANY($2::uuid[])
+       OR EXISTS (SELECT 1 FROM messages m WHERE m.owner_id=$1 AND m.id=ANY($2::uuid[]) AND m.turn_id=u.id))
+       ORDER BY u.id`,
+      [ownerId, [...new Set(messageIds)]],
+    )
+  ).rows.map(({ id }) => id);
+}
+
 export function draftSourceRevision(value: unknown) {
   return createHash('sha256')
     .update(
@@ -41,6 +57,8 @@ type Source = {
 type AuthoritySource = {
   key: string;
   base_key: string;
+  kind: 'schedule' | 'standing' | 'rules';
+  authority_scope: string;
   thread_id: string;
   task_id: string | null;
   created_at: Date;
@@ -57,6 +75,87 @@ type AuthoritySource = {
     context: Array<{ id?: string; baseKey?: string; unavailable?: boolean }>;
   };
 };
+type FieldSource = {
+  kind: string;
+  authority_scope: string;
+  payload: { data: unknown };
+};
+
+function fieldSource(source: FieldSource) {
+  if (
+    (source.kind !== 'rules' && source.kind !== 'standing') ||
+    source.authority_scope !== source.kind
+  )
+    return;
+  const data = Object(source.payload.data);
+  if (
+    data.field !== (source.kind === 'rules' ? 'rules' : 'notification_rule') ||
+    !Array.isArray(data.versions) ||
+    !data.versions.length ||
+    !data.versions.every((entry: unknown) => typeof Object(entry).value === 'string')
+  )
+    return;
+  if (
+    data.version !== undefined &&
+    (!Number.isSafeInteger(data.version) || data.version < 1 || data.versions.length !== 1)
+  )
+    return;
+  return {
+    kind: source.kind,
+    version: data.version as number | undefined,
+    values: data.versions.map((entry: { value: string }) => entry.value) as string[],
+  };
+}
+
+export function isDraftOwnerFieldSource(source: FieldSource) {
+  return Boolean(fieldSource(source));
+}
+
+export async function draftOwnerFieldHistoryGaps(
+  database: Database,
+  ownerId: string,
+  sources: FieldSource[],
+  through: Partial<Record<'standing' | 'rules', number>> = {},
+) {
+  const archives = (
+    await database.query<{
+      kind: 'standing' | 'rules';
+      versions: Array<{ value: string }>;
+    }>('SELECT kind,versions FROM draft_owner_field_versions WHERE owner_id=$1 ORDER BY kind', [
+      ownerId,
+    ])
+  ).rows;
+  return archives.flatMap((archive) => {
+    const limit = Math.min(
+      through[archive.kind] ?? archive.versions.length,
+      archive.versions.length,
+    );
+    const covered = new Set<number>();
+    for (const source of sources) {
+      const field = fieldSource(source);
+      if (!field || field.kind !== archive.kind) continue;
+      if (field.version !== undefined) {
+        if (archive.versions[field.version - 1]?.value === field.values[0])
+          covered.add(field.version);
+      } else if (
+        field.values.length <= archive.versions.length &&
+        field.values.every((value, index) => archive.versions[index]?.value === value)
+      )
+        field.values.forEach((_value, index) => covered.add(index + 1));
+    }
+    const missing = Array.from({ length: limit }, (_value, index) => index + 1).filter(
+      (version) => !covered.has(version),
+    );
+    return missing.length
+      ? [
+          {
+            kind: archive.kind,
+            revision: draftSourceRevision({ archive, missing }),
+          },
+        ]
+      : [];
+  });
+}
 type Message = {
   id: string;
   thread_id: string;
@@ -73,6 +172,10 @@ type Message = {
 
 export async function initializeChatDraftInstructions(database: Database) {
   await database.query(`
+    DO $backfill$
+    BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(current_schema() || ':chat-draft-backfill-v1',0));
+    IF to_regclass('chat_draft_instructions') IS NULL THEN
     CREATE TABLE IF NOT EXISTS chat_draft_instructions (
       message_id uuid PRIMARY KEY, owner_id text NOT NULL,
       thread_id uuid NOT NULL REFERENCES threads(id), turn_id uuid NOT NULL REFERENCES turns(id),
@@ -81,12 +184,6 @@ export async function initializeChatDraftInstructions(database: Database) {
       state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','relevant','clear')),
       revision text, policy_revision text, condition_sources jsonb NOT NULL DEFAULT '[]', created_at timestamptz NOT NULL DEFAULT now()
     );
-    CREATE INDEX IF NOT EXISTS chat_draft_instructions_owner ON chat_draft_instructions(owner_id,input_at,message_id);
-    CREATE TABLE IF NOT EXISTS draft_artifact_sources (
-      artifact_id uuid PRIMARY KEY, owner_id text NOT NULL, thread_id uuid NOT NULL,
-      turn_id uuid NOT NULL, sha256 text NOT NULL, size integer NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS draft_artifact_sources_digest ON draft_artifact_sources(owner_id,sha256);
     INSERT INTO chat_draft_instructions(message_id,owner_id,thread_id,turn_id,task_id,input_at,source_ids)
       SELECT DISTINCT ON (u.message_id) u.message_id,u.owner_id,u.thread_id,u.id,
         (to_jsonb(u)->>'task_id')::uuid,COALESCE(m.created_at,u.created_at),ARRAY[u.message_id]
@@ -96,6 +193,15 @@ export async function initializeChatDraftInstructions(database: Database) {
         AND (m.id IS NULL OR (m.role='user' AND ${ownerMessageContentSql('m')}))
       ORDER BY u.message_id,u.created_at,u.id
       ON CONFLICT(message_id) DO NOTHING;
+    END IF;
+    CREATE INDEX IF NOT EXISTS chat_draft_instructions_owner ON chat_draft_instructions(owner_id,input_at,message_id);
+    CREATE TABLE IF NOT EXISTS draft_artifact_sources (
+      artifact_id uuid PRIMARY KEY, owner_id text NOT NULL, thread_id uuid NOT NULL,
+      turn_id uuid NOT NULL, sha256 text NOT NULL, size integer NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS draft_artifact_sources_digest ON draft_artifact_sources(owner_id,sha256);
+    END
+    $backfill$;
   `);
 }
 
@@ -280,6 +386,32 @@ async function load(database: Database, ownerId: string, lock: boolean, extraIds
         live.revision === ref.revision
       );
     });
+  const conditionSourceIds = (refs: Array<Pick<DraftConditionSource, 'kind' | 'id'>>) => {
+    const pending = [...refs];
+    const visited = new Set<string>();
+    const ids = new Set<string>();
+    while (pending.length) {
+      const ref = pending.pop()!;
+      const key = `${ref.kind}:${ref.id}`;
+      if (visited.has(key)) continue;
+      visited.add(key);
+      const source = ref.kind === 'chat' ? bySource.get(ref.id) : byAuthority.get(ref.id);
+      if (!source) continue;
+      for (const id of source.source_ids) ids.add(id);
+      if ('message_id' in source) {
+        for (const id of source.context_ids) ids.add(id);
+        pending.push(
+          ...source.condition_sources,
+          ...source.inherited_ids.map((id) => ({ kind: 'chat' as const, id })),
+        );
+      } else
+        pending.push(
+          ...(source.payload.conditionSources ?? []),
+          ...source.payload.bindings.map(({ id }) => ({ kind: 'chat' as const, id })),
+        );
+    }
+    return [...ids];
+  };
   const authorityComplete = (source: AuthoritySource) => {
     const rows = source.source_ids.map((id) => byMessage.get(id));
     const words = rows.map(
@@ -383,7 +515,24 @@ async function load(database: Database, ownerId: string, lock: boolean, extraIds
       inherited,
       conditions: source.condition_sources.map((ref) => ({ ...ref, live: condition(ref) })),
     });
-    return { owners, context, inherited, complete, intact, revision };
+    return {
+      owners,
+      context,
+      inherited,
+      complete,
+      intact,
+      revision,
+      sourceIds: [
+        ...new Set([
+          ...source.source_ids,
+          ...source.context_ids,
+          ...conditionSourceIds([
+            ...source.condition_sources,
+            ...source.inherited_ids.map((id) => ({ kind: 'chat' as const, id })),
+          ]),
+        ]),
+      ],
+    };
   };
   return {
     sources,
@@ -396,6 +545,7 @@ async function load(database: Database, ownerId: string, lock: boolean, extraIds
     matches,
     authorityComplete,
     ownerSource,
+    conditionSourceIds,
   };
 }
 
@@ -407,7 +557,12 @@ export async function draftConditionBindingStates(
   if (!refs.length)
     return new Map<
       string,
-      { state: Source['state'] | undefined; revision: string; available: boolean }
+      {
+        state: Source['state'] | undefined;
+        revision: string;
+        available: boolean;
+        sourceIds: string[];
+      }
     >();
   const current = await load(database, ownerId, false);
   return new Map(
@@ -422,6 +577,7 @@ export async function draftConditionBindingStates(
           )?.state,
           revision,
           available,
+          sourceIds: current.conditionSourceIds([ref]),
         },
       ];
     }),
@@ -494,10 +650,11 @@ export async function captureDraftConditionContext(
     });
   }
   for (const source of current.authorities) {
-    if (!inScope(source, source.created_at)) continue;
+    const scoped = inScope(source, source.created_at);
+    if (!scoped && !isDraftOwnerFieldSource(source)) continue;
     const verified = current.authorityComplete(source) && source.policy_revision === policyRevision;
     if (source.state === 'clear' && verified) continue;
-    const unavailable = source.state !== 'relevant' || !verified;
+    const unavailable = !scoped || source.state !== 'relevant' || !verified;
     const ref = {
       kind: 'authority' as const,
       id: source.key,
@@ -521,6 +678,13 @@ export async function captureDraftConditionContext(
       unavailable,
     });
   }
+  for (const gap of await draftOwnerFieldHistoryGaps(database, ownerId, current.authorities))
+    input.push({
+      kind: 'authority',
+      id: `field-history:${gap.kind}`,
+      messages: [],
+      unavailable: true,
+    });
   return { conditions, input, complete: input.every((entry) => !entry.unavailable) };
 }
 
@@ -603,6 +767,7 @@ export async function prepareChatDraftCapture(
   return {
     messageId,
     revision: captured.revision,
+    sourceIds: captured.sourceIds,
     complete: captured.complete && conditionContext.complete,
     input: {
       purpose: 'message_condition_capture',
@@ -687,7 +852,7 @@ export async function chatDraftInstructionBindings(
         turnId: source.turn_id,
         state: source.state,
         revision: snapshot.revision,
-        sourceIds: source.source_ids,
+        sourceIds: snapshot.sourceIds,
         contextIds: source.context_ids,
         messages: snapshot.owners.map((message) => ({
           at: message.created_at.toISOString(),
@@ -700,17 +865,25 @@ export async function chatDraftInstructionBindings(
     });
 }
 
+export async function currentChatDraftCapture(
+  database: Database,
+  ownerId: string,
+  capture: { messageId: string; revision: string },
+) {
+  const current = await load(database, ownerId, true);
+  const source = current.sources.find((candidate) => candidate.message_id === capture.messageId);
+  if (!source || source.state !== 'pending' || source.revision !== capture.revision) return false;
+  const snapshot = current.snapshot(source);
+  return snapshot.complete && snapshot.revision === capture.revision;
+}
+
 export async function finishChatDraftCapture(
   database: Database,
   ownerId: string,
   capture: { messageId: string; revision: string },
   state: 'relevant' | 'clear',
 ) {
-  const current = await load(database, ownerId, true);
-  const source = current.sources.find((candidate) => candidate.message_id === capture.messageId);
-  if (!source || source.state !== 'pending' || source.revision !== capture.revision) return;
-  const snapshot = current.snapshot(source);
-  if (!snapshot.complete || snapshot.revision !== capture.revision) return;
+  if (!(await currentChatDraftCapture(database, ownerId, capture))) return;
   await database.query(
     `UPDATE chat_draft_instructions SET state=$3 WHERE owner_id=$1 AND message_id=$2
      AND state='pending' AND revision=$4`,
@@ -769,6 +942,7 @@ export async function retainedChatDraftInstructions(
           )
           .digest('hex'),
         kind: 'chat' as const,
+        sourceIds: snapshot.sourceIds,
         draftId: null,
         connectionId: null,
         target: inScope

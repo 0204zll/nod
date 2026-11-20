@@ -39,6 +39,8 @@ import { createAgentRuntime } from '../src/runtime/index.ts';
 import { compactOwnerContext, firstInstruction, ownerContext } from '../src/runtime/prompt.ts';
 import { createPreferencesStore } from '../src/server/preferences.ts';
 import type { ThreadDependencies } from '../src/server/thread.ts';
+import type { ModelReview } from '../src/ports/decisions.ts';
+import { cancelTurnOperations, withTurnCancellation } from '../src/server/turn-cancellation.ts';
 import type {
   Artifact,
   Connection,
@@ -56,6 +58,42 @@ import type { ProductAnalytics } from '../src/ports/analytics.ts';
 import { createAnalytics, snapshotAnalytics } from '../src/server/analytics.ts';
 import { accessCookie, accessKey } from '../src/server/access.ts';
 import { suggestedTaskStatus } from '../src/web/lib/chat-messages.ts';
+
+test('source cancellation binds every source and releases every registration', async () => {
+  const first = randomUUID();
+  const second = randomUUID();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let sourceSignal: AbortSignal | undefined;
+  const running = withTurnCancellation([first, second, first], async (signal) => {
+    sourceSignal = signal;
+    await held;
+  });
+  try {
+    assert.ok(sourceSignal);
+    assert.equal(sourceSignal.aborted, false);
+    cancelTurnOperations([second]);
+    assert.equal(sourceSignal.aborted, true);
+  } finally {
+    release();
+    await running;
+  }
+  for (const id of [first, second])
+    await withTurnCancellation(id, async (signal) => {
+      assert.equal(signal.aborted, false);
+    });
+  for (const fail of [false, true]) {
+    let released: AbortSignal | undefined;
+    const work = withTurnCancellation([first, second, first], async (signal) => {
+      released = signal;
+      if (fail) throw new Error('Synthetic source operation failure.');
+    });
+    if (fail) await assert.rejects(work, /Synthetic source operation failure/);
+    else await work;
+    cancelTurnOperations([first, second]);
+    assert.equal(released?.aborted, false);
+  }
+});
 
 test(
   'one thread runs every turn in order on the same session and workspace',
@@ -2120,6 +2158,456 @@ test(
           );
         },
       );
+
+      await t.test('a creator withdrawal cancels only its child source request', async (t) => {
+        const { createTrust } = await import('../src/server/trust.ts');
+        const previousThread = (await thread.activeThread()).id;
+        const sourceThread = await transaction(async (client) => {
+          await thread.lockThread(client);
+          await client.query('UPDATE threads SET archived_at=now() WHERE id=$1 AND owner_id=$2', [
+            previousThread,
+            ownerId,
+          ]);
+          return thread.activeThread(client);
+        }, db.pool);
+        try {
+          for (const kind of ['capture', 'check', 'previous evidence'] as const)
+            for (const mode of kind === 'previous evidence'
+              ? (['withdrawal', 'live source'] as const)
+              : ([
+                  'withdrawal',
+                  'live source',
+                  'rollback',
+                  'later pointer',
+                  'before registration',
+                ] as const))
+              await t.test(`${kind}: ${mode}`, async () => {
+                const withdraw = mode === 'withdrawal' || mode === 'before registration';
+                const cancelled = mode !== 'live source';
+                const prompt = `Explain the synthetic source ${randomUUID()}.`;
+                const title = `Synthetic source child ${randomUUID()}`;
+                const rules = `Use short synthetic reports ${randomUUID()}.`;
+                await db.pool.query(
+                  'INSERT INTO preferences(owner_id) VALUES($1) ON CONFLICT DO NOTHING',
+                  [ownerId],
+                );
+                const priorRules =
+                  (
+                    await db.pool.query('SELECT rules FROM preferences WHERE owner_id=$1', [
+                      ownerId,
+                    ])
+                  ).rows[0]?.rules ?? '';
+                const priorFields = (
+                  await db.pool.query(
+                    'SELECT kind,versions FROM draft_owner_field_versions WHERE owner_id=$1',
+                    [ownerId],
+                  )
+                ).rows;
+                const priorKeys = new Set(
+                  (
+                    await db.pool.query(
+                      'SELECT key FROM draft_authority_instructions WHERE owner_id=$1',
+                      [ownerId],
+                    )
+                  ).rows.map(({ key }) => key),
+                );
+                let releaseSelection!: () => void;
+                let releaseCreator!: () => void;
+                let releaseChild!: () => void;
+                const selectionHeld = new Promise<void>((resolve) => (releaseSelection = resolve));
+                const creatorHeld = new Promise<void>((resolve) => (releaseCreator = resolve));
+                const childHeld = new Promise<void>((resolve) => (releaseChild = resolve));
+                let child: RuntimeContext | undefined;
+                let task: Task | undefined;
+                let selecting = false;
+                let captured = false;
+                let selectedSignal: AbortSignal | undefined;
+                let stage: 'setup' | 'capture' | 'check' = 'setup';
+                let checkFailed = false;
+                let lookupHeld = false;
+                const requests: object[] = [];
+                const review: ModelReview = Object.assign(
+                  async (_instructions: string, input: object) => {
+                    if (stage !== 'setup') requests.push(structuredClone(input));
+                    assert.equal('sourceIds' in input, false);
+                    assert.equal('sourceTurnIds' in input, false);
+                    return Object(input).purpose === 'message_condition_capture'
+                      ? { messageCondition: 'clear', probability: 1 }
+                      : Object(input).purpose === 'review_requirement'
+                        ? { review: 'clear' }
+                        : { run: true, because: prompt };
+                  },
+                  {
+                    select: async (signal?: AbortSignal) => {
+                      if (stage !== 'setup') {
+                        selectedSignal = signal;
+                        selecting = true;
+                        await selectionHeld;
+                      }
+                      return review;
+                    },
+                  },
+                );
+                const sourcePool = new Proxy(db.pool, {
+                  get(target, key) {
+                    if (key === 'query')
+                      return async (...args: unknown[]) => {
+                        const result = await Reflect.apply(target.query, target, args);
+                        if (
+                          mode === 'before registration' &&
+                          stage !== 'setup' &&
+                          !lookupHeld &&
+                          typeof args[0] === 'string' &&
+                          args[0].startsWith('SELECT u.id FROM turns u WHERE u.owner_id=$1')
+                        ) {
+                          lookupHeld = true;
+                          selecting = true;
+                          await selectionHeld;
+                        }
+                        return result;
+                      };
+                    const value = Reflect.get(target, key, target);
+                    return typeof value === 'function' ? value.bind(target) : value;
+                  },
+                });
+                const trust = createTrust({
+                  pool: sourcePool,
+                  ownerId,
+                  sourceInputBytes: 64_000,
+                  review,
+                });
+                let checked: Awaited<ReturnType<typeof trust.check>> | undefined;
+                const previous =
+                  kind === 'previous evidence'
+                    ? {
+                        taskId: randomUUID(),
+                        turnId: randomUUID(),
+                        id: randomUUID(),
+                        text: `Read the previous synthetic source ${randomUUID()}.`,
+                        at: new Date(Date.now() - 1000).toISOString(),
+                      }
+                    : undefined;
+                if (previous) {
+                  await db.pool.query(
+                    "INSERT INTO tasks(id,owner_id,session_id,title,done_when,now_text) VALUES($1,$2,$1,'Synthetic previous source','Read the synthetic source','Waiting')",
+                    [previous.taskId, ownerId],
+                  );
+                  await db.pool.query(
+                    "INSERT INTO turns(id,owner_id,thread_id,session_id,task_id,source,status,waiting_reason,started_at,message_id,prompt,background,created_at) VALUES($1,$2,$3,$4,$4,'user','waiting','question',now(),$5,$6,true,$7)",
+                    [
+                      previous.turnId,
+                      ownerId,
+                      sourceThread.id,
+                      previous.taskId,
+                      previous.id,
+                      previous.text,
+                      previous.at,
+                    ],
+                  );
+                  await db.pool.query(
+                    "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,created_at) VALUES($1,$2,$3,$4,'user',$5,$6)",
+                    [
+                      previous.id,
+                      ownerId,
+                      sourceThread.id,
+                      previous.turnId,
+                      previous.text,
+                      previous.at,
+                    ],
+                  );
+                }
+                const previousObserver = inspectObserver;
+                inspectObserver = async (context) => {
+                  if (context.taskContext?.title === title) {
+                    child = context;
+                    await trust.pendingInstructions(context);
+                    if (kind === 'capture') stage = 'capture';
+                    await trust.captureInstructions(context, context.signal, () => true);
+                    if (kind !== 'capture') {
+                      stage = 'check';
+                      try {
+                        const verdict = await trust.check(
+                          context,
+                          'GMAIL_SEND_EMAIL',
+                          { to: 'source@example.test', body: 'Synthetic source report.' },
+                          context.signal,
+                          previous
+                            ? {
+                                before: { prompt: 'Read the previous synthetic source.' },
+                                changes: { prompt: 'Read the current synthetic source.' },
+                                after: { prompt: 'Read the current synthetic source.' },
+                                evidence: {
+                                  messages: [
+                                    { id: previous.id, at: previous.at, text: previous.text },
+                                  ],
+                                },
+                              }
+                            : undefined,
+                        );
+                        checked = verdict;
+                        assert.equal(verdict.confirm, false);
+                      } catch {
+                        checkFailed = true;
+                      }
+                    }
+                    captured = true;
+                    await childHeld;
+                    return { status: 'succeeded' };
+                  }
+                  if (context.prompt === prompt) {
+                    await trust.pendingInstructions(context);
+                    await trust.captureInstructions(context, context.signal, () => true);
+                    task = (await context.task!({
+                      action: 'start',
+                      title,
+                      message: 'Checking the synthetic source.',
+                      doneWhen: 'The synthetic source is checked.',
+                      now: 'Check the synthetic source.',
+                    })) as Task;
+                    await creatorHeld;
+                    if (withdraw) throw new ModelRequestError('Synthetic creator source failure.');
+                    return { status: 'succeeded' };
+                  }
+                };
+                await db.pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+                  ownerId,
+                  rules,
+                ]);
+                const creator = await thread.submitUserMessage(prompt);
+                const ids = [creator.turnId, ...(previous ? [previous.turnId] : [])];
+                try {
+                  await waitFor(() => selecting && Boolean(child) && Boolean(task));
+                  ids.push(child!.turnId);
+                  const source = (
+                    await db.pool.query(
+                      "SELECT key,state,attempted,attempt_turn_id,source_revision FROM draft_authority_instructions WHERE owner_id=$1 AND task_id=$2 AND kind='rules'",
+                      [ownerId, task!.id],
+                    )
+                  ).rows[0];
+                  assert.ok(source);
+                  assert.equal(source.state, kind === 'capture' ? 'pending' : 'clear');
+                  assert.equal(source.attempted, true);
+                  assert.equal(source.attempt_turn_id, child!.turnId);
+                  assert.equal(child!.signal.aborted, false);
+                  assert.equal(await turnStatus(child!.turnId), 'running');
+                  if (withdraw) {
+                    if (previous)
+                      await transaction(async (client) => {
+                        await thread.lockThread(client);
+                        await thread.cancelTurns(client, creator.threadId, {
+                          sessionId: previous.taskId,
+                        });
+                      }, db.pool);
+                    else {
+                      releaseCreator();
+                      await waitFor(() =>
+                        turnStatus(creator.turnId).then((status) => status === 'failed'),
+                      );
+                    }
+                    assert.equal(
+                      (
+                        await db.pool.query('SELECT withdrawn FROM turns WHERE id=$1', [
+                          previous?.turnId ?? creator.turnId,
+                        ])
+                      ).rows[0].withdrawn,
+                      true,
+                    );
+                  } else if (mode === 'rollback') {
+                    const { transaction } = await import('../src/server/transaction.ts');
+                    await assert.rejects(
+                      transaction(async (client) => {
+                        await thread.cancelTurns(client, creator.threadId, {
+                          sessionId: creator.threadId,
+                        });
+                        throw new Error('Roll back the synthetic source withdrawal.');
+                      }, db.pool),
+                      /Roll back the synthetic source withdrawal/,
+                    );
+                    assert.equal(
+                      (
+                        await db.pool.query('SELECT withdrawn FROM turns WHERE id=$1', [
+                          creator.turnId,
+                        ])
+                      ).rows[0].withdrawn,
+                      false,
+                    );
+                  } else if (mode === 'later pointer') {
+                    const pointer = randomUUID();
+                    ids.push(pointer);
+                    await db.pool.query(
+                      "INSERT INTO turns(id,owner_id,thread_id,session_id,source,status,message_id,prompt,background) VALUES($1,$2,$3,$1,'task','running',$4,'Synthetic later source pointer.',true)",
+                      [pointer, ownerId, creator.threadId, creator.messageId],
+                    );
+                    const { transaction } = await import('../src/server/transaction.ts');
+                    await transaction(
+                      (client) =>
+                        thread.cancelTurns(client, creator.threadId, { sessionId: pointer }),
+                      db.pool,
+                    );
+                    assert.equal(
+                      (await db.pool.query('SELECT withdrawn FROM turns WHERE id=$1', [pointer]))
+                        .rows[0].withdrawn,
+                      true,
+                    );
+                    assert.equal(
+                      (
+                        await db.pool.query('SELECT withdrawn FROM turns WHERE id=$1', [
+                          creator.turnId,
+                        ])
+                      ).rows[0].withdrawn,
+                      false,
+                    );
+                  }
+                  releaseSelection();
+                  await waitFor(() => captured);
+                  assert.equal(child!.signal.aborted, false);
+                  assert.equal(await turnStatus(child!.turnId), 'running');
+                  assert.equal(requests.length, cancelled ? 0 : kind === 'capture' ? 1 : 2);
+                  if (mode === 'before registration') assert.equal(selectedSignal, undefined);
+                  else assert.equal(selectedSignal?.aborted, cancelled);
+                  if (kind !== 'capture') assert.equal(checkFailed, cancelled);
+                  if (!cancelled) assert.ok(JSON.stringify(requests).includes(prompt));
+                  if (previous && !cancelled) {
+                    for (const input of requests) {
+                      assert.equal(
+                        JSON.stringify(Object(input).userMessages).includes(previous.text),
+                        false,
+                      );
+                      assert.equal(
+                        JSON.stringify(Object(input).messageDrafts ?? []).includes(previous.text),
+                        false,
+                      );
+                      assert.ok(
+                        JSON.stringify(
+                          Object(input).instructionChange.previousInstructions,
+                        ).includes(previous.text),
+                      );
+                    }
+                  }
+                  const after = (
+                    await db.pool.query(
+                      'SELECT key,state,attempted,attempt_turn_id,source_revision FROM draft_authority_instructions WHERE key=$1',
+                      [source.key],
+                    )
+                  ).rows[0];
+                  assert.deepEqual(after, {
+                    ...source,
+                    state: cancelled && kind === 'capture' ? 'pending' : 'clear',
+                  });
+                  await trust.captureInstructions(child!, child!.signal, () => true);
+                  assert.equal(requests.length, cancelled ? 0 : kind === 'capture' ? 1 : 2);
+                  assert.deepEqual(
+                    (
+                      await db.pool.query(
+                        'SELECT key,state,attempted,attempt_turn_id,source_revision FROM draft_authority_instructions WHERE key=$1',
+                        [source.key],
+                      )
+                    ).rows[0],
+                    after,
+                  );
+                  if (previous && !cancelled) {
+                    assert.ok(checked);
+                    await transaction(async (client) => {
+                      await thread.lockThread(client);
+                      await thread.cancelTurns(client, creator.threadId, {
+                        sessionId: previous.taskId,
+                      });
+                    }, db.pool);
+                    assert.equal(child!.signal.aborted, false);
+                    assert.equal(selectedSignal?.aborted, false);
+                    await assert.rejects(
+                      thread.withDraftLock(child!, child!.signal, checked.validate, db.pool),
+                      /withdrawn or unavailable/,
+                    );
+                  }
+                } finally {
+                  releaseSelection();
+                  releaseCreator();
+                  releaseChild();
+                  await waitFor(settledThread);
+                  inspectObserver = previousObserver;
+                  if (child && !ids.includes(child.turnId)) ids.push(child.turnId);
+                  const keys = (
+                    await db.pool.query(
+                      'SELECT source_key FROM draft_authority_turns WHERE owner_id=$1 AND turn_id=ANY($2::uuid[])',
+                      [ownerId, ids],
+                    )
+                  ).rows
+                    .map(({ source_key }) => source_key)
+                    .filter((key) => !priorKeys.has(key));
+                  await db.pool.query(
+                    'DELETE FROM draft_authority_turns WHERE owner_id=$1 AND turn_id=ANY($2::uuid[])',
+                    [ownerId, ids],
+                  );
+                  await db.pool.query(
+                    'DELETE FROM draft_authority_instructions WHERE owner_id=$1 AND key=ANY($2::text[]) AND NOT EXISTS (SELECT 1 FROM draft_authority_turns p WHERE p.owner_id=$1 AND p.source_key=key)',
+                    [ownerId, keys],
+                  );
+                  await db.pool.query(
+                    'DELETE FROM chat_draft_instructions WHERE owner_id=$1 AND turn_id=ANY($2::uuid[])',
+                    [ownerId, ids],
+                  );
+                  for (const id of [task?.id, previous?.taskId].filter((id): id is string =>
+                    Boolean(id),
+                  )) {
+                    await db.pool.query(
+                      'UPDATE turns SET task_id=NULL WHERE owner_id=$1 AND task_id=$2',
+                      [ownerId, id],
+                    );
+                    await db.pool.query('DELETE FROM tasks WHERE owner_id=$1 AND id=$2', [
+                      ownerId,
+                      id,
+                    ]);
+                  }
+                  await db.pool.query(
+                    'DELETE FROM messages WHERE owner_id=$1 AND turn_id=ANY($2::uuid[])',
+                    [ownerId, ids],
+                  );
+                  await db.pool.query('DELETE FROM turn_events WHERE turn_id=ANY($1::uuid[])', [
+                    ids,
+                  ]);
+                  await db.pool.query(
+                    'DELETE FROM turns WHERE owner_id=$1 AND id=ANY($2::uuid[])',
+                    [ownerId, ids],
+                  );
+                  for (let index = runs.length - 1; index >= 0; index--)
+                    if (ids.includes(runs[index]!.turnId)) runs.splice(index, 1);
+                  for (const id of ids) analyticsRuns.delete(id);
+                  await db.pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+                    ownerId,
+                    priorRules,
+                  ]);
+                  const priorField = priorFields.find(({ kind }) => kind === 'rules');
+                  if (priorField)
+                    await db.pool.query(
+                      "UPDATE draft_owner_field_versions SET versions=$2 WHERE owner_id=$1 AND kind='rules'",
+                      [ownerId, JSON.stringify(priorField.versions)],
+                    );
+                  else
+                    await db.pool.query(
+                      "DELETE FROM draft_owner_field_versions f WHERE owner_id=$1 AND kind='rules' AND NOT EXISTS (SELECT 1 FROM draft_authority_instructions d WHERE d.owner_id=f.owner_id AND d.kind=f.kind)",
+                      [ownerId],
+                    );
+                }
+              });
+        } finally {
+          await transaction(async (client) => {
+            await thread.lockThread(client);
+            await client.query('UPDATE threads SET archived_at=now() WHERE id=$1 AND owner_id=$2', [
+              sourceThread.id,
+              ownerId,
+            ]);
+            await client.query('UPDATE threads SET archived_at=NULL WHERE id=$1 AND owner_id=$2', [
+              previousThread,
+              ownerId,
+            ]);
+            await client.query('DELETE FROM threads WHERE id=$1 AND owner_id=$2', [
+              sourceThread.id,
+              ownerId,
+            ]);
+          }, db.pool);
+        }
+      });
 
       await t.test('web paste keeps model text separate from display Markdown', async () => {
         const text = [

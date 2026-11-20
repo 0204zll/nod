@@ -16,7 +16,7 @@ import {
 } from '../shared/answer-choices.ts';
 import { logFailure } from './failure-log.ts';
 import { cancelTurnOperations } from './turn-cancellation.ts';
-import { pendingChatDraftInstructions } from './chat-draft-instructions.ts';
+import { pendingChatDraftInstructions, draftSourceTurnIds } from './chat-draft-instructions.ts';
 import { modelFailureReason, modelQuotaFailure } from '../shared/model-quota.ts';
 import { appPages } from '../shared/app-links.ts';
 import { pendingAnswerChoicesSql } from './answer-choices.ts';
@@ -972,7 +972,7 @@ export async function submitUserMessage(
 
 async function withdraw(client: PoolClient, turnIds: string[], wholeRequest: boolean) {
   if (!turnIds.length) return;
-  await client.query(
+  const withdrawn = await client.query<{ id: string; message_id: string | null }>(
     `WITH RECURSIVE line(id,parent,session_id,start) AS (
        SELECT id,parent_turn_id,session_id,id FROM turns WHERE owner_id=$2 AND id=ANY($1::uuid[])
        UNION
@@ -980,9 +980,28 @@ async function withdraw(client: PoolClient, turnIds: string[], wholeRequest: boo
        JOIN turns p ON $3 AND p.id=l.parent AND p.owner_id=$2 AND p.session_id=l.session_id)
      UPDATE turns t SET withdrawn=true FROM line l
      WHERE t.id=l.id AND EXISTS(SELECT 1 FROM line said JOIN turns c ON c.id=said.id WHERE said.start=l.start
-       AND (c.message_id IS NOT NULL OR EXISTS(SELECT 1 FROM messages m WHERE m.owner_id=c.owner_id AND m.turn_id=c.id AND m.role='user')))`,
+       AND (c.message_id IS NOT NULL OR EXISTS(SELECT 1 FROM messages m WHERE m.owner_id=c.owner_id AND m.turn_id=c.id AND m.role='user')))
+     RETURNING t.id,t.message_id`,
     [turnIds, ownerId, wholeRequest],
   );
+  const ids = withdrawn.rows.map(({ id }) => id);
+  cancelTurnOperations(ids);
+  const messages = await client.query<{ id: string }>(
+    'SELECT id FROM messages WHERE owner_id=$1 AND (turn_id=ANY($2::uuid[]) OR id=ANY($3::uuid[]))',
+    [ownerId, ids, withdrawn.rows.flatMap(({ message_id }) => (message_id ? [message_id] : []))],
+  );
+  const sources = [
+    ...new Set([
+      ...ids,
+      ...(await draftSourceTurnIds(
+        client,
+        ownerId,
+        messages.rows.map(({ id }) => id),
+      )),
+    ]),
+  ];
+  cancelTurnOperations(sources);
+  afterCommit(client, () => cancelTurnOperations(sources));
 }
 
 export async function cancelTurns(

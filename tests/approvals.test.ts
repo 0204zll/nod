@@ -2663,7 +2663,9 @@ test(
           assert.deepEqual(authority.payload.bindings, []);
           assert.deepEqual(authority.payload.data, {
             field: authority.kind === 'rules' ? 'rules' : 'notification_rule',
+            version: 1,
             versions: [{ value: '' }],
+            everNonEmpty: false,
           });
           assert.match(authority.source_revision, /^[a-f0-9]{64}$/);
           assert.match(authority.policy_revision, /^[a-f0-9]{64}$/);

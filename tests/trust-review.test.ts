@@ -16,6 +16,50 @@ const input = {
   action: { name: 'GMAIL_SEND_EMAIL', arguments: { body: 'Synthetic edited message.' } },
 };
 
+test('source cancellation during model selection prevents every review request', async (t) => {
+  for (const question of [
+    undefined,
+    { name: 'messageCondition', choices: [{ value: 'clear', description: 'No condition.' }] },
+    { name: 'retiredReply', choices: [{ value: 'stale', description: 'No new request.' }] },
+  ])
+    await t.test(question?.name ?? 'action', async () => {
+      const controller = new AbortController();
+      let release!: () => void;
+      let entered!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const selecting = new Promise<void>((resolve) => (entered = resolve));
+      let requests = 0;
+      const selected: ModelReview = async () => {
+        requests++;
+        return { run: true, because: input.userMessages[1].text };
+      };
+      const review: ModelReview = async () => assert.fail('Use the selected model.');
+      review.select = async () => {
+        entered();
+        await held;
+        return selected;
+      };
+      const pending = createTrustReview({ review })(
+        'Synthetic policy.',
+        input,
+        controller.signal,
+        question,
+      );
+      const settled = assert.rejects(
+        pending,
+        (error: unknown) => (error as Error).name === 'AbortError',
+      );
+      try {
+        await selecting;
+        controller.abort();
+      } finally {
+        release();
+      }
+      await settled;
+      assert.equal(requests, 0);
+    });
+});
+
 test('a review restriction can block a grant but cannot grant an action', async (t) => {
   for (const restriction of [
     undefined,

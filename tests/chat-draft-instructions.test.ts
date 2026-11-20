@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg, { type PoolClient } from 'pg';
+import { createTrustReview } from '../src/server/trust-review.ts';
 import {
   initializeChatDraftInstructions,
   pendingChatDraftInstructions,
@@ -16,6 +17,7 @@ import {
   linkedDraftSources,
   captureDraftConditionContext,
   eligibleChatDraftInputIds,
+  draftSourceTurnIds,
 } from '../src/server/chat-draft-instructions.ts';
 import {
   initializeDraftAuthorityInstructions,
@@ -145,6 +147,34 @@ test(
       assert.ok(key);
       return { message, payload, turn, key };
     };
+
+    await t.test('source bindings include absorbed pointers and exclude other owners', async () => {
+      const f = await fixture();
+      const original = await f.add('Show the synthetic source before sending.');
+      const active = await f.add(
+        'Read the synthetic additional context.',
+        '2026-11-19T10:01:00.000Z',
+      );
+      const queued = randomUUID();
+      const foreign = randomUUID();
+      for (const [id, owner] of [
+        [queued, f.ownerId],
+        [foreign, randomUUID()],
+      ])
+        await database.query(
+          'INSERT INTO turns(id,owner_id,thread_id,message_id,created_at) VALUES($1,$2,$3,$4,now())',
+          [id, owner, f.threadId, original.id],
+        );
+      await database.query('UPDATE messages SET turn_id=$2 WHERE id=$1', [
+        original.id,
+        active.turnId,
+      ]);
+      assert.deepEqual(
+        await draftSourceTurnIds(database, f.ownerId, [original.id, original.id]),
+        [original.turnId, active.turnId, queued].sort(),
+      );
+      assert.deepEqual(await draftSourceTurnIds(database, randomUUID(), [original.id]), []);
+    });
 
     await t.test(
       'unchanged saved authority reuses one completed capture across automatic turns',
@@ -877,6 +907,58 @@ test(
       },
     );
 
+    const fieldVersion = async (
+      f: Awaited<ReturnType<typeof fixture>>,
+      value: string,
+      options: {
+        threadId?: string;
+        taskId?: string;
+        message?: Awaited<ReturnType<typeof f.add>>;
+      } = {},
+    ) => {
+      const threadId = options.threadId ?? f.threadId;
+      const taskId = options.taskId ?? null;
+      const context = await captureDraftConditionContext(
+        database,
+        f.ownerId,
+        threadId,
+        taskId,
+        '1',
+      );
+      const data = await draftOwnerField(database, f.ownerId, 'rules', value);
+      const turn = { threadId, turnId: randomUUID() };
+      const [key] = await pendingDraftAuthorityInstructions(
+        database,
+        f.ownerId,
+        turn,
+        taskId,
+        [
+          {
+            kind: 'rules',
+            scope: 'rules',
+            data,
+            evidence: { messages: options.message ? [options.message] : [] },
+            sourceIds: options.message ? [options.message.id] : [],
+            bindings: [],
+            context: [
+              ...context.input,
+              {
+                kind: 'active',
+                ownerData: [{ kind: 'rules', ownerData: data, canAuthorize: false }],
+                unavailable: false,
+              },
+            ],
+            conditionSources: context.conditions,
+          },
+        ],
+        '1',
+      );
+      assert.ok(key);
+      const capture = await prepareDraftAuthorityCapture(database, f.ownerId, key, turn.turnId);
+      assert.ok(capture);
+      return { key, turn, data, capture };
+    };
+
     await t.test(
       'field replacements preserve A to B to A and a later empty replacement',
       async () => {
@@ -889,38 +971,14 @@ test(
         ];
         const keys = [];
         for (const [index, value] of values.entries()) {
-          const data = await draftOwnerField(database, f.ownerId, 'rules', value);
-          const turn = { threadId: f.threadId, turnId: randomUUID() };
-          const [key] = await pendingDraftAuthorityInstructions(
-            database,
-            f.ownerId,
-            turn,
-            null,
-            [
-              {
-                kind: 'rules',
-                scope: 'rules',
-                data,
-                evidence: { messages: [] },
-                sourceIds: [],
-                context: [],
-                bindings: [],
-              },
-            ],
-            '1',
-          );
-          assert.ok(key);
+          const { data, key, capture: captured } = await fieldVersion(f, value);
           keys.push(key);
-          const captured = await prepareDraftAuthorityCapture(
-            database,
-            f.ownerId,
-            key,
-            turn.turnId,
-          );
-          assert.ok(captured?.complete);
+          assert.ok(captured.complete);
+          assert.equal(data.version, index + 1);
+          assert.equal(data.everNonEmpty, true);
           assert.deepEqual(
             data.versions.map((version) => version.value),
-            values.slice(0, index + 1),
+            [value],
           );
           assert.deepEqual(captured.input.newMessages[0].ownerData, data);
           await finishDraftAuthorityCapture(database, f.ownerId, captured, 'relevant');
@@ -936,13 +994,313 @@ test(
         assert.equal(sources.length, values.length);
         assert.ok(sources.every((source) => !source.unavailable));
         assert.deepEqual(
-          Object(sources.at(-1)!.target.ownerData).versions.map(
-            (version: { value: string }) => version.value,
-          ),
-          values,
+          sources.map((source) => Object(source.target.ownerData).version),
+          [1, 2, 3, 4],
+        );
+        assert.deepEqual(
+          (
+            await database.query(
+              'SELECT versions FROM draft_owner_field_versions WHERE owner_id=$1',
+              [f.ownerId],
+            )
+          ).rows[0].versions,
+          values.map((value) => ({ value })),
+        );
+        const neutral = await fieldVersion(f, 'Read the small synthetic report.');
+        assert.ok(neutral.capture.complete);
+        assert.ok(JSON.stringify(neutral.capture.input.inheritedConditions).includes(values[0]!));
+        await finishDraftAuthorityCapture(database, f.ownerId, neutral.capture, 'clear');
+        assert.deepEqual(
+          await retainedDraftAuthorityInstructions(database, f.ownerId, f.threadId, null, '1'),
+          sources,
         );
       },
     );
+
+    await t.test('clear field edits do not repeat the full archive in each capture', async () => {
+      const f = await fixture();
+      let firstKey = '';
+      let firstPayload = '';
+      let bytes = 0;
+      const values: string[] = [];
+      for (let index = 0; index < 80; index++) {
+        const value = `Synthetic neutral field ${index}. ${'Read the saved synthetic report. '.repeat(36)}`;
+        values.push(value);
+        bytes += Buffer.byteLength(value);
+        const current = await fieldVersion(f, value);
+        assert.ok(current.capture.complete);
+        assert.ok(Buffer.byteLength(JSON.stringify(current.capture.input)) < 64_000);
+        await finishDraftAuthorityCapture(database, f.ownerId, current.capture, 'clear');
+        if (!index) {
+          firstKey = current.key;
+          firstPayload = JSON.stringify(
+            (
+              await database.query(
+                'SELECT payload FROM draft_authority_instructions WHERE key=$1',
+                [firstKey],
+              )
+            ).rows[0].payload,
+          );
+        }
+      }
+      assert.ok(bytes > 64_000);
+      const final = await fieldVersion(f, 'Read the small synthetic report.');
+      assert.ok(final.capture.complete);
+      assert.ok(Buffer.byteLength(JSON.stringify(final.capture.input)) < 5000);
+      await finishDraftAuthorityCapture(database, f.ownerId, final.capture, 'clear');
+      assert.equal(
+        JSON.stringify(
+          (
+            await database.query('SELECT payload FROM draft_authority_instructions WHERE key=$1', [
+              firstKey,
+            ])
+          ).rows[0].payload,
+        ),
+        firstPayload,
+      );
+      const archive = (
+        await database.query('SELECT versions FROM draft_owner_field_versions WHERE owner_id=$1', [
+          f.ownerId,
+        ])
+      ).rows[0].versions;
+      assert.deepEqual(
+        archive.slice(0, values.length),
+        values.map((value) => ({ value })),
+      );
+      assert.equal(
+        (await retainedDraftAuthorityInstructions(database, f.ownerId, f.threadId, null, '1'))
+          .length,
+        0,
+      );
+    });
+
+    await t.test(
+      'a legacy field prefix keeps its exact payload and covers its archive',
+      async () => {
+        const f = await fixture();
+        const values = ['Read synthetic report A.', 'Read synthetic report B.'];
+        for (const value of values) await draftOwnerField(database, f.ownerId, 'rules', value);
+        const turn = { threadId: f.threadId, turnId: randomUUID() };
+        const [key] = await pendingDraftAuthorityInstructions(
+          database,
+          f.ownerId,
+          turn,
+          null,
+          [
+            {
+              kind: 'rules',
+              scope: 'rules',
+              data: {
+                field: 'rules',
+                versions: values.map((value) => ({ value })),
+              },
+              evidence: { messages: [] },
+              sourceIds: [],
+              context: [],
+              bindings: [],
+            },
+          ],
+          '1',
+        );
+        const old = await prepareDraftAuthorityCapture(database, f.ownerId, key!, turn.turnId);
+        assert.ok(old?.complete);
+        await finishDraftAuthorityCapture(database, f.ownerId, old, 'clear');
+        const before = JSON.stringify(
+          (
+            await database.query('SELECT payload FROM draft_authority_instructions WHERE key=$1', [
+              key,
+            ])
+          ).rows[0].payload,
+        );
+        const current = await fieldVersion(f, 'Read synthetic report C.');
+        assert.ok(current.capture.complete);
+        assert.equal(
+          JSON.stringify(
+            (
+              await database.query(
+                'SELECT payload FROM draft_authority_instructions WHERE key=$1',
+                [key],
+              )
+            ).rows[0].payload,
+          ),
+          before,
+        );
+      },
+    );
+
+    for (const mode of ['missing', 'wrong prefix', 'wrong ordinal'] as const)
+      await t.test(`a ${mode} field root cannot erase an archive gap`, async () => {
+        const f = await fixture();
+        const prior = 'Show the synthetic archived draft before sending.';
+        await draftOwnerField(database, f.ownerId, 'rules', prior);
+        if (mode !== 'missing') {
+          const turn = { threadId: f.threadId, turnId: randomUUID() };
+          await pendingDraftAuthorityInstructions(
+            database,
+            f.ownerId,
+            turn,
+            null,
+            [
+              {
+                kind: 'rules',
+                scope: 'rules',
+                data: {
+                  field: 'rules',
+                  ...(mode === 'wrong ordinal' ? { version: 2 } : {}),
+                  versions: [{ value: 'A different synthetic field.' }],
+                },
+                evidence: { messages: [] },
+                sourceIds: [],
+                context: [],
+                bindings: [],
+              },
+            ],
+            '1',
+          );
+        }
+        const current = await fieldVersion(f, 'Read the small synthetic report.');
+        assert.equal(current.capture.complete, false);
+        assert.equal(
+          (
+            await database.query(
+              'SELECT state,attempted FROM draft_authority_instructions WHERE key=$1',
+              [current.key],
+            )
+          ).rows[0].attempted,
+          false,
+        );
+        const retained = await retainedDraftAuthorityInstructions(
+          database,
+          f.ownerId,
+          f.threadId,
+          null,
+          '1',
+        );
+        assert.ok(
+          retained.some((source) => source.unavailable && source.target.history === 'unavailable'),
+        );
+        assert.ok(!JSON.stringify(current.capture.input).includes(prior));
+      });
+
+    for (const boundary of ['conversation', 'task'] as const)
+      await t.test(
+        `field roots keep a fence across a ${boundary} boundary without old words`,
+        async () => {
+          const f = await fixture();
+          const message = await f.add('Synthetic private field context sentinel.');
+          const original = await fieldVersion(
+            f,
+            'Show the synthetic private field draft sentinel before sending.',
+            { message },
+          );
+          assert.ok(original.capture.complete);
+          await finishDraftAuthorityCapture(database, f.ownerId, original.capture, 'relevant');
+          const threadId = boundary === 'conversation' ? randomUUID() : f.threadId;
+          const taskId = boundary === 'task' ? randomUUID() : undefined;
+          if (boundary === 'conversation')
+            await database.query('INSERT INTO threads(id) VALUES($1)', [threadId]);
+          if (taskId)
+            await database.query(
+              'INSERT INTO tasks(id,owner_id,title,created_at) VALUES($1,$2,$3,$4)',
+              [taskId, f.ownerId, 'Synthetic task', '2026-11-18T10:00:00Z'],
+            );
+          const current = await fieldVersion(f, 'Read the small synthetic report.', {
+            threadId,
+            taskId,
+          });
+          assert.equal(current.capture.complete, false);
+          assert.ok(!JSON.stringify(current.capture.input).includes('sentinel'));
+          const retained = await retainedDraftAuthorityInstructions(
+            database,
+            f.ownerId,
+            threadId,
+            taskId ?? null,
+            '1',
+          );
+          assert.ok(
+            retained.some((source) => source.unavailable && source.target.scope === 'other_work'),
+          );
+          assert.ok(!JSON.stringify(retained).includes('sentinel'));
+        },
+      );
+
+    for (const mode of ['withdrawn', 'deleted root', 'policy'] as const)
+      await t.test(
+        `an older clear field that becomes ${mode} stays fenced outside its scope`,
+        async () => {
+          const f = await fixture();
+          const message = await f.add('Synthetic old clear field context sentinel.');
+          const original = await fieldVersion(f, 'Read the synthetic old field sentinel.', {
+            message,
+          });
+          await finishDraftAuthorityCapture(database, f.ownerId, original.capture, 'clear');
+          const threadId = randomUUID();
+          await database.query('INSERT INTO threads(id) VALUES($1)', [threadId]);
+          const current = await fieldVersion(f, 'Read the small synthetic report.', { threadId });
+          assert.ok(current.capture.complete);
+          await finishDraftAuthorityCapture(database, f.ownerId, current.capture, 'clear');
+          if (mode === 'withdrawn')
+            await database.query('UPDATE turns SET withdrawn=true WHERE id=$1', [message.turnId]);
+          if (mode === 'deleted root')
+            await database.query('DELETE FROM draft_authority_instructions WHERE key=$1', [
+              original.key,
+            ]);
+          const policy = mode === 'policy' ? '2' : '1';
+          const retained = await retainedDraftAuthorityInstructions(
+            database,
+            f.ownerId,
+            threadId,
+            null,
+            policy,
+          );
+          assert.ok(retained.some((source) => source.unavailable));
+          assert.ok(!JSON.stringify(retained).includes('sentinel'));
+          const context = await captureDraftConditionContext(
+            database,
+            f.ownerId,
+            threadId,
+            null,
+            policy,
+          );
+          assert.equal(context.complete, false);
+          assert.ok(!JSON.stringify(context.input).includes('sentinel'));
+        },
+      );
+
+    await t.test('a new small field does not replay an interrupted earlier capture', async () => {
+      const f = await fixture();
+      const original = await fieldVersion(f, 'Show the synthetic draft before sending.');
+      assert.ok(original.capture.complete);
+      const before = (
+        await database.query(
+          'SELECT attempted,attempt_turn_id,payload FROM draft_authority_instructions WHERE key=$1',
+          [original.key],
+        )
+      ).rows[0];
+      const current = await fieldVersion(f, 'Read the small synthetic report.');
+      assert.equal(current.capture.complete, false);
+      assert.equal(
+        await prepareDraftAuthorityCapture(database, f.ownerId, original.key, randomUUID()),
+        undefined,
+      );
+      assert.deepEqual(
+        (
+          await database.query(
+            'SELECT attempted,attempt_turn_id,payload FROM draft_authority_instructions WHERE key=$1',
+            [original.key],
+          )
+        ).rows[0],
+        before,
+      );
+      const retained = await retainedDraftAuthorityInstructions(
+        database,
+        f.ownerId,
+        f.threadId,
+        null,
+        '1',
+      );
+      assert.ok(retained.some((source) => source.unavailable));
+    });
 
     for (const active of [false, true]) {
       for (const approved of [false, true]) {
@@ -1686,8 +2044,6 @@ test(
           ),
           [],
         );
-        await initializeChatDraftInstructions(database);
-        assert.equal(await f.row(tapped.id), undefined);
         await database.query(
           "INSERT INTO chat_draft_instructions(message_id,owner_id,thread_id,turn_id,input_at,source_ids,state,revision,policy_revision) VALUES($1,$2,$3,$4,$5,ARRAY[$1::uuid],'relevant','legacy','1')",
           [tapped.id, f.ownerId, f.threadId, tapped.turnId, tapped.at],
@@ -1895,10 +2251,95 @@ test(
       assert.ok(!JSON.stringify(await f.retained()).includes(reply.text));
     });
 
+    await t.test('records survive a database reconnect and stay owner-scoped', async () => {
+      const f = await fixture();
+      const message = await f.add('Show the durable synthetic draft before sending.');
+      await f.capture(message, 'relevant');
+      const before = await f.row(message.id);
+      await database.end();
+      database = new pg.Pool({ connectionString: url.href });
+      assert.deepEqual(await f.row(message.id), before);
+      assert.equal((await f.retained())[0].unavailable, false);
+      assert.deepEqual(
+        await retainedChatDraftInstructions(database, randomUUID(), f.threadId, null),
+        [],
+      );
+    });
+  },
+);
+
+test(
+  'legacy chat source initialization is atomic and runs once',
+  { skip: !process.env.TEST_DATABASE_URL },
+  async (t) => {
+    const legacyFixture = async (t: TestContext) => {
+      const schema = `chat_startup_${randomUUID().replaceAll('-', '')}`;
+      const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
+      const url = new URL(process.env.TEST_DATABASE_URL!);
+      url.searchParams.set('options', `-c search_path=${schema}`);
+      const database = new pg.Pool({ connectionString: url.href });
+      let created = false;
+      t.after(async () => {
+        await database.end();
+        if (created) {
+          await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+          assert.equal(
+            (
+              await admin.query(
+                'SELECT count(*)::int AS count FROM pg_namespace WHERE nspname=$1',
+                [schema],
+              )
+            ).rows[0].count,
+            0,
+          );
+        }
+        await admin.end();
+      });
+      await admin.query(`CREATE SCHEMA ${schema}`);
+      created = true;
+      await database.query(`
+        CREATE TABLE threads(id uuid PRIMARY KEY);
+        CREATE TABLE turns(id uuid PRIMARY KEY,owner_id text NOT NULL,thread_id uuid NOT NULL,
+          message_id uuid,source text NOT NULL DEFAULT 'user',created_at timestamptz NOT NULL,
+          task_id uuid,parent_turn_id uuid,channel text NOT NULL DEFAULT 'web',withdrawn boolean NOT NULL DEFAULT false);
+        CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text NOT NULL,thread_id uuid NOT NULL,
+          turn_id uuid,role text NOT NULL,text text NOT NULL,created_at timestamptz NOT NULL,
+          hidden_at timestamptz,approval_answer boolean,presentation jsonb,suggestions jsonb,reply_to_message_id uuid);
+        CREATE TABLE tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,title text NOT NULL,created_at timestamptz NOT NULL);
+      `);
+      await initializeDraftAuthorityInstructions(database);
+      const ownerId = randomUUID();
+      const threadId = randomUUID();
+      await database.query('INSERT INTO threads(id) VALUES($1)', [threadId]);
+      const add = async (
+        text: string,
+        at = '2026-11-19T10:00:00.000Z',
+        turnId = randomUUID(),
+        role = 'user',
+      ) => {
+        const id = randomUUID();
+        await database.query(
+          'INSERT INTO turns(id,owner_id,thread_id,message_id,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING',
+          [turnId, ownerId, threadId, role === 'user' ? id : null, at],
+        );
+        await database.query(
+          'INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)',
+          [id, ownerId, threadId, turnId, role, text, at],
+        );
+        return { id, turnId, text, at };
+      };
+      const row = async (id: string) =>
+        (await database.query('SELECT * FROM chat_draft_instructions WHERE message_id=$1', [id]))
+          .rows[0];
+      const retained = (taskId: string | null = null) =>
+        retainedChatDraftInstructions(database, ownerId, threadId, taskId);
+      return { database, ownerId, threadId, add, row, retained };
+    };
     await t.test(
       'legacy backfill keeps the first main input scope after a child reference',
-      async () => {
-        const f = await fixture();
+      async (t) => {
+        const f = await legacyFixture(t);
+        const { database } = f;
         const original = await f.add(
           'Show the synthetic legacy report before sending.',
           '2026-11-19T09:58:00.000Z',
@@ -1932,49 +2373,54 @@ test(
       },
     );
 
-    await t.test('legacy backfill keeps a queued reply with its first accepting task', async () => {
-      const f = await fixture();
-      const original = await f.add(
-        'Prepare the synthetic parent report.',
-        '2026-11-19T09:58:00.000Z',
-      );
-      const reply = await f.add(
-        'Show the synthetic task report before sending.',
-        '2026-11-19T10:02:00.000Z',
-        original.turnId,
-      );
-      const tasks = [randomUUID(), randomUUID()];
-      const turns = [randomUUID(), randomUUID()];
-      for (const [index, taskId] of tasks.entries()) {
-        await database.query(
-          'INSERT INTO tasks(id,owner_id,title,created_at) VALUES($1,$2,$3,$4)',
-          [taskId, f.ownerId, `Synthetic accepting task ${index}.`, '2026-11-19T10:00:00.000Z'],
+    await t.test(
+      'legacy backfill keeps a queued reply with its first accepting task',
+      async (t) => {
+        const f = await legacyFixture(t);
+        const { database } = f;
+        const original = await f.add(
+          'Prepare the synthetic parent report.',
+          '2026-11-19T09:58:00.000Z',
         );
-        await database.query(
-          "INSERT INTO turns(id,owner_id,thread_id,message_id,source,created_at,task_id,parent_turn_id) VALUES($1,$2,$3,$4,'task',$5,$6,$7)",
-          [
-            turns[index],
-            f.ownerId,
-            f.threadId,
-            reply.id,
-            `2026-11-19T10:0${index + 2}:00.000Z`,
-            taskId,
-            original.turnId,
-          ],
+        const reply = await f.add(
+          'Show the synthetic task report before sending.',
+          '2026-11-19T10:02:00.000Z',
+          original.turnId,
         );
-      }
-      await initializeChatDraftInstructions(database);
-      const row = await f.row(reply.id);
-      assert.equal(row.turn_id, turns[0]);
-      assert.equal(row.task_id, tasks[0]);
-      const main = await f.retained();
-      assert.ok(!JSON.stringify(main).includes(reply.text));
-      const task = await f.retained(tasks[0]);
-      assert.ok(JSON.stringify(task).includes(reply.text));
-    });
+        const tasks = [randomUUID(), randomUUID()];
+        const turns = [randomUUID(), randomUUID()];
+        for (const [index, taskId] of tasks.entries()) {
+          await database.query(
+            'INSERT INTO tasks(id,owner_id,title,created_at) VALUES($1,$2,$3,$4)',
+            [taskId, f.ownerId, `Synthetic accepting task ${index}.`, '2026-11-19T10:00:00.000Z'],
+          );
+          await database.query(
+            "INSERT INTO turns(id,owner_id,thread_id,message_id,source,created_at,task_id,parent_turn_id) VALUES($1,$2,$3,$4,'task',$5,$6,$7)",
+            [
+              turns[index],
+              f.ownerId,
+              f.threadId,
+              reply.id,
+              `2026-11-19T10:0${index + 2}:00.000Z`,
+              taskId,
+              original.turnId,
+            ],
+          );
+        }
+        await initializeChatDraftInstructions(database);
+        const row = await f.row(reply.id);
+        assert.equal(row.turn_id, turns[0]);
+        assert.equal(row.task_id, tasks[0]);
+        const main = await f.retained();
+        assert.ok(!JSON.stringify(main).includes(reply.text));
+        const task = await f.retained(tasks[0]);
+        assert.ok(JSON.stringify(task).includes(reply.text));
+      },
+    );
 
-    await t.test('legacy backfill preserves a missing message as pending', async () => {
-      const f = await fixture();
+    await t.test('legacy backfill preserves a missing message as pending', async (t) => {
+      const f = await legacyFixture(t);
+      const { database } = f;
       const message = await f.add('Synthetic legacy condition.');
       await database.query('DELETE FROM messages WHERE id=$1', [message.id]);
       await initializeChatDraftInstructions(database);
@@ -1984,20 +2430,137 @@ test(
       assert.equal((await f.retained())[0].unavailable, true);
     });
 
-    await t.test('records survive a database reconnect and stay owner-scoped', async () => {
-      const f = await fixture();
-      const message = await f.add('Show the durable synthetic draft before sending.');
-      await f.capture(message, 'relevant');
-      const before = await f.row(message.id);
-      await database.end();
-      database = new pg.Pool({ connectionString: url.href });
-      assert.deepEqual(await f.row(message.id), before);
-      assert.equal((await f.retained())[0].unavailable, false);
-      assert.deepEqual(
-        await retainedChatDraftInstructions(database, randomUUID(), f.threadId, null),
-        [],
+    await t.test('a second startup does not read legacy relations', async (t) => {
+      const f = await legacyFixture(t);
+      const message = await f.add('Show the synthetic startup draft before sending.');
+      await initializeChatDraftInstructions(f.database);
+      const saved = await f.row(message.id);
+      await f.database.query('ALTER TABLE turns RENAME TO saved_legacy_turns');
+      await initializeChatDraftInstructions(f.database);
+      assert.deepEqual(await f.row(message.id), saved);
+    });
+
+    await t.test('a failed first backfill rolls back creation and can start again', async (t) => {
+      const f = await legacyFixture(t);
+      const message = await f.add('Show the synthetic failed-start draft before sending.');
+      await f.database.query('UPDATE turns SET thread_id=$2 WHERE id=$1', [
+        message.turnId,
+        randomUUID(),
+      ]);
+      await assert.rejects(initializeChatDraftInstructions(f.database), { code: '23503' });
+      assert.equal(
+        (await f.database.query("SELECT to_regclass('chat_draft_instructions') AS source")).rows[0]
+          .source,
+        null,
+      );
+      await f.database.query('UPDATE turns SET thread_id=$2 WHERE id=$1', [
+        message.turnId,
+        f.threadId,
+      ]);
+      await initializeChatDraftInstructions(f.database);
+      assert.equal((await f.row(message.id)).state, 'pending');
+    });
+
+    await t.test('two first initializers keep one complete legacy backfill', async (t) => {
+      const f = await legacyFixture(t);
+      const message = await f.add('Show the synthetic concurrent-start draft before sending.');
+      await Promise.all([
+        initializeChatDraftInstructions(f.database),
+        initializeChatDraftInstructions(f.database),
+      ]);
+      assert.equal((await f.row(message.id)).state, 'pending');
+      assert.equal(
+        (await f.database.query('SELECT count(*)::int AS count FROM chat_draft_instructions'))
+          .rows[0].count,
+        1,
       );
     });
+
+    for (const title of [
+      'Prepare the synthetic draft and show it before sending.',
+      'Send the synthetic draft without another review.',
+    ]) {
+      await t.test(`legacy task title is not an owner source: ${title}`, async (t) => {
+        const f = await legacyFixture(t);
+        const original = await f.add(
+          'Show the original synthetic draft before sending.',
+          '2026-11-19T09:58:00.000Z',
+        );
+        const offer = await f.add(
+          'Choose a synthetic task.',
+          '2026-11-19T09:59:00.000Z',
+          randomUUID(),
+          'assistant',
+        );
+        await f.database.query('UPDATE messages SET suggestions=$2 WHERE id=$1', [
+          offer.id,
+          { tasks: [{ title }] },
+        ]);
+        const tapped = await f.add(title);
+        await initializeChatDraftInstructions(f.database);
+        assert.equal(await f.row(tapped.id), undefined);
+        assert.equal((await f.row(original.id)).state, 'pending');
+      });
+    }
+
+    for (const mode of ['hidden', 'withdrawn', 'missing'] as const) {
+      await t.test(`legacy ${mode} source keeps its fence without private words`, async (t) => {
+        const f = await legacyFixture(t);
+        const message = await f.add('Show the PRIVATE_SYNTHETIC_STARTUP_DRAFT before sending.');
+        if (mode === 'hidden')
+          await f.database.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [message.id]);
+        if (mode === 'withdrawn')
+          await f.database.query('UPDATE turns SET withdrawn=true WHERE id=$1', [message.turnId]);
+        if (mode === 'missing')
+          await f.database.query('DELETE FROM messages WHERE id=$1', [message.id]);
+        await initializeChatDraftInstructions(f.database);
+        assert.equal((await f.row(message.id)).state, 'pending');
+        const sources = await f.retained();
+        assert.equal(sources.length, 1);
+        assert.equal(sources[0].unavailable, true);
+        assert.deepEqual(sources[0].messages, []);
+        const captured = await prepareChatDraftCapture(f.database, f.ownerId, message.id, {
+          messages: [],
+        });
+        assert.equal(captured?.complete, false);
+        assert.equal(
+          JSON.stringify(captured?.input).includes('PRIVATE_SYNTHETIC_STARTUP_DRAFT'),
+          false,
+        );
+        const inputs: object[] = [];
+        const review = createTrustReview({
+          review: async (_instructions, input) => {
+            inputs.push(input);
+            return Object(input).purpose === 'review_requirement'
+              ? { review: 'clear' }
+              : { run: true, because: 'Send the synthetic report.' };
+          },
+        });
+        const result = await review('Check the synthetic send.', {
+          userMessages: [
+            {
+              at: '2026-11-19T10:01:00.000Z',
+              text: 'Send the synthetic report.',
+              canAuthorize: true,
+            },
+          ],
+          messageDrafts: sources,
+          action: {
+            name: 'GMAIL_SEND_EMAIL',
+            arguments: {
+              recipient_email: 'fixture@example.test',
+              subject: 'Synthetic report',
+              body: 'Synthetic body.',
+            },
+          },
+        });
+        assert.equal(Object(result).run, false);
+        assert.equal(Object(result).reviewRequired, true);
+        assert.equal(Object(result).reviewUnavailable, true);
+        assert.equal(inputs.length, 2);
+        assert.equal(JSON.stringify(inputs).includes('PRIVATE_SYNTHETIC_STARTUP_DRAFT'), false);
+      });
+    }
   },
 );
 

@@ -1,18 +1,23 @@
 const operations = new Map<string, Set<AbortController>>();
 
 export async function withTurnCancellation<T>(
-  turnId: string,
+  turnIds: string | Iterable<string>,
   operation: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const controller = new AbortController();
-  const active = operations.get(turnId) ?? new Set<AbortController>();
-  operations.set(turnId, active);
-  active.add(controller);
+  const sources = [...new Set(typeof turnIds === 'string' ? [turnIds] : turnIds)].map((id) => {
+    const active = operations.get(id) ?? new Set<AbortController>();
+    operations.set(id, active);
+    active.add(controller);
+    return { id, active };
+  });
   try {
     return await operation(controller.signal);
   } finally {
-    active.delete(controller);
-    if (!active.size) operations.delete(turnId);
+    for (const { id, active } of sources) {
+      active.delete(controller);
+      if (!active.size) operations.delete(id);
+    }
   }
 }
 

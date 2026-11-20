@@ -13,3 +13,15 @@ index a106f863ccb322b58090f1c4ba82d62b0b2723f2..ac8fb374d7d17dd63e6239eca8d58b52
      /^(Throttling error|Service unavailable):/i, // AWS Bedrock non-overflow errors (human-readable prefixes from formatBedrockError)
      /rate limit/i, // Generic rate limiting
      /too many requests/i, // Generic HTTP 429 style
+diff --git a/dist/api/openai-codex-responses.js b/dist/api/openai-codex-responses.js
+index e64cc029276fdb45c8ebf6d16a7d9573df223798..2c42e4518203788dca02a7c0b506a028aa2dbe36 100644
+--- a/dist/api/openai-codex-responses.js
++++ b/dist/api/openai-codex-responses.js
+@@ -1207,6 +1207,7 @@
+         }
+     }
+     try {
++        options?.signal?.throwIfAborted();
+         socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
+         await processResponsesStream(startWebSocketOutputOnFirstEvent(mapCodexEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs), output, model, options?.onProviderStreamEvent), onStart), output, stream, model, {
+             serviceTier: options?.serviceTier,

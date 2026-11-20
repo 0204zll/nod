@@ -25,6 +25,7 @@ import {
 import {
   calculateCost,
   createAssistantMessageEventStream,
+  normalizeContext,
   type AssistantMessage,
 } from '@earendil-works/pi-ai';
 import { fauxAssistantMessage } from '@earendil-works/pi-ai/providers/faux';
@@ -12526,4 +12527,141 @@ test('Ollama discovery uses the loaded context for model registration and comple
   calls.length = 0;
   await backend.catalog('compatible', 'api_key', credential);
   assert.ok(!calls.includes('/api/ps'));
+});
+
+test('Codex WebSocket requests stop before a cancelled send', async (t) => {
+  const { stream, closeOpenAICodexWebSocketSessions } =
+    await import('@earendil-works/pi-ai/api/openai-codex-responses');
+  for (const mode of [
+    'live new',
+    'live reused',
+    'already aborted new',
+    'already aborted reused',
+    'abort after open',
+    'abort after acquire',
+  ])
+    await t.test(mode, async (t) => {
+      const controller = new AbortController();
+      const sessionId = randomUUID();
+      const sockets: SyntheticSocket[] = [];
+      let abortAfterAcquire = false;
+      let httpCalls = 0;
+      class SyntheticSocket extends EventTarget {
+        state = 0;
+        frames: string[] = [];
+        pending = new Set<ReturnType<typeof setImmediate>>();
+        get readyState() {
+          if (abortAfterAcquire) {
+            abortAfterAcquire = false;
+            queueMicrotask(() => controller.abort());
+          }
+          return this.state;
+        }
+        constructor(url: string) {
+          super();
+          assert.equal(url, 'ws://127.0.0.1:1/codex/responses');
+          sockets.push(this);
+          queueMicrotask(() => {
+            if (this.state === 3) return;
+            this.state = 1;
+            this.dispatchEvent(new Event('open'));
+            if (mode === 'abort after open') controller.abort();
+          });
+        }
+        send(frame: string) {
+          this.frames.push(frame);
+          const pending = setImmediate(() => {
+            this.pending.delete(pending);
+            this.dispatchEvent(
+              new MessageEvent('message', {
+                data: JSON.stringify({
+                  type: 'response.completed',
+                  response: {
+                    id: `synthetic-response-${this.frames.length}`,
+                    status: 'completed',
+                    output: [],
+                  },
+                }),
+              }),
+            );
+          });
+          this.pending.add(pending);
+        }
+        close() {
+          this.state = 3;
+          for (const pending of this.pending) clearImmediate(pending);
+          this.pending.clear();
+          this.dispatchEvent(new Event('close'));
+        }
+      }
+      const original = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket')!;
+      Object.defineProperty(globalThis, 'WebSocket', {
+        configurable: true,
+        enumerable: original.enumerable,
+        writable: true,
+        value: SyntheticSocket,
+      });
+      t.after(() => {
+        try {
+          closeOpenAICodexWebSocketSessions(sessionId);
+          assert.ok(sockets.every((socket) => socket.state === 3 && socket.pending.size === 0));
+        } finally {
+          Object.defineProperty(globalThis, 'WebSocket', original);
+        }
+      });
+      t.mock.method(globalThis, 'fetch', async () => {
+        httpCalls++;
+        throw new Error('Synthetic test blocked HTTP fallback.');
+      });
+      const model: import('@earendil-works/pi-ai').Model<'openai-codex-responses'> = {
+        id: 'fixture-websocket-abort',
+        name: 'Fixture WebSocket',
+        provider: 'openai-codex',
+        api: 'openai-codex-responses',
+        baseUrl: 'http://127.0.0.1:1',
+        reasoning: false,
+        input: ['text'],
+        contextWindow: 8192,
+        maxTokens: 2048,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      };
+      const apiKey = `synthetic.${Buffer.from(
+        JSON.stringify({
+          'https://api.openai.com/auth': { chatgpt_account_id: 'synthetic-account' },
+        }),
+      ).toString('base64')}.synthetic`;
+      const request = (signal: AbortSignal) =>
+        stream(
+          model,
+          normalizeContext({
+            messages: [{ role: 'user', content: 'Synthetic source to check.', timestamp: 1 }],
+          }),
+          { apiKey, signal, sessionId, transport: 'websocket-cached', maxRetries: 0, env: {} },
+        ).result();
+      const reused = mode.endsWith('reused') || mode === 'abort after acquire';
+      if (reused) {
+        assert.equal((await request(new AbortController().signal)).stopReason, 'stop');
+        assert.equal(sockets.length, 1);
+        assert.equal(sockets[0].frames.length, 1);
+      }
+      if (mode.startsWith('already aborted')) controller.abort();
+      abortAfterAcquire = mode === 'abort after acquire';
+      const before = sockets.reduce((count, socket) => count + socket.frames.length, 0);
+      const result = await request(controller.signal);
+      const frames = sockets.flatMap((socket) => socket.frames);
+      assert.equal(result.stopReason, mode.startsWith('live') ? 'stop' : 'aborted');
+      assert.equal(frames.length - before, mode.startsWith('live') ? 1 : 0);
+      assert.equal(httpCalls, 0);
+      assert.equal(sockets.length, 1);
+      if (mode.startsWith('live')) assert.ok(frames[0].includes('Synthetic source to check.'));
+      else {
+        assert.equal(sockets[0].state, 3);
+        if (reused) {
+          assert.equal((await request(new AbortController().signal)).stopReason, 'stop');
+          assert.equal(sockets.length, 2);
+          assert.equal(sockets[1].frames.length, 1);
+          assert.equal(httpCalls, 0);
+        }
+      }
+    });
 });

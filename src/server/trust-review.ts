@@ -105,6 +105,7 @@ export function createTrustReview(options: {
     signal?.throwIfAborted();
     if (!decisions) {
       const selected = options.review.select ? await options.review.select(signal) : options.review;
+      signal?.throwIfAborted();
       if (question) return selected(instructions, input, signal, llmQuestion);
       const answers = await Promise.allSettled([
         selected(instructions, input, signal),

@@ -132,6 +132,7 @@ export async function retainedDraftInstructions(
     const sources = messages.filter((message) => draft.source_ids.includes(message.id));
     return {
       draftId: draft.draft_id,
+      sourceIds: draft.source_ids,
       connectionId: draft.connection_id,
       target: draft.target,
       messages: sources.map((message) => ({
