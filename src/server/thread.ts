@@ -16,6 +16,7 @@ import {
 } from '../shared/answer-choices.ts';
 import { logFailure } from './failure-log.ts';
 import { cancelTurnOperations } from './turn-cancellation.ts';
+import { pendingChatDraftInstructions } from './chat-draft-instructions.ts';
 import { modelFailureReason, modelQuotaFailure } from '../shared/model-quota.ts';
 import { appPages } from '../shared/app-links.ts';
 import { pendingAnswerChoicesSql } from './answer-choices.ts';
@@ -234,6 +235,11 @@ export interface ThreadDependencies {
   settleTask?: (turn: TurnRef, result: string) => Promise<void>;
   taskLedger?: (threadId: string) => Promise<NonNullable<RuntimeContext['tasks']>>;
   startTurn?: (turn: TurnRef) => Promise<void>;
+  captureInstructions?: (
+    turn: TurnRef,
+    signal: AbortSignal,
+    canContinue: () => boolean,
+  ) => Promise<void>;
   runTurn: (context: RuntimeContext) => Promise<RuntimeResult>;
   speech: Pick<SpeechService, 'synthesize'> & Partial<Pick<SpeechService, 'configured'>>;
   audioReplies?: () => Promise<SpeechReplyMode>;
@@ -1707,7 +1713,8 @@ async function takeQueuedMessages(turnId: string, sessionId: string, channel: st
        ORDER BY u.created_at,u.id FOR UPDATE OF u`,
       [thread.id, ownerId, turnId, sessionId],
     );
-    if (!rows.some((row) => row.id === turnId && row.status === 'running')) throw turnStopped();
+    const active = rows.find((row) => row.id === turnId && row.status === 'running');
+    if (!active) throw turnStopped();
     const next = rows.find((row) => row.status === 'queued');
     if (
       !next ||
@@ -1718,6 +1725,13 @@ async function takeQueuedMessages(turnId: string, sessionId: string, channel: st
       return [];
     const taken = [next];
     const ids = taken.map((row) => row.id);
+    await pendingChatDraftInstructions(
+      client,
+      ownerId,
+      { threadId: thread.id, turnId },
+      taken.map((row) => row.message_id),
+      active.task_id,
+    );
     await client.query(
       'UPDATE messages SET turn_id=$1 WHERE turn_id=ANY($2::uuid[]) AND owner_id=$3',
       [turnId, ids, ownerId],
@@ -2080,6 +2094,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
                 read,
                 client,
                 (remove) => cleanup.push(remove),
+                turnId,
               );
               await client.query('RELEASE SAVEPOINT reply_file');
             } catch (error) {
@@ -2259,7 +2274,16 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     ) => {
       const artifact = await current(async (client) => {
         const artifact = {
-          ...(await artifacts.storeArtifact(Buffer.from(bytes), name, mimeType, threadId, client)),
+          ...(await artifacts.storeArtifact(
+            Buffer.from(bytes),
+            name,
+            mimeType,
+            threadId,
+            client,
+            undefined,
+            false,
+            turnId,
+          )),
           ...(source ? { source } : {}),
         };
         if (publish)
@@ -2325,6 +2349,11 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     const result = await dependencies.runTurn({
       threadId,
       turnId,
+      captureInstructions:
+        dependencies.captureInstructions &&
+        fenced((operation: AbortSignal, canContinue: () => boolean) =>
+          dependencies.captureInstructions!(ref, operation, canContinue),
+        ),
       sessionId: turn.session_id,
       resumed: turn.source === 'resume' || Boolean(turn.parent_turn_id),
       prompt: turn.prompt,
@@ -2528,6 +2557,8 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
             name,
             read,
             client,
+            undefined,
+            turnId,
           ),
         );
         published.set(
@@ -2620,6 +2651,9 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
                 audio.mimeType,
                 threadId,
                 client,
+                undefined,
+                false,
+                turnId,
               );
               await insertAssistantMessage(
                 client,
@@ -2659,6 +2693,9 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
               questionAudio.mimeType,
               threadId,
               client,
+              undefined,
+              false,
+              turnId,
             ),
           );
         const messageId = await insertAssistantMessage(

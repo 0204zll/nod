@@ -21,8 +21,9 @@ export interface TrustWords {
   standingInstruction?: string;
   userRules?: string;
   messageDrafts?: Array<{
+    kind?: 'chat' | 'authority';
     draftId: string | null;
-    connectionId: string;
+    connectionId: string | null;
     target: Record<string, unknown>;
     messages: Array<{ at: string; text: string; canAuthorize: false }>;
     unavailable: boolean;

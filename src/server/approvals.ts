@@ -189,8 +189,9 @@ async function scheduleAuthority(client: PoolClient, turnId: string) {
       time_zone: string;
       title: string;
       kind: string | null;
+      schedule_id: string;
     }>(
-      `SELECT to_jsonb(r)->'authority' AS authority,r.scheduled_for,r.time_zone,r.title,s.kind
+      `SELECT to_jsonb(r)->'authority' AS authority,r.schedule_id,r.scheduled_for,r.time_zone,r.title,s.kind
      FROM schedule_runs r LEFT JOIN schedules s ON s.id=r.schedule_id AND s.owner_id=r.owner_id
      WHERE r.turn_id=$1 AND r.owner_id=$2`,
       [turnId, ownerId],
@@ -266,6 +267,7 @@ export async function turnOrigin(turnId: string) {
       messageIds: said,
       channel: current.channel,
       scheduleInstruction: run?.authority ?? undefined,
+      scheduleId: run?.schedule_id,
       ...(run
         ? {
             scheduledFor: localTimestamp(run.time_zone, run.scheduled_for),

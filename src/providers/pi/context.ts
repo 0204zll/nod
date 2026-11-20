@@ -1,3 +1,5 @@
+export const sourceCaptureInputBytes = 64_000;
+
 export function modelContext<
   T extends { provider: string; id: string; contextWindow: number; maxTokens: number },
 >(model: T, companion?: Pick<T, 'contextWindow' | 'maxTokens'>) {

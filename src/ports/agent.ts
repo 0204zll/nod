@@ -143,6 +143,7 @@ export interface RuntimeContext {
   automatic?: boolean;
   speech?: { mode: SpeechReplyMode; available: boolean };
   firstConversationTurn?: boolean;
+  captureInstructions?: (signal: AbortSignal, canContinue: () => boolean) => Promise<void>;
   replyTo?: {
     id: string;
     role: string;

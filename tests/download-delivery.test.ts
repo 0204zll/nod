@@ -875,6 +875,23 @@ test(
             assert.equal(response.statusCode, 200);
             assert.deepEqual(response.rawPayload, bytes);
             assert.ok(messages[0].text.includes(files[index].url));
+            assert.deepEqual(
+              (
+                await db.pool.query(
+                  'SELECT owner_id,thread_id,turn_id,sha256,size FROM draft_artifact_sources WHERE artifact_id=$1',
+                  [files[index].id],
+                )
+              ).rows,
+              [
+                {
+                  owner_id: ownerId,
+                  thread_id: context.threadId,
+                  turn_id: turnId,
+                  sha256: createHash('sha256').update(bytes).digest('hex'),
+                  size: bytes.length,
+                },
+              ],
+            );
           }
           await writeFile(join(local, 'uncommitted.txt'), 'Uncommitted output');
           await assert.rejects(
@@ -925,7 +942,29 @@ test(
           for (const path of unavailable) assert.ok(delivered.text.includes(`\`${path}\``));
           assert.ok(delivered.text.includes(`(${delivered.attachments[0].url})`));
           assert.equal(publicationQueryFailures, 1);
+          const changed = Buffer.from('Changed synthetic calendar.');
+          await writeFile(join(local, 'calendar.ics'), changed);
+          await context.reply(`Cached calendar: \`${root}/calendar.ics\``);
+          const cached = (
+            await db.pool.query(
+              "SELECT attachments FROM messages WHERE turn_id=$1 AND role='assistant' ORDER BY created_at DESC,id DESC LIMIT 1",
+              [turnId],
+            )
+          ).rows[0];
+          assert.equal(cached.attachments[0].id, files[0].id);
+          assert.deepEqual(await localArtifacts.readArtifact(files[0].id), calendar);
           const shared = await context.publish('calendar.ics');
+          assert.notEqual(shared.id, files[0].id);
+          assert.deepEqual(await localArtifacts.readArtifact(shared.id), changed);
+          assert.equal(
+            (
+              await db.pool.query(
+                'SELECT sha256 FROM draft_artifact_sources WHERE artifact_id=$1',
+                [shared.id],
+              )
+            ).rows[0].sha256,
+            createHash('sha256').update(changed).digest('hex'),
+          );
           await context.reply(`Calendar again: \`${root}/calendar.ics\``);
           const again = (
             await db.pool.query(

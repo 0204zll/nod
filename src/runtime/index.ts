@@ -675,6 +675,23 @@ export function createAgentRuntime(dependencies: {
       void pending.finally(() => activeToolCalls.delete(pending)).catch(() => {});
       return pending;
     };
+    const captureInstructions = async () => {
+      if (!context.captureInstructions || overBudget() || context.spendingLimitReached) return;
+      const capture = () => context.captureInstructions!(signal, () => !stopped && !overBudget());
+      await untilAborted(
+        Promise.resolve(
+          dependencies.withExecution
+            ? dependencies.withExecution({ ...execution, onEvent: countUsage }, capture)
+            : capture(),
+        ),
+        signal,
+      );
+      signal.throwIfAborted();
+      if (overBudget())
+        throw new Error(
+          `This work has used ${checkInUsed()}, past the ${dollars(context.checkIn!.budgetUsd)} check-in. Reply to keep going.`,
+        );
+    };
     try {
       signal.throwIfAborted();
       const screenSources = () =>
@@ -706,6 +723,7 @@ export function createAgentRuntime(dependencies: {
         completed = screened = true;
         return { status };
       }
+      await captureInstructions();
       if (dependencies.prepareMemory && !overBudget() && !context.spendingLimitReached) {
         context.memoryBrief = await untilAborted(
           dependencies.prepareMemory(
@@ -1166,6 +1184,7 @@ export function createAgentRuntime(dependencies: {
               context.memoryBrief = undefined;
               checkInSpent = checkInPlan = checkInStrikes = 0;
               replyOwed = true;
+              await captureInstructions();
             }
             for (const message of incoming) {
               const { images, omitted, analysis } = await inline(

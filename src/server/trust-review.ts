@@ -35,7 +35,7 @@ function unknownDrafts(input: object) {
   );
 }
 
-function exactDraft(input: object, draft: { draftId: string | null; connectionId: string }) {
+function exactDraft(input: object, draft: { draftId: string | null; connectionId: string | null }) {
   const action = (input as { action?: { name?: string; arguments?: Record<string, unknown> } })
     .action;
   return Boolean(

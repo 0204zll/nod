@@ -193,6 +193,7 @@ import { usageFileName, usagePdf } from './usage-report.ts';
 import { buildFeedbackReport, type FeedbackReportOptions } from './bug-report.ts';
 import { registerFeedback } from './feedback.ts';
 import { feedbackContext } from './feedback-context.ts';
+import { sourceCaptureInputBytes } from '../providers/pi/context.ts';
 import { createPersonalService } from './personal.ts';
 import { createOnboardingSuggestions } from './onboarding-suggestions.ts';
 import { createOnboardingProfile } from './onboarding-profile.ts';
@@ -2342,7 +2343,9 @@ async function initializeApplication(
       if (question) {
         const values = question.choices.map(({ value }) => JSON.stringify(value)).join(', ');
         instructions +=
-          question.name === 'retiredReply' || question.name === 'repeatedAction'
+          question.name === 'retiredReply' ||
+          question.name === 'repeatedAction' ||
+          question.name === 'messageCondition'
             ? `\nReply with only JSON containing exactly two properties: ${JSON.stringify(question.name)} set to one of ${values}, and "probability" set to a number from 0 to 1 expressing confidence in that label.`
             : `\nReply with only JSON with one property, ${JSON.stringify(question.name)}. Its value must be one of: ${values}.`;
       }
@@ -2357,6 +2360,7 @@ async function initializeApplication(
     pool,
     ownerId,
     review: trustReview,
+    sourceInputBytes: sourceCaptureInputBytes,
     ...(adapters.trustModel === 'decision' && adapters.trustDecisions
       ? { decisions: ledger.decisions(adapters.trustDecisions) }
       : {}),
@@ -2731,7 +2735,10 @@ async function initializeApplication(
         if (origin?.source === 'schedule')
           await validateScheduledInstructions(pool, ownerId, origin.scheduleInstruction);
         await tasks.inherit(turn);
+        await trust.pendingInstructions(turn);
       },
+      captureInstructions: (turn, signal, canContinue) =>
+        trust.captureInstructions(turn, signal, canContinue),
       connections: async (...args) => {
         const result = await integrations.manageConnections(...args);
         if (!('url' in result) || !('name' in result) || typeof result.name !== 'string')

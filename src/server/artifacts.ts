@@ -160,6 +160,7 @@ export function createArtifactService(options: {
     database?: Pick<PoolClient, 'query'>,
     onCreated?: (cleanup: () => Promise<void>) => void,
     temporary = false,
+    workTurnId?: string,
   ): Promise<Artifact> {
     if (!bytes.length || bytes.length > fileBytes)
       throw Object.assign(
@@ -167,6 +168,7 @@ export function createArtifactService(options: {
         { statusCode: 400 },
       );
     const id = randomUUID();
+    const storedBytes = Buffer.from(bytes);
     const safeName = fileName(basename(name).replace(/[\r\n\x00-\x1f]/g, '')) || 'file';
     const store = async (client: Pick<PoolClient, 'query'>) => {
       if (
@@ -184,7 +186,7 @@ export function createArtifactService(options: {
       ]);
       await checkDirectory(directory, true);
       try {
-        await writeFile(location(id), bytes, { mode: 0o600, flag: 'wx' });
+        await writeFile(location(id), storedBytes, { mode: 0o600, flag: 'wx' });
         const result = await client.query(
           `INSERT INTO artifacts(id,owner_id,thread_id,name,mime_type,size,storage_path,expires_at)
            VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $8 THEN clock_timestamp()+interval '24 hours' END) RETURNING *`,
@@ -199,6 +201,21 @@ export function createArtifactService(options: {
             temporary,
           ],
         );
+        if (workTurnId) {
+          const linked = await client.query(
+            `INSERT INTO draft_artifact_sources(artifact_id,owner_id,thread_id,turn_id,sha256,size)
+             SELECT $1,$2,$3,u.id,$5,$6 FROM turns u WHERE u.id=$4 AND u.owner_id=$2 AND u.thread_id=$3`,
+            [
+              id,
+              options.ownerId,
+              threadId,
+              workTurnId,
+              createHash('sha256').update(storedBytes).digest('hex'),
+              bytes.length,
+            ],
+          );
+          if (!linked.rowCount) throw new Error('The file could not be linked to its work turn.');
+        }
         onCreated?.(async () => {
           const stored = await options.database.query(
             'SELECT 1 FROM artifacts WHERE id=$1 AND owner_id=$2',
@@ -272,6 +289,7 @@ export function createArtifactService(options: {
     ) => Promise<Uint8Array>,
     database?: Pick<PoolClient, 'query'>,
     onCreated?: (cleanup: () => Promise<void>) => void,
+    workTurnId?: string,
   ) {
     z.uuid().parse(threadId);
     if (!path || path.length > 4096 || path.includes('\0') || path.includes('\\'))
@@ -291,6 +309,8 @@ export function createArtifactService(options: {
       threadId,
       database,
       onCreated,
+      false,
+      workTurnId,
     );
   }
   async function readThreadArtifacts(

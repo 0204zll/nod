@@ -176,6 +176,7 @@ test(
       | ((input: Record<string, unknown>, responseSchema?: Record<string, unknown>) => unknown)
       | undefined;
     let reviewRequirement: ((input: Record<string, any>) => unknown) | undefined;
+    let conditionCapture: ((input: Record<string, any>) => unknown) | undefined;
     let trustSelection: ((signal?: AbortSignal) => Promise<MemoryCurator>) | undefined;
     let reviewedSends: Array<Record<string, unknown>> | undefined;
     let heldAppSession: (() => Promise<void>) | undefined;
@@ -269,12 +270,16 @@ test(
       id: 'fixture',
       configured: true,
       curate: async ({ task, input, instructions, responseSchema }, _signal, report) => {
+        if (task === 'review' && Object(input).purpose === 'message_condition_capture')
+          return conditionCapture
+            ? conditionCapture(input)
+            : { messageCondition: 'clear', probability: 1 };
         if (task === 'review' && Object(input).action?.name === 'GOOGLECALENDAR_EVENTS_GET')
           await calendarReadReview?.();
         if (String(Object(input).action?.name).startsWith('GOOGLECALENDAR_'))
           calendarTrust.push(structuredClone(input));
-        if (task === 'review' && Object(input).purpose === 'review_requirement')
-          return reviewRequirement
+        if (task === 'review' && Object(input).purpose === 'review_requirement') {
+          const answer = reviewRequirement
             ? reviewRequirement(input)
             : {
                 review: 'clear',
@@ -283,6 +288,8 @@ test(
                     draft.unavailable ? [index] : [],
                 ),
               };
+          return answer;
+        }
         if (
           task === 'review' &&
           reviewRequirement &&
@@ -850,7 +857,9 @@ test(
           curate: async (request, signal, report) => {
             assert.ok(
               !('purpose' in request.input) ||
-                Object(request.input).purpose === 'review_requirement',
+                ['review_requirement', 'message_condition_capture'].includes(
+                  String(Object(request.input).purpose),
+                ),
             );
             return fixtureCurator.curate(request, signal, report);
           },
@@ -906,6 +915,47 @@ test(
     }
     const approvalsFor = async (id: string) =>
       (await pool.query('SELECT * FROM approvals WHERE turn_id=$1', [id])).rows;
+    const cleanupDraftSources = async (turnId: string) => {
+      const before = (
+        await pool.query(
+          'SELECT * FROM chat_draft_instructions WHERE owner_id=$1 ORDER BY message_id',
+          [ownerId],
+        )
+      ).rows;
+      const removed = await pool.query(
+        `WITH RECURSIVE roots AS (
+        SELECT id FROM messages WHERE owner_id=$2 AND turn_id=$1
+        UNION SELECT message_id FROM turns WHERE owner_id=$2 AND id=$1 AND message_id IS NOT NULL
+      ), owned AS (
+        SELECT message_id FROM chat_draft_instructions WHERE owner_id=$2 AND
+          (turn_id=$1 OR source_ids && ARRAY(SELECT id FROM roots) OR context_ids && ARRAY(SELECT id FROM roots))
+        UNION SELECT d.message_id FROM chat_draft_instructions d JOIN owned o
+          ON o.message_id=ANY(d.source_ids) OR o.message_id=ANY(d.inherited_ids)
+          WHERE d.owner_id=$2
+      ) DELETE FROM chat_draft_instructions WHERE owner_id=$2 AND message_id IN (SELECT message_id FROM owned) RETURNING message_id`,
+        [turnId, ownerId],
+      );
+      const removedIds = new Set(removed.rows.map((row) => row.message_id));
+      const after = (
+        await pool.query(
+          'SELECT * FROM chat_draft_instructions WHERE owner_id=$1 ORDER BY message_id',
+          [ownerId],
+        )
+      ).rows;
+      assert.deepEqual(
+        after,
+        before.filter((row) => !removedIds.has(row.message_id)),
+      );
+      t.diagnostic(
+        JSON.stringify({
+          sourceCleanup: turnId,
+          before: before.map((row) => row.message_id),
+          removed: [...removedIds],
+          after: after.map((row) => row.message_id),
+        }),
+      );
+      await pool.query('DELETE FROM draft_instructions WHERE turn_id=$1', [turnId]);
+    };
     const confirmationFor = async (approval: { confirmation_message_id: string }) => {
       const text = (
         await pool.query<{ text: string }>(
@@ -1843,8 +1893,7 @@ test(
             plans.delete(original);
             plans.delete(edit);
             await request('POST', '/api/thread/stop');
-            if (draftTurn)
-              await pool.query('DELETE FROM draft_instructions WHERE turn_id=$1', [draftTurn]);
+            if (draftTurn) await cleanupDraftSources(draftTurn);
           }
         },
       );
@@ -1987,8 +2036,7 @@ test(
           plans.delete(original);
           plans.delete(edit);
           await request('POST', '/api/thread/stop');
-          if (draftTurn)
-            await pool.query('DELETE FROM draft_instructions WHERE turn_id=$1', [draftTurn]);
+          if (draftTurn) await cleanupDraftSources(draftTurn);
           await pool.query('DELETE FROM app_connections WHERE id=$1', [second.id]);
           await integrationFixture.provider.deleteAccount(accountId!);
         }
@@ -2076,6 +2124,264 @@ test(
             chatDrafts.delete(original);
             plans.delete(edit);
             await request('POST', '/api/thread/stop');
+          }
+        },
+      );
+
+      await t.test('copied chat drafts keep review after unrelated chat', async (t) => {
+        for (const mode of ['same-day source', 'older source', 'no draft output']) {
+          await t.test(mode, async () => {
+            const original = `Write a chat-only draft to copied-chat@example.test. Show it before sending. ${randomUUID()}`;
+            const edit = `Send this copied draft with a changed ending. ${randomUUID()}`;
+            const body = 'Synthetic copied draft with a changed ending.';
+            const checked: Array<Record<string, any>> = [];
+            let draftTurn: string | undefined;
+            chatDrafts.set(
+              original,
+              mode === 'no draft output' ? '' : 'Synthetic copied draft with its original ending.',
+            );
+            reviewedSends = [];
+            conditionCapture = (input) => ({
+              probability: 1,
+              messageCondition: input.newMessages.some(
+                (message: { text: string }) => message.text === original,
+              )
+                ? 'retain'
+                : 'clear',
+            });
+            reviewRequirement = (input) => {
+              checked.push(input);
+              const sources = [
+                ...(input.userMessages ?? []),
+                ...(input.messageDrafts ?? []).flatMap(
+                  (draft: { messages: unknown[] }) => draft.messages,
+                ),
+              ];
+              return input.purpose === 'review_requirement'
+                ? {
+                    review: sources.some((message: { text: string }) => message.text === original)
+                      ? 'required'
+                      : 'clear',
+                  }
+                : { run: true, because: edit };
+            };
+            try {
+              const initial = await request('POST', '/api/messages', { text: original });
+              assert.equal(initial.statusCode, 200, initial.body);
+              draftTurn = initial.json().turnId;
+              assert.ok(draftTurn);
+              await waitFor(draftTurn, 'succeeded');
+              if (mode === 'no draft output')
+                assert.equal(
+                  (
+                    await pool.query(
+                      "SELECT 1 FROM messages WHERE turn_id=$1 AND role='assistant'",
+                      [draftTurn],
+                    )
+                  ).rowCount,
+                  0,
+                );
+              if (mode === 'older source')
+                await pool.query(
+                  "UPDATE messages SET created_at=created_at-interval '2 days' WHERE turn_id=$1",
+                  [draftTurn],
+                );
+              for (let index = 0; index < 6; index++) {
+                const unrelated = await request('POST', '/api/messages', {
+                  text: `Synthetic other copied-draft chat ${index} ${randomUUID()}.`,
+                });
+                assert.equal(unrelated.statusCode, 200, unrelated.body);
+                await waitFor(unrelated.json().turnId, 'succeeded');
+              }
+              const edited = await propose(
+                'GMAIL_SEND_EMAIL',
+                { recipient_email: 'copied-chat@example.test', subject: 'Changed copy', body },
+                'apps',
+                edit,
+              );
+              const [card] = await approvalsFor(edited);
+              assert.equal(card?.status, 'pending');
+              assert.equal(reviewedSends.length, 0);
+              assert.ok((await confirmationFor(card)).includes(body));
+              const restriction = checked.find((input) => input.purpose === 'review_requirement');
+              assert.ok(restriction);
+              const source = restriction.messageDrafts
+                ?.flatMap(
+                  (draft: { messages: Array<{ text: string; canAuthorize: boolean }> }) =>
+                    draft.messages,
+                )
+                .find((message: { text: string }) => message.text === original);
+              assert.equal(source?.canAuthorize, false);
+            } finally {
+              conditionCapture = undefined;
+              reviewRequirement = undefined;
+              reviewedSends = undefined;
+              chatDrafts.delete(original);
+              plans.delete(edit);
+              await request('POST', '/api/thread/stop');
+              if (draftTurn) await cleanupDraftSources(draftTurn);
+            }
+          });
+        }
+      });
+
+      await t.test('a completed clear capture after Stop cannot grant a later send', async () => {
+        const oldGrant = `Send a synthetic email to stopped-grant@example.test. stopped-grant-${randomUUID()}`;
+        const status = `Give the synthetic status. ${randomUUID()}`;
+        const fresh = `Send this synthetic email to fresh-grant@example.test now. ${randomUUID()}`;
+        const inputs: Array<Record<string, any>> = [];
+        let enter!: (turnId: string) => void;
+        const entered = new Promise<string>((resolve) => {
+          enter = resolve;
+        });
+        let release!: () => void;
+        const wait = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let originalTurn: string | undefined;
+        let quote = oldGrant;
+        conditionCapture = (input) => {
+          inputs.push(structuredClone(input));
+          return { messageCondition: 'clear', probability: 1 };
+        };
+        reviewRequirement = (input) => {
+          inputs.push(structuredClone(input));
+          return input.purpose === 'review_requirement'
+            ? { review: 'clear' }
+            : { run: true, because: quote };
+        };
+        reviewedSends = [];
+        steering = { entered: enter, wait, messages: [] };
+        try {
+          const response = await request('POST', '/api/messages', { text: oldGrant });
+          assert.equal(response.statusCode, 200, response.body);
+          originalTurn = response.json().turnId;
+          assert.equal(
+            await Promise.race([
+              entered,
+              delay(6000).then(() => {
+                throw new Error('The synthetic held turn did not start.');
+              }),
+            ]),
+            originalTurn,
+          );
+          const source = (
+            await pool.query('SELECT state FROM chat_draft_instructions WHERE turn_id=$1', [
+              originalTurn,
+            ])
+          ).rows[0];
+          assert.equal(source.state, 'clear');
+          await request('POST', '/api/thread/stop');
+          release();
+          await waitFor(originalTurn!, 'cancelled');
+          const start = inputs.length;
+          const later = await propose(
+            'GMAIL_SEND_EMAIL',
+            {
+              recipient_email: 'stopped-grant@example.test',
+              subject: 'Synthetic old grant',
+              body: 'Synthetic email.',
+            },
+            'apps',
+            status,
+          );
+          assert.equal((await approvalsFor(later))[0].status, 'pending');
+          assert.equal(reviewedSends.length, 0);
+          assert.equal(JSON.stringify(inputs.slice(start)).includes(oldGrant), false);
+          assert.equal((prompts.get(later) ?? '').includes(oldGrant), false);
+          assert.equal(
+            inputs.filter(
+              (input) =>
+                input.purpose === 'message_condition_capture' &&
+                input.newMessages.some((message: { text?: string }) => message.text === oldGrant),
+            ).length,
+            1,
+          );
+          await request('POST', '/api/thread/stop');
+          quote = fresh;
+          const sent = await propose(
+            'GMAIL_SEND_EMAIL',
+            {
+              recipient_email: 'fresh-grant@example.test',
+              subject: 'Synthetic fresh grant',
+              body: 'Synthetic current email.',
+            },
+            'apps',
+            fresh,
+          );
+          await waitFor(sent, 'succeeded');
+          assert.deepEqual(await approvalsFor(sent), []);
+          assert.equal(reviewedSends.length, 1);
+          assert.equal(reviewedSends[0].recipient_email, 'fresh-grant@example.test');
+        } finally {
+          steering = undefined;
+          release();
+          conditionCapture = undefined;
+          reviewRequirement = undefined;
+          reviewedSends = undefined;
+          plans.delete(status);
+          plans.delete(fresh);
+          await request('POST', '/api/thread/stop');
+          if (originalTurn) await cleanupDraftSources(originalTurn);
+        }
+      });
+
+      await t.test(
+        'Stop keeps a held condition capture pending and excludes its words from later work',
+        async () => {
+          const original = `Show the synthetic held draft before any send. held-source-${randomUUID()}`;
+          let enter!: () => void;
+          const entered = new Promise<void>((resolve) => {
+            enter = resolve;
+          });
+          let release!: () => void;
+          const held = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          const inputs: Array<Record<string, any>> = [];
+          let originalTurn: string | undefined;
+          conditionCapture = async (input) => {
+            inputs.push(structuredClone(input));
+            if (input.newMessages.some((message: { text?: string }) => message.text === original)) {
+              enter();
+              await held;
+            }
+            return { messageCondition: 'clear', probability: 1 };
+          };
+          try {
+            const response = await request('POST', '/api/messages', { text: original });
+            assert.equal(response.statusCode, 200, response.body);
+            originalTurn = response.json().turnId;
+            await Promise.race([
+              entered,
+              delay(6000).then(() => {
+                throw new Error('The synthetic capture did not start.');
+              }),
+            ]);
+            await request('POST', '/api/thread/stop');
+            await waitFor(originalTurn!, 'cancelled');
+            release();
+            const later = await request('POST', '/api/messages', {
+              text: `Explain a separate synthetic value. ${randomUUID()}`,
+            });
+            assert.equal(later.statusCode, 200, later.body);
+            await waitFor(later.json().turnId, 'succeeded');
+            assert.equal(
+              (
+                await pool.query('SELECT state FROM chat_draft_instructions WHERE turn_id=$1', [
+                  originalTurn,
+                ])
+              ).rows[0].state,
+              'pending',
+            );
+            assert.equal(inputs.length, 2);
+            assert.equal(JSON.stringify(inputs[1]).includes(original), false);
+            assert.equal((prompts.get(later.json().turnId) ?? '').includes(original), false);
+          } finally {
+            release();
+            conditionCapture = undefined;
+            await request('POST', '/api/thread/stop');
+            if (originalTurn) await cleanupDraftSources(originalTurn);
           }
         },
       );
@@ -2204,8 +2510,7 @@ test(
               plans.delete(original);
               plans.delete(edit);
               await request('POST', '/api/thread/stop');
-              if (draftTurn)
-                await pool.query('DELETE FROM draft_instructions WHERE turn_id=$1', [draftTurn]);
+              if (draftTurn) await cleanupDraftSources(draftTurn);
             }
           });
       });
@@ -2286,8 +2591,7 @@ test(
           plans.delete(unrelated);
           plans.delete(related);
           await request('POST', '/api/thread/stop');
-          if (draftTurn)
-            await pool.query('DELETE FROM draft_instructions WHERE turn_id=$1', [draftTurn]);
+          if (draftTurn) await cleanupDraftSources(draftTurn);
         }
       });
 
@@ -2332,8 +2636,7 @@ test(
           plans.delete(original);
           plans.delete(waiver);
           await request('POST', '/api/thread/stop');
-          if (draftTurn)
-            await pool.query('DELETE FROM draft_instructions WHERE turn_id=$1', [draftTurn]);
+          if (draftTurn) await cleanupDraftSources(draftTurn);
         }
       });
 
@@ -2542,8 +2845,7 @@ test(
             reviewRequirement = undefined;
             plans.delete(original);
             await request('POST', '/api/thread/stop');
-            if (draftTurn)
-              await pool.query('DELETE FROM draft_instructions WHERE turn_id=$1', [draftTurn]);
+            if (draftTurn) await cleanupDraftSources(draftTurn);
             await pool.query('DELETE FROM tasks WHERE id=$1', [taskId]);
           }
         },
@@ -2638,8 +2940,7 @@ test(
           plans.delete(original);
           plans.delete(deletion);
           await request('POST', '/api/thread/stop');
-          if (draftTurn)
-            await pool.query('DELETE FROM draft_instructions WHERE turn_id=$1', [draftTurn]);
+          if (draftTurn) await cleanupDraftSources(draftTurn);
         }
       });
 
@@ -8452,8 +8753,7 @@ test(
             await request('POST', '/api/thread/stop');
             await request('PATCH', '/api/computer-use', { enabled: false });
             desktopSteps.splice(before.length);
-            if (draftTurn)
-              await pool.query('DELETE FROM draft_instructions WHERE turn_id=$1', [draftTurn]);
+            if (draftTurn) await cleanupDraftSources(draftTurn);
           }
         },
       );
