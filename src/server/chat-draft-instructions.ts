@@ -190,46 +190,68 @@ async function load(database: Database, ownerId: string, lock: boolean, extraIds
     return !own || (own.role === 'user' && own.approval_answer === null && own.owner_authored);
   };
   const hash = draftSourceRevision;
+  const conditionNodes = new Map<
+    string,
+    { revision: string; available: boolean; conditions: DraftConditionSource[] }
+  >();
+  const conditionStates = new Map<string, { revision: string; available: boolean }>();
+  const conditionNode = (ref: Pick<DraftConditionSource, 'kind' | 'id'>) => {
+    const key = `${ref.kind}:${ref.id}`;
+    const cached = conditionNodes.get(key);
+    if (cached) return cached;
+    const source = ref.kind === 'chat' ? bySource.get(ref.id) : byAuthority.get(ref.id);
+    let available = Boolean(source && source.state === 'relevant');
+    const wordIds = source
+      ? 'message_id' in source
+        ? [...source.source_ids, ...source.context_ids]
+        : source.source_ids
+      : [];
+    const words = [...new Set(wordIds)].sort().map((id) => {
+      const word = byMessage.get(id);
+      if (!word) {
+        available = false;
+        return { id, unavailable: true };
+      }
+      if (word.withdrawn || word.hidden_at !== null) available = false;
+      const { withdrawn, ...local } = word;
+      return local;
+    });
+    const result = {
+      revision: hash(source ? { key, source, words } : { key, unavailable: true }),
+      available,
+      conditions: source
+        ? 'message_id' in source
+          ? source.condition_sources
+          : (source.payload.conditionSources ?? [])
+        : [],
+    };
+    conditionNodes.set(key, result);
+    return result;
+  };
   const conditionState = (ref: Pick<DraftConditionSource, 'kind' | 'id'>) => {
+    const cacheKey = `${ref.kind}:${ref.id}`;
+    const cached = conditionStates.get(cacheKey);
+    if (cached) return cached;
     const visited = new Set<string>();
     const pending = [ref];
-    const nodes: unknown[] = [];
+    const nodes: Array<{ key: string; revision: string }> = [];
     let available = true;
     while (pending.length) {
       const next = pending.pop()!;
       const key = `${next.kind}:${next.id}`;
       if (visited.has(key)) continue;
       visited.add(key);
-      const source = next.kind === 'chat' ? bySource.get(next.id) : byAuthority.get(next.id);
-      if (!source) {
-        available = false;
-        nodes.push({ key, unavailable: true });
-        continue;
-      }
-      if (source.state !== 'relevant') available = false;
-      const wordIds =
-        'message_id' in source ? [...source.source_ids, ...source.context_ids] : source.source_ids;
-      const words = [...new Set(wordIds)].sort().map((id) => {
-        const word = byMessage.get(id);
-        if (!word) {
-          available = false;
-          return { id, unavailable: true };
-        }
-        if (word.withdrawn || word.hidden_at !== null) available = false;
-        const { withdrawn, ...local } = word;
-        return local;
-      });
-      nodes.push({ key, source, words });
-      pending.push(
-        ...('message_id' in source
-          ? source.condition_sources
-          : (source.payload.conditionSources ?? [])),
-      );
+      const node = conditionNode(next);
+      available &&= node.available;
+      nodes.push({ key, revision: node.revision });
+      pending.push(...node.conditions);
     }
-    return {
-      revision: hash(nodes.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))),
+    const result = {
+      revision: hash(nodes.sort((a, b) => a.key.localeCompare(b.key))),
       available,
     };
+    conditionStates.set(cacheKey, result);
+    return result;
   };
   const condition = (ref: Pick<DraftConditionSource, 'kind' | 'id'>) =>
     conditionState(ref).revision;
@@ -414,6 +436,7 @@ export async function captureDraftConditionContext(
     if (
       source.state === 'clear' &&
       snapshot.intact &&
+      current.matches(source.condition_sources) &&
       source.revision === snapshot.revision &&
       source.policy_revision === policyRevision
     )
@@ -489,14 +512,10 @@ export async function prepareChatDraftCapture(
       ...(message.replyTo ? [message.replyTo.id] : []),
     ]),
   );
-  const source = current.sources.find((candidate) => candidate.message_id === messageId);
-  if (
-    !source ||
-    !current.ownerSource(source) ||
-    source.state !== 'pending' ||
-    source.revision !== null
-  )
+  const saved = current.sources.find((candidate) => candidate.message_id === messageId);
+  if (!saved || !current.ownerSource(saved) || saved.state !== 'pending' || saved.revision !== null)
     return;
+  const source = { ...saved };
   const conditionContext = await captureDraftConditionContext(
     database,
     ownerId,
@@ -695,6 +714,7 @@ export async function retainedChatDraftInstructions(
       source.state === 'clear' &&
       !forced &&
       snapshot.intact &&
+      current.matches(source.condition_sources) &&
       source.revision === snapshot.revision &&
       source.policy_revision === policyRevision
     )

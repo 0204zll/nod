@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
-import pg from 'pg';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import pg, { type PoolClient } from 'pg';
 import {
   initializeChatDraftInstructions,
   pendingChatDraftInstructions,
@@ -146,7 +150,12 @@ test(
       async () => {
         const f = await fixture();
         const a = await authority(f, 'Read the synthetic report.');
-        const captured = await prepareDraftAuthorityCapture(database, f.ownerId, a.key);
+        const captured = await prepareDraftAuthorityCapture(
+          database,
+          f.ownerId,
+          a.key,
+          a.turn.turnId,
+        );
         assert.ok(captured?.complete);
         await finishDraftAuthorityCapture(database, f.ownerId, captured, 'clear');
         const next = { ...a.turn, turnId: randomUUID() };
@@ -161,7 +170,10 @@ test(
           ),
           [a.key],
         );
-        assert.equal(await prepareDraftAuthorityCapture(database, f.ownerId, a.key), undefined);
+        assert.equal(
+          await prepareDraftAuthorityCapture(database, f.ownerId, a.key, a.turn.turnId),
+          undefined,
+        );
         assert.equal(
           (
             await database.query(
@@ -245,7 +257,12 @@ test(
           '1',
         );
         for (const key of keys) {
-          const captured = await prepareDraftAuthorityCapture(database, f.ownerId, key);
+          const captured = await prepareDraftAuthorityCapture(
+            database,
+            f.ownerId,
+            key,
+            turn.turnId,
+          );
           assert.ok(captured?.complete);
           await finishDraftAuthorityCapture(database, f.ownerId, captured, 'relevant');
         }
@@ -279,14 +296,221 @@ test(
           2,
         );
         for (const key of keys)
-          assert.equal(await prepareDraftAuthorityCapture(database, f.ownerId, key), undefined);
+          assert.equal(
+            await prepareDraftAuthorityCapture(database, f.ownerId, key, turn.turnId),
+            undefined,
+          );
       },
     );
+
+    for (const state of ['clear', 'relevant'] as const) {
+      await t.test(
+        `an unchanged field keeps one ${state} capture across 21 owner inputs`,
+        async () => {
+          const f = await fixture();
+          const data = await draftOwnerField(
+            database,
+            f.ownerId,
+            'rules',
+            'Use clear synthetic report text.',
+          );
+          const keys = new Set<string>();
+          let captures = 0;
+          let firstPayload: unknown;
+          for (let index = 0; index < 21; index++) {
+            const message = await f.add(
+              `Explain synthetic value ${index}.`,
+              new Date(Date.parse('2026-11-19T10:00:00.000Z') + index * 1000).toISOString(),
+            );
+            const turn = { threadId: f.threadId, turnId: message.turnId };
+            const [key] = await pendingDraftAuthorityInstructions(
+              database,
+              f.ownerId,
+              turn,
+              null,
+              [
+                {
+                  kind: 'rules',
+                  scope: 'rules',
+                  data,
+                  evidence: { messages: [message] },
+                  sourceIds: [message.id],
+                  bindings: [],
+                  context: [
+                    {
+                      kind: 'active',
+                      ownerData: [{ kind: 'rules', ownerData: data, canAuthorize: false }],
+                      unavailable: false,
+                    },
+                  ],
+                },
+              ],
+              '1',
+            );
+            assert.ok(key);
+            keys.add(key);
+            const captured = await prepareDraftAuthorityCapture(
+              database,
+              f.ownerId,
+              key,
+              turn.turnId,
+            );
+            if (captured) {
+              captures++;
+              assert.ok(captured.complete);
+              await finishDraftAuthorityCapture(database, f.ownerId, captured, state);
+            }
+            const payload = (
+              await database.query(
+                'SELECT payload FROM draft_authority_instructions WHERE key=$1',
+                [key],
+              )
+            ).rows[0].payload;
+            if (index === 0) firstPayload = payload;
+            else assert.deepEqual(payload, firstPayload);
+            await f.capture(message, 'clear');
+          }
+          assert.equal(keys.size, 1);
+          assert.equal(captures, 1);
+          assert.equal(
+            (
+              await database.query(
+                'SELECT count(*)::int AS count FROM draft_authority_turns WHERE owner_id=$1',
+                [f.ownerId],
+              )
+            ).rows[0].count,
+            21,
+          );
+          const retained = await retainedDraftAuthorityInstructions(
+            database,
+            f.ownerId,
+            f.threadId,
+            null,
+            '1',
+          );
+          assert.equal(retained.length, state === 'clear' ? 0 : 1);
+          const forced = await retainedDraftAuthorityInstructions(
+            database,
+            f.ownerId,
+            f.threadId,
+            null,
+            '1',
+            [
+              (
+                await database.query(
+                  'SELECT turn_id FROM draft_authority_turns WHERE owner_id=$1 ORDER BY turn_id LIMIT 1',
+                  [f.ownerId],
+                )
+              ).rows[0].turn_id,
+            ],
+          );
+          assert.equal(forced.length, 1);
+          assert.equal(forced[0].unavailable, false);
+        },
+      );
+    }
+
+    for (const mode of ['withdrawn', 'deleted', 'edited', 'malformed'] as const) {
+      await t.test(`an active schedule source that is ${mode} cannot reuse clear`, async () => {
+        const f = await fixture();
+        const parent = await f.add('Keep the synthetic schedule review condition.');
+        const current = await f.add('Explain a synthetic value.', '2026-11-19T10:01:00.000Z');
+        const data = await draftOwnerField(
+          database,
+          f.ownerId,
+          'rules',
+          'Use that saved synthetic schedule.',
+        );
+        const payload = {
+          kind: 'rules' as const,
+          scope: 'rules',
+          data,
+          evidence: { messages: [current] },
+          sourceIds: [current.id],
+          bindings: [],
+          context: [
+            {
+              kind: 'active',
+              ownerData: [
+                { kind: 'schedule', ownerData: mode === 'malformed' ? {} : { messages: [parent] } },
+              ],
+              unavailable: false,
+            },
+          ],
+        };
+        const turn = { threadId: f.threadId, turnId: current.turnId };
+        const [key] = await pendingDraftAuthorityInstructions(
+          database,
+          f.ownerId,
+          turn,
+          null,
+          [payload],
+          '1',
+        );
+        const captured = await prepareDraftAuthorityCapture(database, f.ownerId, key!, turn.turnId);
+        assert.ok(captured);
+        if (mode === 'malformed') {
+          assert.equal(captured.complete, false);
+        } else {
+          assert.equal(captured.complete, true);
+          await finishDraftAuthorityCapture(database, f.ownerId, captured, 'clear');
+          if (mode === 'withdrawn')
+            await database.query('UPDATE turns SET withdrawn=true WHERE id=$1', [parent.turnId]);
+          if (mode === 'deleted')
+            await database.query('DELETE FROM messages WHERE id=$1', [parent.id]);
+          if (mode === 'edited')
+            await database.query('UPDATE messages SET text=$2 WHERE id=$1', [
+              parent.id,
+              'Changed synthetic schedule words.',
+            ]);
+          assert.deepEqual(
+            await pendingDraftAuthorityInstructions(
+              database,
+              f.ownerId,
+              { ...turn, turnId: randomUUID() },
+              null,
+              [{ ...payload, evidence: { messages: [] }, sourceIds: [] }],
+              '1',
+            ),
+            [key],
+          );
+        }
+        await finishDraftAuthorityCapture(database, f.ownerId, captured, 'clear');
+        const repeated = await prepareDraftAuthorityCapture(database, f.ownerId, key!, turn.turnId);
+        if (mode === 'malformed') {
+          assert.equal(repeated?.complete, false);
+          assert.deepEqual(
+            (
+              await database.query(
+                'SELECT attempted,attempt_turn_id FROM draft_authority_instructions WHERE key=$1',
+                [key],
+              )
+            ).rows[0],
+            { attempted: false, attempt_turn_id: null },
+          );
+        } else assert.equal(repeated, undefined);
+        const retained = await retainedDraftAuthorityInstructions(
+          database,
+          f.ownerId,
+          f.threadId,
+          null,
+          '1',
+        );
+        assert.equal(retained.length, 1);
+        assert.equal(retained[0].unavailable, true);
+        assert.ok(!JSON.stringify(retained).includes(parent.text));
+      });
+    }
 
     await t.test('a known authority condition cannot be overwritten by a later clear', async () => {
       const f = await fixture();
       const a = await authority(f);
-      const captured = await prepareDraftAuthorityCapture(database, f.ownerId, a.key);
+      const captured = await prepareDraftAuthorityCapture(
+        database,
+        f.ownerId,
+        a.key,
+        a.turn.turnId,
+      );
       assert.ok(captured?.complete);
       await finishDraftAuthorityCapture(database, f.ownerId, captured, 'relevant');
       await finishDraftAuthorityCapture(database, f.ownerId, captured, 'clear');
@@ -308,7 +532,12 @@ test(
         async () => {
           const f = await fixture();
           const a = await authority(f, `Synthetic saved-authority-${mode}.`);
-          const captured = await prepareDraftAuthorityCapture(database, f.ownerId, a.key);
+          const captured = await prepareDraftAuthorityCapture(
+            database,
+            f.ownerId,
+            a.key,
+            a.turn.turnId,
+          );
           assert.ok(captured?.complete);
           await finishDraftAuthorityCapture(database, f.ownerId, captured, 'clear');
           if (mode === 'hidden')
@@ -336,14 +565,201 @@ test(
       );
     }
 
+    await t.test('a later automatic turn can claim an unattempted field once', async () => {
+      const f = await fixture();
+      const stopped = await f.add('Synthetic automatic notice.');
+      await database.query("UPDATE turns SET source='event',message_id=NULL WHERE id=$1", [
+        stopped.turnId,
+      ]);
+      const payload = {
+        kind: 'rules' as const,
+        scope: 'rules',
+        data: await draftOwnerField(database, f.ownerId, 'rules', 'Use clear synthetic text.'),
+        evidence: { messages: [] },
+        sourceIds: [],
+        context: [],
+        bindings: [],
+      };
+      const [key] = await pendingDraftAuthorityInstructions(
+        database,
+        f.ownerId,
+        { threadId: f.threadId, turnId: stopped.turnId },
+        null,
+        [payload],
+        '1',
+      );
+      await database.query('UPDATE turns SET withdrawn=true WHERE id=$1', [stopped.turnId]);
+      const later = await f.add('Another synthetic automatic notice.', '2026-11-19T10:01:00.000Z');
+      await database.query("UPDATE turns SET source='event',message_id=NULL WHERE id=$1", [
+        later.turnId,
+      ]);
+      assert.deepEqual(
+        await pendingDraftAuthorityInstructions(
+          database,
+          f.ownerId,
+          { threadId: f.threadId, turnId: later.turnId },
+          null,
+          [payload],
+          '1',
+        ),
+        [key],
+      );
+      const captured = await prepareDraftAuthorityCapture(database, f.ownerId, key!, later.turnId);
+      assert.ok(captured?.complete);
+      const row = (
+        await database.query(
+          'SELECT state,attempted,attempt_turn_id FROM draft_authority_instructions WHERE key=$1',
+          [key],
+        )
+      ).rows[0];
+      assert.deepEqual(row, { state: 'pending', attempted: true, attempt_turn_id: later.turnId });
+      await database.query('UPDATE turns SET withdrawn=true WHERE id=$1', [later.turnId]);
+      const nextTurnId = randomUUID();
+      assert.equal(
+        await prepareDraftAuthorityCapture(database, f.ownerId, key!, nextTurnId),
+        undefined,
+      );
+      await finishDraftAuthorityCapture(
+        database,
+        f.ownerId,
+        { ...captured, turnId: nextTurnId },
+        'clear',
+      );
+      const [source] = await retainedDraftAuthorityInstructions(
+        database,
+        f.ownerId,
+        f.threadId,
+        null,
+        '1',
+      );
+      assert.equal(source.unavailable, true);
+    });
+
+    await t.test('a later first attempt cannot replace withdrawn original context', async () => {
+      const f = await fixture();
+      const original = await f.add('Use the synthetic report for the saved rule.');
+      const payload = {
+        kind: 'rules' as const,
+        scope: 'rules',
+        data: { field: 'rules', versions: [{ value: 'Use that synthetic report.' }] },
+        evidence: { messages: [original] },
+        sourceIds: [original.id],
+        context: [],
+        bindings: [],
+      };
+      const [key] = await pendingDraftAuthorityInstructions(
+        database,
+        f.ownerId,
+        { threadId: f.threadId, turnId: original.turnId },
+        null,
+        [payload],
+        '1',
+      );
+      await database.query('UPDATE turns SET withdrawn=true WHERE id=$1', [original.turnId]);
+      const turn = { threadId: f.threadId, turnId: randomUUID() };
+      assert.deepEqual(
+        await pendingDraftAuthorityInstructions(
+          database,
+          f.ownerId,
+          turn,
+          null,
+          [{ ...payload, evidence: { messages: [] }, sourceIds: [] }],
+          '1',
+        ),
+        [key],
+      );
+      const captured = await prepareDraftAuthorityCapture(database, f.ownerId, key!, turn.turnId);
+      assert.equal(captured?.complete, false);
+      assert.deepEqual(
+        (
+          await database.query(
+            'SELECT state,attempted,attempt_turn_id FROM draft_authority_instructions WHERE key=$1',
+            [key],
+          )
+        ).rows[0],
+        { state: 'pending', attempted: false, attempt_turn_id: null },
+      );
+      const [source] = await retainedDraftAuthorityInstructions(
+        database,
+        f.ownerId,
+        f.threadId,
+        null,
+        '1',
+      );
+      assert.equal(source.unavailable, true);
+      assert.deepEqual(source.messages, []);
+    });
+
+    await t.test('two first callers claim one authority capture', async () => {
+      const f = await fixture();
+      const [key] = await pendingDraftAuthorityInstructions(
+        database,
+        f.ownerId,
+        { threadId: f.threadId, turnId: randomUUID() },
+        null,
+        [
+          {
+            kind: 'rules',
+            scope: 'rules',
+            data: { field: 'rules', versions: [{ value: 'Use clear synthetic words.' }] },
+            evidence: { messages: [] },
+            sourceIds: [],
+            context: [],
+            bindings: [],
+          },
+        ],
+        '1',
+      );
+      const captures = await Promise.all(
+        [randomUUID(), randomUUID()].map((turnId) =>
+          prepareDraftAuthorityCapture(database, f.ownerId, key!, turnId),
+        ),
+      );
+      const claimed = captures.filter((capture) => capture?.complete);
+      assert.equal(claimed.length, 1);
+      const winner = claimed[0]!;
+      const row = (
+        await database.query(
+          'SELECT state,attempted,attempt_turn_id FROM draft_authority_instructions WHERE key=$1',
+          [key],
+        )
+      ).rows[0];
+      assert.deepEqual(row, { state: 'pending', attempted: true, attempt_turn_id: winner.turnId });
+      await finishDraftAuthorityCapture(
+        database,
+        f.ownerId,
+        { ...winner, turnId: randomUUID() },
+        'clear',
+      );
+      assert.equal(
+        (await database.query('SELECT state FROM draft_authority_instructions WHERE key=$1', [key]))
+          .rows[0].state,
+        'pending',
+      );
+      await finishDraftAuthorityCapture(database, f.ownerId, winner, 'clear');
+      assert.equal(
+        (await database.query('SELECT state FROM draft_authority_instructions WHERE key=$1', [key]))
+          .rows[0].state,
+        'clear',
+      );
+    });
+
     await t.test('an interrupted authority capture stays pending and is not replayed', async () => {
       const f = await fixture();
       const a = await authority(f);
-      const captured = await prepareDraftAuthorityCapture(database, f.ownerId, a.key);
+      const captured = await prepareDraftAuthorityCapture(
+        database,
+        f.ownerId,
+        a.key,
+        a.turn.turnId,
+      );
       assert.ok(captured?.complete);
       await database.query('UPDATE turns SET withdrawn=true WHERE id=$1', [a.message.turnId]);
       await finishDraftAuthorityCapture(database, f.ownerId, captured, 'clear');
-      assert.equal(await prepareDraftAuthorityCapture(database, f.ownerId, a.key), undefined);
+      assert.equal(
+        await prepareDraftAuthorityCapture(database, f.ownerId, a.key, a.turn.turnId),
+        undefined,
+      );
       const [source] = await retainedDraftAuthorityInstructions(
         database,
         f.ownerId,
@@ -356,7 +772,7 @@ test(
     });
 
     await t.test(
-      'authority keys bind the full saved fields, approvals, context and task scope',
+      'authority versions bind saved fields, approvals, active context and task scope',
       async () => {
         const f = await fixture();
         const a = await authority(f);
@@ -373,7 +789,21 @@ test(
           },
           {
             ...a.payload,
-            context: [{ messages: [{ text: 'Different inherited synthetic condition.' }] }],
+            context: [
+              {
+                kind: 'active',
+                ownerData: [
+                  {
+                    kind: 'rules',
+                    ownerData: {
+                      field: 'rules',
+                      versions: [{ value: 'Show the changed synthetic report.' }],
+                    },
+                  },
+                ],
+                unavailable: false,
+              },
+            ],
           },
         ])
           keys.push(
@@ -420,44 +850,134 @@ test(
           'Show the synthetic draft before sending.',
           '',
         ];
-        for (const value of values) await draftOwnerField(database, f.ownerId, 'rules', value);
-        const data = await draftOwnerField(database, f.ownerId, 'rules', '');
-        assert.deepEqual(
-          data.versions.map((version) => version.value),
-          values,
-        );
-        const turn = { threadId: f.threadId, turnId: randomUUID() };
-        const payload = {
-          kind: 'rules' as const,
-          scope: 'rules',
-          data,
-          evidence: { messages: [] },
-          sourceIds: [],
-          context: [],
-          bindings: [],
-        };
-        const [key] = await pendingDraftAuthorityInstructions(
-          database,
-          f.ownerId,
-          turn,
-          null,
-          [payload],
-          '1',
-        );
-        const captured = await prepareDraftAuthorityCapture(database, f.ownerId, key!);
-        assert.ok(captured?.complete);
-        assert.deepEqual(captured.input.newMessages[0].ownerData, data);
-        await finishDraftAuthorityCapture(database, f.ownerId, captured, 'relevant');
-        const [source] = await retainedDraftAuthorityInstructions(
+        const keys = [];
+        for (const [index, value] of values.entries()) {
+          const data = await draftOwnerField(database, f.ownerId, 'rules', value);
+          const turn = { threadId: f.threadId, turnId: randomUUID() };
+          const [key] = await pendingDraftAuthorityInstructions(
+            database,
+            f.ownerId,
+            turn,
+            null,
+            [
+              {
+                kind: 'rules',
+                scope: 'rules',
+                data,
+                evidence: { messages: [] },
+                sourceIds: [],
+                context: [],
+                bindings: [],
+              },
+            ],
+            '1',
+          );
+          assert.ok(key);
+          keys.push(key);
+          const captured = await prepareDraftAuthorityCapture(
+            database,
+            f.ownerId,
+            key,
+            turn.turnId,
+          );
+          assert.ok(captured?.complete);
+          assert.deepEqual(
+            data.versions.map((version) => version.value),
+            values.slice(0, index + 1),
+          );
+          assert.deepEqual(captured.input.newMessages[0].ownerData, data);
+          await finishDraftAuthorityCapture(database, f.ownerId, captured, 'relevant');
+        }
+        assert.equal(new Set(keys).size, values.length);
+        const sources = await retainedDraftAuthorityInstructions(
           database,
           f.ownerId,
           f.threadId,
           null,
           '1',
         );
-        assert.deepEqual(source.target.ownerData, data);
+        assert.equal(sources.length, values.length);
+        assert.ok(sources.every((source) => !source.unavailable));
+        assert.deepEqual(
+          Object(sources.at(-1)!.target.ownerData).versions.map(
+            (version: { value: string }) => version.value,
+          ),
+          values,
+        );
       },
     );
+
+    for (const active of [false, true]) {
+      for (const approved of [false, true]) {
+        await t.test(
+          `an empty ${active ? 'active' : 'saved'} schedule needs complete owner approval: ${approved}`,
+          async () => {
+            const f = await fixture();
+            const turn = { threadId: f.threadId, turnId: randomUUID() };
+            const data = {
+              messages: [],
+              ...(approved
+                ? {
+                    approvals: [
+                      {
+                        id: randomUUID(),
+                        at: '2026-11-19T10:00:00.000Z',
+                        definition: { prompt: 'Read the synthetic report.' },
+                      },
+                    ],
+                  }
+                : {}),
+            };
+            const [key] = await pendingDraftAuthorityInstructions(
+              database,
+              f.ownerId,
+              turn,
+              null,
+              [
+                {
+                  kind: active ? 'rules' : 'schedule',
+                  scope: randomUUID(),
+                  data: active
+                    ? { field: 'rules', versions: [{ value: 'Use the saved synthetic schedule.' }] }
+                    : data,
+                  evidence: { messages: [] },
+                  sourceIds: [],
+                  bindings: [],
+                  context: active
+                    ? [
+                        {
+                          kind: 'active',
+                          ownerData: [{ kind: 'schedule', ownerData: data }],
+                          unavailable: false,
+                        },
+                      ]
+                    : [],
+                },
+              ],
+              '1',
+            );
+            const captured = await prepareDraftAuthorityCapture(
+              database,
+              f.ownerId,
+              key!,
+              turn.turnId,
+            );
+            assert.ok(captured);
+            assert.equal(captured.complete, approved);
+            await finishDraftAuthorityCapture(database, f.ownerId, captured, 'clear');
+            const sources = await retainedDraftAuthorityInstructions(
+              database,
+              f.ownerId,
+              f.threadId,
+              null,
+              '1',
+            );
+            assert.equal(sources.length, approved ? 0 : 1);
+            if (!approved) assert.equal(sources[0].unavailable, true);
+          },
+        );
+      }
+    }
 
     await t.test(
       'never-populated empty fields need no model but missing schedule authority stays pending',
@@ -481,7 +1001,10 @@ test(
           [{ ...base, kind: 'rules' }],
           '1',
         );
-        assert.equal(await prepareDraftAuthorityCapture(database, f.ownerId, empty!), undefined);
+        assert.equal(
+          await prepareDraftAuthorityCapture(database, f.ownerId, empty!, turn.turnId),
+          undefined,
+        );
         const [missing] = await pendingDraftAuthorityInstructions(
           database,
           f.ownerId,
@@ -491,7 +1014,8 @@ test(
           '1',
         );
         assert.equal(
-          (await prepareDraftAuthorityCapture(database, f.ownerId, missing!))?.complete,
+          (await prepareDraftAuthorityCapture(database, f.ownerId, missing!, turn.turnId))
+            ?.complete,
           false,
         );
         const sources = await retainedDraftAuthorityInstructions(
@@ -516,7 +1040,12 @@ test(
             if (prior === 'chat') await f.capture(await f.add(condition), 'relevant');
             else {
               const a = await authority(f, condition);
-              const captured = await prepareDraftAuthorityCapture(database, f.ownerId, a.key);
+              const captured = await prepareDraftAuthorityCapture(
+                database,
+                f.ownerId,
+                a.key,
+                a.turn.turnId,
+              );
               assert.ok(captured?.complete);
               await finishDraftAuthorityCapture(database, f.ownerId, captured, 'relevant');
             }
@@ -571,7 +1100,12 @@ test(
                 [payload],
                 '1',
               );
-              const captured = await prepareDraftAuthorityCapture(database, f.ownerId, key!);
+              const captured = await prepareDraftAuthorityCapture(
+                database,
+                f.ownerId,
+                key!,
+                message.turnId,
+              );
               assert.ok(captured?.complete);
               assert.equal(JSON.stringify(captured.input).includes(condition), true);
               await finishDraftAuthorityCapture(database, f.ownerId, captured, 'relevant');
@@ -723,6 +1257,86 @@ test(
         assert.deepEqual(forced[0].messages, []);
       },
     );
+
+    for (const mode of ['withdrawn', 'hidden', 'deleted', 'edited'] as const) {
+      await t.test(`a parent that is ${mode} invalidates a child's clear result`, async () => {
+        const f = await fixture();
+        const parent = await f.add('Show the synthetic draft before sending.');
+        await f.capture(parent, 'relevant');
+        const child = await f.add(
+          'Use that review condition for the next synthetic report.',
+          '2026-11-19T10:01:00.000Z',
+        );
+        await f.capture(child, 'clear');
+        assert.equal((await f.row(child.id)).state, 'clear');
+        if (mode === 'withdrawn')
+          await database.query('UPDATE turns SET withdrawn=true WHERE id=$1', [parent.turnId]);
+        if (mode === 'hidden')
+          await database.query('UPDATE messages SET hidden_at=now() WHERE id=$1', [parent.id]);
+        if (mode === 'deleted')
+          await database.query('DELETE FROM messages WHERE id=$1', [parent.id]);
+        if (mode === 'edited')
+          await database.query('UPDATE messages SET text=$2 WHERE id=$1', [
+            parent.id,
+            'Show the changed synthetic draft before sending.',
+          ]);
+        const retained = await f.retained();
+        assert.equal(retained.length, 2);
+        assert.ok(retained.every((source) => source.unavailable));
+        assert.ok(JSON.stringify(retained).includes(child.text));
+        if (mode !== 'edited') assert.ok(!JSON.stringify(retained).includes(parent.text));
+        const context = await captureDraftConditionContext(
+          database,
+          f.ownerId,
+          f.threadId,
+          null,
+          '1',
+        );
+        assert.equal(context.complete, false);
+        assert.equal(context.input.length, 2);
+        assert.ok(JSON.stringify(context.input).includes(child.text));
+        if (mode !== 'edited') assert.ok(!JSON.stringify(context.input).includes(parent.text));
+      });
+    }
+
+    await t.test('a changed transitive condition edge invalidates a clear result', async () => {
+      const f = await fixture();
+      const parent = await f.add('Show the synthetic report before sending.');
+      await f.capture(parent, 'relevant');
+      const middle = await f.add('Keep that review condition.', '2026-11-19T10:01:00.000Z');
+      await f.capture(middle, 'relevant');
+      const child = await f.add('Use the same synthetic report.', '2026-11-19T10:02:00.000Z');
+      await f.capture(child, 'clear');
+      assert.equal((await f.retained()).length, 2);
+      await database.query(
+        'UPDATE chat_draft_instructions SET condition_sources=$2 WHERE message_id=$1',
+        [
+          parent.id,
+          JSON.stringify([
+            {
+              kind: 'chat',
+              id: randomUUID(),
+              state: 'relevant',
+              revision: 'synthetic',
+              available: false,
+            },
+          ]),
+        ],
+      );
+      const retained = await f.retained();
+      assert.equal(retained.length, 3);
+      assert.ok(retained.every((source) => source.unavailable));
+      assert.ok(JSON.stringify(retained).includes(child.text));
+      const context = await captureDraftConditionContext(
+        database,
+        f.ownerId,
+        f.threadId,
+        null,
+        '1',
+      );
+      assert.equal(context.complete, false);
+      assert.equal(context.input.length, 3);
+    });
 
     await t.test('a stopped capture cannot save a late clear result', async () => {
       const f = await fixture();
@@ -1248,5 +1862,234 @@ test(
         [],
       );
     });
+  },
+);
+
+test(
+  'draft captures use one thread lock before source locks',
+  { skip: !process.env.TEST_DATABASE_URL },
+  async (t) => {
+    const schema = `draft_lock_${randomUUID().replaceAll('-', '')}`;
+    const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const url = new URL(process.env.TEST_DATABASE_URL!);
+    url.searchParams.set('options', `-c search_path=${schema}`);
+    url.searchParams.set('application_name', schema);
+    const environment = {
+      DATABASE_URL: process.env.DATABASE_URL,
+      DATABASE_POOL_MAX: process.env.DATABASE_POOL_MAX,
+      NOD_DATA_ROOT: process.env.NOD_DATA_ROOT,
+    };
+    t.after(() => {
+      for (const [key, value] of Object.entries(environment))
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+    });
+    const root = await mkdtemp(join(tmpdir(), 'nod-draft-lock-'));
+    process.env.DATABASE_URL = url.href;
+    process.env.DATABASE_POOL_MAX = '2';
+    process.env.NOD_DATA_ROOT = root;
+    const { pool, initializeDatabase } = await import('../src/server/db.ts');
+    const { ownerId } = await import('../src/server/config.ts');
+    const { transaction } = await import('../src/server/transaction.ts');
+    const { lockThread, withDraftLock } = await import('../src/server/thread.ts');
+    t.after(async () => {
+      await pool.end();
+      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+      assert.equal(
+        (
+          await admin.query('SELECT count(*)::int AS count FROM pg_namespace WHERE nspname=$1', [
+            schema,
+          ])
+        ).rows[0].count,
+        0,
+      );
+      await admin.end();
+      await rm(root, { recursive: true, force: true });
+    });
+    await initializeDatabase();
+    await pool.query(`CREATE TABLE IF NOT EXISTS tasks(id uuid PRIMARY KEY,owner_id text NOT NULL,title text NOT NULL,created_at timestamptz NOT NULL);
+    ALTER TABLE turns ADD COLUMN IF NOT EXISTS task_id uuid;`);
+    const threadId = (await transaction((client) => lockThread(client), pool)).id;
+    const make = async (kind: 'chat' | 'authority') => {
+      const id = randomUUID();
+      const turnId = randomUUID();
+      const taskId = randomUUID();
+      const at = new Date().toISOString();
+      const text = 'Explain the synthetic draft lock.';
+      const ref = { threadId, turnId };
+      await pool.query('INSERT INTO tasks(id,owner_id,title,created_at) VALUES($1,$2,$3,$4)', [
+        taskId,
+        ownerId,
+        'Synthetic lock task',
+        new Date(Date.parse(at) - 1000),
+      ]);
+      await pool.query(
+        "INSERT INTO turns(id,owner_id,thread_id,session_id,task_id,source,status,message_id,created_at,prompt) VALUES($1,$2,$3,$4,$4,'user','running',$5,$6,$7)",
+        [turnId, ownerId, threadId, taskId, id, at, text],
+      );
+      await pool.query(
+        "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,created_at) VALUES($1,$2,$3,$4,'user',$5,$6)",
+        [id, ownerId, threadId, turnId, text, at],
+      );
+      if (kind === 'chat') {
+        const capture = await withDraftLock(ref, undefined, async (client) => {
+          await pendingChatDraftInstructions(client, ownerId, ref, [id], taskId);
+          return prepareChatDraftCapture(client, ownerId, id, { messages: [{ id, at, text }] });
+        });
+        assert.ok(capture?.complete);
+        return {
+          ref,
+          finish: (client: PoolClient) => finishChatDraftCapture(client, ownerId, capture, 'clear'),
+          state: async () =>
+            (
+              await pool.query('SELECT state FROM chat_draft_instructions WHERE message_id=$1', [
+                id,
+              ])
+            ).rows[0].state,
+        };
+      }
+      const capture = await withDraftLock(ref, undefined, async (client) => {
+        const [key] = await pendingDraftAuthorityInstructions(
+          client,
+          ownerId,
+          ref,
+          taskId,
+          [
+            {
+              kind: 'schedule',
+              scope: randomUUID(),
+              data: { messages: [{ id, at, text }] },
+              evidence: { messages: [{ id, at, text }] },
+              sourceIds: [id],
+              context: [],
+              bindings: [],
+            },
+          ],
+          '1',
+        );
+        return prepareDraftAuthorityCapture(client, ownerId, key!, turnId);
+      });
+      assert.ok(capture?.complete);
+      return {
+        ref,
+        finish: (client: PoolClient) =>
+          finishDraftAuthorityCapture(client, ownerId, capture, 'clear'),
+        state: async () =>
+          (
+            await pool.query('SELECT state FROM draft_authority_instructions WHERE key=$1', [
+              capture.key,
+            ])
+          ).rows[0].state,
+      };
+    };
+    for (const mode of [
+      'chat-chat',
+      'chat-authority',
+      'authority-authority',
+      'stop',
+      'stop-authority',
+      'rollback',
+    ] as const) {
+      await t.test(mode, async () => {
+        const stopped = mode === 'stop' || mode === 'stop-authority';
+        const first = await make(mode === 'authority-authority' ? 'authority' : 'chat');
+        const second = await make(mode.includes('authority') ? 'authority' : 'chat');
+        const deferred = () => {
+          let resolve!: () => void;
+          const promise = new Promise<void>((done) => {
+            resolve = done;
+          });
+          return { promise, resolve };
+        };
+        const reached = deferred();
+        const release = deferred();
+        const controller = new AbortController();
+        const entries = [0, 0];
+        const updates = [0, 0];
+        const wrap = (client: PoolClient, index: number) =>
+          ({
+            async query(sql: string, values?: unknown[]) {
+              if (
+                /UPDATE (?:chat_draft_instructions|draft_authority_instructions) SET state=/.test(
+                  sql,
+                )
+              ) {
+                updates[index]++;
+                if (index === 0) {
+                  reached.resolve();
+                  await release.promise;
+                }
+              }
+              return client.query(sql, values);
+            },
+          }) as PoolClient;
+        const settle = (work: Promise<unknown>) =>
+          work.then(
+            () => ({ status: 'fulfilled' }),
+            (error: unknown) => ({ status: 'rejected', error }),
+          );
+        const firstWork = settle(
+          withDraftLock(first.ref, undefined, async (client) => {
+            entries[0]++;
+            await first.finish(wrap(client, 0));
+            if (mode === 'rollback') throw new Error('Roll back the synthetic capture.');
+          }),
+        );
+        let secondWork: ReturnType<typeof settle> | undefined;
+        try {
+          await Promise.race([
+            reached.promise,
+            delay(3000).then(() => {
+              throw new Error('The first capture did not reach its update.');
+            }),
+          ]);
+          secondWork = settle(
+            withDraftLock(second.ref, controller.signal, async (client) => {
+              entries[1]++;
+              await second.finish(wrap(client, 1));
+            }),
+          );
+          let waiting = false;
+          for (let index = 0; index < 100; index++) {
+            waiting =
+              (
+                await admin.query(
+                  "SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%nod_locks%' AND query LIKE '%FOR UPDATE%' AND application_name=$1",
+                  [schema],
+                )
+              ).rows[0].count > 0;
+            if (waiting) break;
+            await delay(10);
+          }
+          assert.equal(waiting, true);
+          assert.equal(entries[1], 0);
+          if (stopped) {
+            controller.abort(new Error('Stop the synthetic capture.'));
+            assert.equal(
+              (
+                await Promise.race([
+                  secondWork,
+                  delay(1000).then(() => {
+                    throw new Error('Stop did not end the waiting capture.');
+                  }),
+                ])
+              ).status,
+              'rejected',
+            );
+            assert.equal(entries[1], 0);
+          }
+        } finally {
+          release.resolve();
+        }
+        const results = await Promise.all([firstWork, secondWork!]);
+        assert.deepEqual(entries, [1, stopped ? 0 : 1]);
+        assert.deepEqual(updates, [1, stopped ? 0 : 1]);
+        assert.equal(results[0].status, mode === 'rollback' ? 'rejected' : 'fulfilled');
+        assert.equal(results[1].status, stopped ? 'rejected' : 'fulfilled');
+        assert.equal(await first.state(), mode === 'rollback' ? 'pending' : 'clear');
+        assert.equal(await second.state(), stopped ? 'pending' : 'clear');
+      });
+    }
   },
 );

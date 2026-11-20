@@ -650,7 +650,7 @@ export function createTrust(options: {
       signal.throwIfAborted();
       if (!canContinue()) return;
       const captured = await withDraftLock(turn, signal, (client) =>
-        prepareDraftAuthorityCapture(client, ownerId, key),
+        prepareDraftAuthorityCapture(client, ownerId, key, turn.turnId),
       );
       if (captured?.complete)
         await classify(captured.input, (client, state) =>

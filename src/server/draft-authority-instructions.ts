@@ -1,6 +1,7 @@
 import type { Pool } from 'pg';
 import { presentationSchema, presentationText } from '../shared/presentation.ts';
 import {
+  hasOwnerInstructions,
   instructionSourceMessageIds,
   ownerMessageContentSql,
   type OwnerInstructions,
@@ -30,6 +31,7 @@ type Authority = {
 type Source = {
   key: string;
   base_key: string;
+  attempt_turn_id: string | null;
   owner_id: string;
   thread_id: string;
   task_id: string | null;
@@ -48,7 +50,7 @@ const digest = draftSourceRevision;
 export async function initializeDraftAuthorityInstructions(database: Database) {
   await database.query(`
     CREATE TABLE IF NOT EXISTS draft_authority_instructions (
-      key text PRIMARY KEY, base_key text NOT NULL, owner_id text NOT NULL, thread_id uuid NOT NULL, task_id uuid,
+      key text PRIMARY KEY, base_key text NOT NULL, attempt_turn_id uuid, owner_id text NOT NULL, thread_id uuid NOT NULL, task_id uuid,
       kind text NOT NULL CHECK (kind IN ('schedule','standing','rules')), authority_scope text NOT NULL,
       payload jsonb NOT NULL, source_ids uuid[] NOT NULL, source_revision text NOT NULL,
       policy_revision text NOT NULL, state text NOT NULL DEFAULT 'pending'
@@ -94,9 +96,55 @@ export async function draftOwnerField(
   return { field: kind === 'standing' ? 'notification_rule' : 'rules', versions: row.versions };
 }
 
+function instructionContexts(payload: Authority) {
+  const values = [
+    ...(payload.kind === 'schedule' ? [payload.data] : []),
+    ...(Array.isArray(payload.context)
+      ? payload.context
+          .filter((entry) => Object(entry).kind === 'active')
+          .flatMap((entry) => Object(entry).ownerData ?? [])
+          .filter((entry) => Object(entry).kind === 'schedule')
+          .map((entry) => Object(entry).ownerData)
+      : []),
+  ];
+  return values.map((value) => {
+    if (
+      !Array.isArray(Object(value).messages) ||
+      !Object(value).messages.every(
+        (message: unknown) =>
+          typeof Object(message).at === 'string' &&
+          typeof Object(message).text === 'string' &&
+          (Object(message).id === null ||
+            (typeof Object(message).id === 'string' &&
+              /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(
+                Object(message).id,
+              ))) &&
+          (!Object(message).replyTo ||
+            (typeof Object(message).replyTo.id === 'string' &&
+              /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(
+                Object(message).replyTo.id,
+              ) &&
+              typeof Object(message).replyTo.text === 'string')),
+      )
+    )
+      return undefined;
+    return hasOwnerInstructions(value as OwnerInstructions)
+      ? (value as OwnerInstructions)
+      : undefined;
+  });
+}
+
 async function snapshots(database: Database, ownerId: string, payloads: Authority[], lock = false) {
   const sourceIds = (payload: Authority) =>
-    [...new Set([...payload.sourceIds, ...instructionSourceMessageIds(payload.evidence)])].sort();
+    [
+      ...new Set([
+        ...payload.sourceIds,
+        ...instructionSourceMessageIds(payload.evidence),
+        ...instructionContexts(payload).flatMap((context) =>
+          context ? instructionSourceMessageIds(context) : [],
+        ),
+      ]),
+    ].sort();
   const ids = [...new Set(payloads.flatMap(sourceIds))];
   const rows = ids.length
     ? (
@@ -138,7 +186,9 @@ async function snapshots(database: Database, ownerId: string, payloads: Authorit
           live.revision === binding.revision,
       ),
     );
+    const contexts = instructionContexts(payload);
     const complete =
+      contexts.every((context) => context && !context.requiresReplacement) &&
       !payload.unavailable &&
       !payload.evidence.requiresReplacement &&
       selected.length === selectedIds.length &&
@@ -158,26 +208,28 @@ async function snapshots(database: Database, ownerId: string, payloads: Authorit
         (row) =>
           !row.withdrawn && row.hidden_at === null && (row.role !== 'user' || row.owner_authored),
       ) &&
-      payload.evidence.messages.every((message) => {
-        const own = message.id ? byId.get(message.id) : undefined;
-        if (
-          message.id &&
-          (!own ||
-            own.role !== 'user' ||
-            own.text !== message.text ||
-            own.created_at.toISOString() !== message.at)
-        )
-          return false;
-        const answer = message.replyTo ? byId.get(message.replyTo.id) : undefined;
-        if (!message.replyTo) return true;
-        const visual = answer && presentationSchema.safeParse(answer.presentation);
-        return (
-          answer?.role === 'assistant' &&
-          [answer.text, visual?.success ? presentationText(visual.data) : '']
-            .filter(Boolean)
-            .join('\n\n') === message.replyTo.text
-        );
-      });
+      [payload.evidence, ...contexts.filter((context) => context !== undefined)]
+        .flatMap((context) => context.messages)
+        .every((message) => {
+          const own = message.id ? byId.get(message.id) : undefined;
+          if (
+            message.id &&
+            (!own ||
+              own.role !== 'user' ||
+              own.text !== message.text ||
+              own.created_at.toISOString() !== message.at)
+          )
+            return false;
+          const answer = message.replyTo ? byId.get(message.replyTo.id) : undefined;
+          if (!message.replyTo) return true;
+          const visual = answer && presentationSchema.safeParse(answer.presentation);
+          return (
+            answer?.role === 'assistant' &&
+            [answer.text, visual?.success ? presentationText(visual.data) : '']
+              .filter(Boolean)
+              .join('\n\n') === message.replyTo.text
+          );
+        });
     return { ids: selectedIds, complete, revision: digest(selected) };
   };
 }
@@ -194,22 +246,26 @@ export async function pendingDraftAuthorityInstructions(
   policyRevision: string,
 ) {
   const keys: string[] = [];
-  const baseKeys = authorities.map((original) => {
-    const base = {
-      ...original,
-      context: Array.isArray(original.context)
-        ? original.context.filter((entry) => Object(entry).kind !== 'authority')
-        : original.context,
-      conditionSources: original.conditionSources?.filter((ref) => ref.kind !== 'authority'),
-    };
-    return digest({ ownerId, threadId: turn.threadId, taskId, base, policyRevision });
-  });
-  const same = (
-    await database.query<{ key: string }>(
-      'SELECT key FROM draft_authority_instructions WHERE owner_id=$1 AND base_key=ANY($2::text[])',
-      [ownerId, baseKeys],
-    )
-  ).rows.map((row) => row.key);
+  const baseKeys = authorities.map((original) =>
+    digest({
+      ownerId,
+      threadId: turn.threadId,
+      taskId,
+      kind: original.kind,
+      scope: original.scope,
+      data: original.data,
+      intrinsicSourceIds: instructionContexts(original)
+        .flatMap((context) => (context ? instructionSourceMessageIds(context) : []))
+        .sort(),
+      activeOwnerData: Array.isArray(original.context)
+        ? original.context
+            .filter((entry) => Object(entry).kind === 'active')
+            .map((entry) => Object(entry).ownerData)
+        : [],
+      policyRevision,
+    }),
+  );
+  const same = baseKeys;
   for (const [index, original] of authorities.entries()) {
     const baseKey = baseKeys[index]!;
     const payload = {
@@ -223,14 +279,7 @@ export async function pendingDraftAuthorityInstructions(
     };
     const currentSnapshot = await snapshots(database, ownerId, [payload]);
     const current = currentSnapshot(payload);
-    const key = digest({
-      ownerId,
-      threadId: turn.threadId,
-      taskId,
-      payload,
-      sourceRevision: current.revision,
-      policyRevision,
-    });
+    const key = baseKey;
     await database.query(
       `INSERT INTO draft_authority_instructions(key,owner_id,thread_id,task_id,kind,authority_scope,payload,source_ids,source_revision,policy_revision,state,attempted,base_key)
        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT DO NOTHING`,
@@ -263,6 +312,7 @@ export async function prepareDraftAuthorityCapture(
   database: Database,
   ownerId: string,
   key: string,
+  turnId: string,
 ) {
   const source = (
     await database.query<Source>(
@@ -271,15 +321,23 @@ export async function prepareDraftAuthorityCapture(
     )
   ).rows[0];
   if (!source || source.state !== 'pending' || source.attempted) return;
-  await database.query(
-    'UPDATE draft_authority_instructions SET attempted=true WHERE owner_id=$1 AND key=$2',
-    [ownerId, key],
-  );
   const current = await snapshot(database, ownerId, source.payload);
+  const complete = current.complete && current.revision === source.source_revision;
+  if (
+    complete &&
+    !(
+      await database.query(
+        "UPDATE draft_authority_instructions SET attempted=true,attempt_turn_id=$3 WHERE owner_id=$1 AND key=$2 AND state='pending' AND attempted=false RETURNING key",
+        [ownerId, key, turnId],
+      )
+    ).rowCount
+  )
+    return;
   return {
     key,
+    turnId,
     revision: source.source_revision,
-    complete: current.complete && current.revision === source.source_revision,
+    complete,
     input: {
       purpose: 'message_condition_capture',
       newMessages: [
@@ -299,7 +357,7 @@ export async function prepareDraftAuthorityCapture(
 export async function finishDraftAuthorityCapture(
   database: Database,
   ownerId: string,
-  capture: { key: string; revision: string },
+  capture: { key: string; revision: string; turnId: string },
   state: 'clear' | 'relevant',
 ) {
   const source = (
@@ -312,6 +370,7 @@ export async function finishDraftAuthorityCapture(
     !source ||
     source.state !== 'pending' ||
     !source.attempted ||
+    source.attempt_turn_id !== capture.turnId ||
     source.source_revision !== capture.revision
   )
     return;
