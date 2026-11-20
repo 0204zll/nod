@@ -62,7 +62,7 @@ The web client reads saved chat state after a server update. A new update during
 
 One observer reads connected apps and saves private work. It starts separate tasks for outside actions, questions, and approvals. Those tasks use normal tools and Trust. See [Proactivity engine](/how-it-works/proactivity/). Ordinary tasks and schedules keep their normal tools.
 
-Before model work, the runtime checks exact owner inputs for conditions that require draft review. Pending source records already exist at that point. Accepted steering messages get their own records in the input transaction. The check uses the normal execution, usage, Stop and spending controls. Known conditions and explicit corrections stay as restriction-only evidence for the later action check. A failed, incomplete or uncertain capture stays pending.
+Before model work, the runtime checks exact owner inputs for conditions that require draft review. Pending source records already exist at that point. Accepted steering messages get their own records in the input transaction. The check uses the normal execution, usage, Stop and spending controls. Known conditions and explicit corrections stay as restriction-only evidence for the later action check. A failed, incomplete or uncertain capture stays unresolved.
 
 Each short source-write transaction takes the existing owner thread lock, then its turn lock, then the source and message locks. Action validation uses the same order. The transaction ends before any model or service request. A later child task reference does not change which turn first accepted an owner message. Offered task titles stay outside owner evidence; written qualifications keep their own source.
 
