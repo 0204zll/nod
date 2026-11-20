@@ -2471,6 +2471,206 @@ test(
           };
         },
       });
+      const capturedSourceCleanups = new Map<string, () => Promise<void>>();
+      const cleanCapturedSources = async (turnIds: string[]) => {
+        for (const turnId of [...turnIds].reverse()) {
+          await capturedSourceCleanups.get(turnId)?.();
+          capturedSourceCleanups.delete(turnId);
+        }
+      };
+      const captureFixtureSources = async (
+        turn: { threadId: string; turnId: string },
+        expectedText: string | null,
+      ) => {
+        assert.equal(capturedSourceCleanups.has(turn.turnId), false);
+        const current = await row(turn.turnId);
+        assert.equal(current.thread_id, turn.threadId);
+        assert.equal(current.task_id, null);
+        assert.equal(current.source, expectedText === null ? 'event' : 'user');
+        const kinds = expectedText === null ? ['rules', 'standing'] : ['rules'];
+        const preferences = (
+          await db.pool.query('SELECT rules,notification_rule FROM preferences WHERE owner_id=$1', [
+            ownerId,
+          ])
+        ).rows[0];
+        assert.equal(preferences?.rules ?? '', '');
+        if (expectedText === null) assert.equal(preferences?.notification_rule ?? '', '');
+        const beforeChat = new Set(
+          (
+            await db.pool.query(
+              'SELECT message_id FROM chat_draft_instructions WHERE owner_id=$1',
+              [ownerId],
+            )
+          ).rows.map(({ message_id }) => message_id),
+        );
+        const beforeAuthority = new Set(
+          (
+            await db.pool.query('SELECT key FROM draft_authority_instructions WHERE owner_id=$1', [
+              ownerId,
+            ])
+          ).rows.map(({ key }) => key),
+        );
+        const beforeLinks = new Set(
+          (
+            await db.pool.query(
+              'SELECT source_key FROM draft_authority_turns WHERE owner_id=$1 AND turn_id=$2',
+              [ownerId, turn.turnId],
+            )
+          ).rows.map(({ source_key }) => source_key),
+        );
+        const beforeFields = new Set(
+          (
+            await db.pool.query('SELECT kind FROM draft_owner_field_versions WHERE owner_id=$1', [
+              ownerId,
+            ])
+          ).rows.map(({ kind }) => kind),
+        );
+        capturedSourceCleanups.set(turn.turnId, async () => {
+          const chatIds = (
+            await db.pool.query(
+              'SELECT message_id FROM chat_draft_instructions WHERE owner_id=$1 AND turn_id=$2',
+              [ownerId, turn.turnId],
+            )
+          ).rows
+            .map(({ message_id }) => message_id)
+            .filter((id) => !beforeChat.has(id));
+          const links = (
+            await db.pool.query(
+              'SELECT source_key FROM draft_authority_turns WHERE owner_id=$1 AND turn_id=$2',
+              [ownerId, turn.turnId],
+            )
+          ).rows
+            .map(({ source_key }) => source_key)
+            .filter((key) => !beforeLinks.has(key));
+          const keys = links.filter((key) => !beforeAuthority.has(key));
+          await db.pool.query(
+            'DELETE FROM draft_authority_turns WHERE owner_id=$1 AND turn_id=$2 AND source_key=ANY($3::text[])',
+            [ownerId, turn.turnId, links],
+          );
+          await db.pool.query(
+            'DELETE FROM chat_draft_instructions WHERE owner_id=$1 AND turn_id=$2 AND message_id=ANY($3::uuid[])',
+            [ownerId, turn.turnId, chatIds],
+          );
+          await db.pool.query(
+            'DELETE FROM draft_authority_instructions d WHERE owner_id=$1 AND key=ANY($2::text[]) AND NOT EXISTS (SELECT 1 FROM draft_authority_turns p WHERE p.owner_id=d.owner_id AND p.source_key=d.key)',
+            [ownerId, keys],
+          );
+          await db.pool.query(
+            'DELETE FROM draft_owner_field_versions f WHERE owner_id=$1 AND kind=ANY($2::text[]) AND versions=$3::jsonb AND NOT EXISTS (SELECT 1 FROM draft_authority_instructions d WHERE d.owner_id=f.owner_id AND d.kind=f.kind)',
+            [
+              ownerId,
+              kinds.filter((kind) => !beforeFields.has(kind)),
+              JSON.stringify([{ value: '' }]),
+            ],
+          );
+          assert.equal(
+            (
+              await db.pool.query(
+                'SELECT count(*)::int AS count FROM chat_draft_instructions WHERE owner_id=$1 AND message_id=ANY($2::uuid[])',
+                [ownerId, [...beforeChat]],
+              )
+            ).rows[0].count,
+            beforeChat.size,
+          );
+          assert.equal(
+            (
+              await db.pool.query(
+                'SELECT count(*)::int AS count FROM draft_authority_instructions WHERE owner_id=$1 AND key=ANY($2::text[])',
+                [ownerId, [...beforeAuthority]],
+              )
+            ).rows[0].count,
+            beforeAuthority.size,
+          );
+          assert.deepEqual(
+            (
+              await db.pool.query(
+                'SELECT source_key FROM draft_authority_turns WHERE owner_id=$1 AND turn_id=$2 ORDER BY source_key',
+                [ownerId, turn.turnId],
+              )
+            ).rows.map(({ source_key }) => source_key),
+            [...beforeLinks].sort(),
+          );
+        });
+        let captures = 0;
+        const captureTrust = createTrust({
+          pool: db.pool,
+          ownerId,
+          sourceInputBytes: 64_000,
+          review: async (_instructions, input) => {
+            assert.equal(Object(input).purpose, 'message_condition_capture');
+            assert.notEqual(expectedText, null);
+            assert.equal(captures++, 0);
+            assert.deepEqual(
+              Object(input).newMessages.map(
+                ({ text, canAuthorize }: { text: string; canAuthorize: boolean }) => ({
+                  text,
+                  canAuthorize,
+                }),
+              ),
+              [{ text: expectedText, canAuthorize: false }],
+            );
+            assert.ok(
+              Object(input).userMessages.every(
+                (message: { canAuthorize: boolean }) => message.canAuthorize === false,
+              ),
+            );
+            assert.equal(Object(input).userMessages.at(-1)?.text, expectedText);
+            assert.deepEqual(Object(input).inheritedConditions, []);
+            return { messageCondition: 'clear', probability: 1 };
+          },
+        });
+        await captureTrust.pendingInstructions(turn);
+        await captureTrust.captureInstructions(turn, new AbortController().signal, () => true);
+        assert.equal(captures, expectedText === null ? 0 : 1);
+        const sources = (
+          await db.pool.query(
+            'SELECT d.*,m.text FROM chat_draft_instructions d JOIN messages m ON m.id=d.message_id AND m.owner_id=d.owner_id WHERE d.owner_id=$1 AND d.turn_id=$2 ORDER BY d.message_id',
+            [ownerId, turn.turnId],
+          )
+        ).rows;
+        assert.deepEqual(
+          sources.map(({ text }) => text),
+          expectedText === null ? [] : [expectedText],
+        );
+        for (const source of sources) {
+          assert.equal(source.thread_id, turn.threadId);
+          assert.equal(source.task_id, null);
+          assert.equal(source.state, 'clear');
+          assert.match(source.revision, /^[a-f0-9]{64}$/);
+          assert.match(source.policy_revision, /^[a-f0-9]{64}$/);
+          assert.ok(source.source_ids.includes(source.message_id));
+          assert.deepEqual(source.condition_sources, []);
+        }
+        const authorities = (
+          await db.pool.query(
+            'SELECT d.* FROM draft_authority_turns p JOIN draft_authority_instructions d ON d.owner_id=p.owner_id AND d.key=p.source_key WHERE p.owner_id=$1 AND p.turn_id=$2 ORDER BY d.kind',
+            [ownerId, turn.turnId],
+          )
+        ).rows;
+        assert.deepEqual(
+          authorities.map(({ kind }) => kind),
+          kinds,
+        );
+        for (const authority of authorities) {
+          assert.equal(authority.thread_id, turn.threadId);
+          assert.equal(authority.task_id, null);
+          assert.equal(authority.state, 'clear');
+          assert.equal(authority.attempted, true);
+          assert.equal(authority.payload.empty, true);
+          assert.deepEqual(authority.payload.evidence.messages, []);
+          assert.deepEqual(authority.payload.sourceIds, []);
+          assert.deepEqual(authority.payload.context, []);
+          assert.deepEqual(authority.payload.bindings, []);
+          assert.deepEqual(authority.payload.data, {
+            field: authority.kind === 'rules' ? 'rules' : 'notification_rule',
+            versions: [{ value: '' }],
+          });
+          assert.match(authority.source_revision, /^[a-f0-9]{64}$/);
+          assert.match(authority.policy_revision, /^[a-f0-9]{64}$/);
+          for (const source of sources)
+            assert.equal(source.policy_revision, authority.policy_revision);
+        }
+      };
       await t.test(
         'e2e curators classify typed approval replies without a live model',
         async (t) => {
@@ -4405,6 +4605,7 @@ test(
       await t.test('a retired confirmation reply cannot reuse the original request', async (t) => {
         const turnIds: string[] = [];
         t.after(async () => {
+          await cleanCapturedSources(turnIds);
           await db.pool.query(
             'DELETE FROM approvals WHERE turn_id=ANY($1::uuid[]) OR execution_turn_id=ANY($1::uuid[])',
             [turnIds],
@@ -4417,6 +4618,7 @@ test(
         const args = email('ana@example.test');
         const original = await begin(requestText);
         turnIds.push(original.turnId);
+        await captureFixtureSources(original, requestText);
         const approvalId = await propose(original, 'GMAIL_SEND_EMAIL', args);
         const confirmationId = (await stored(approvalId)).confirmation_message_id as string;
         const confirmed = await confirm(approvalId, true);
@@ -4622,6 +4824,7 @@ test(
         async (t) => {
           const turnIds: string[] = [];
           t.after(async () => {
+            await cleanCapturedSources(turnIds);
             await db.pool.query(
               'DELETE FROM approvals WHERE turn_id=ANY($1::uuid[]) OR execution_turn_id=ANY($1::uuid[])',
               [turnIds],
@@ -4634,6 +4837,7 @@ test(
             'Send the synthetic report to Ana at ana@example.test, then send the synthetic receipt to Bob at bob@example.test.';
           const original = await begin(requestText);
           turnIds.push(original.turnId);
+          await captureFixtureSources(original, requestText);
           const originalMessageId = (await row(original.turnId)).message_id as string;
           const approvalId = await propose(original, 'GMAIL_SEND_EMAIL', email('ana@example.test'));
           const confirmed = await confirm(approvalId, true);
@@ -4676,7 +4880,7 @@ test(
           assert.equal(words.find((item) => item.text === requestText)?.canAuthorize, true);
           const sent = calls.length;
           await approved.request(resumed, 'GMAIL_SEND_EMAIL', email('bob@example.test'), {
-            allowed: true,
+            allowed: !followOn.confirm,
             expectedChatRevision: followOn.chatRevision,
           });
           assert.equal(calls.length, sent + 1);
@@ -5398,7 +5602,9 @@ test(
 
       await t.test(
         'sign-in authority comes from the checker or an owned yes bound to the exact site and item',
-        async () => {
+        async (t) => {
+          const capturedTurns: string[] = [];
+          t.after(() => cleanCapturedSources(capturedTurns));
           const { createVaultAccess } = await import('../src/server/vault-access.ts');
           const site = 'https://bank.example.test';
           const first = randomUUID();
@@ -5434,6 +5640,8 @@ test(
           });
           assert.equal(reviews.length, afterGroup);
           const task = await begin('Download my bank statement.');
+          capturedTurns.push(task.turnId);
+          await captureFixtureSources(task, 'Download my bank statement.');
           const signIn = await access.authorize(task, {
             origin: site,
             kind: 'sign_in',
@@ -5541,6 +5749,8 @@ test(
         'saved task authority excludes owner instructions addressed to other work',
         async (t) => {
           const parent = await begin('Read my fixture flight dates.');
+          t.after(() => cleanCapturedSources([parent.turnId]));
+          await captureFixtureSources(parent, 'Read my fixture flight dates.');
           const preTaskQuestion = randomUUID();
           await db.pool.query(
             "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'assistant','Should I include the fixture taxes?')",
@@ -5884,10 +6094,16 @@ test(
 
       await t.test(
         'revision replies supersede the addressed proposal before a new user turn',
-        async () => {
+        async (t) => {
+          const capturedTurns: string[] = [];
+          t.after(() => cleanCapturedSources(capturedTurns));
           for (const explicit of [false, true]) {
             const before = calls.length;
             const origin = await begin('A useful change is ready.', { source: 'event' });
+            if (explicit) {
+              capturedTurns.push(origin.turnId);
+              await captureFixtureSources(origin, null);
+            }
             const args = { notificationRule: 'Original preference.' };
             const id = await propose(origin, 'NOD_notification_preferences_update', args);
             await finish(origin.turnId);

@@ -91,6 +91,14 @@ test(
       }));
     let rememberAnswer: (input: Remembered) => unknown = () => ({ ops: [] });
     let whilePreparing: ((signal?: AbortSignal) => Promise<void>) | undefined;
+    let expectedPrivateReview:
+      | {
+          action: 'NOD_memory_forget' | 'NOD_memory_control';
+          ownerText: string;
+          args: Record<string, unknown>;
+          sourceWindows: string[][];
+        }
+      | undefined;
     const plans = new Map<string, { steps: Step[]; finalText?: string }>();
     const finalTexts = new Set(['Synthetic memory request handled.']);
     const threads = new Set<string>();
@@ -150,8 +158,48 @@ test(
           configured: true,
           curate: async ({ task, input }, signal) => {
             if (task === 'review') reviews.push(JSON.stringify(input));
-            if (task === 'review' && Object(input).purpose === 'review_requirement')
+            if (task === 'review' && Object(input).purpose === 'review_requirement') {
+              if (expectedPrivateReview) {
+                assert.deepEqual(Object(input).action, {
+                  name: expectedPrivateReview.action,
+                  arguments: expectedPrivateReview.args,
+                });
+                assert.deepEqual(
+                  Object(input)
+                    .userMessages.filter(
+                      (message: { canAuthorize?: boolean }) => message.canAuthorize === true,
+                    )
+                    .map((message: { text: string }) => message.text),
+                  [expectedPrivateReview.ownerText],
+                );
+                const drafts = Object(input).messageDrafts as Array<{
+                  messages: Array<{ text: string; canAuthorize: boolean }>;
+                }>;
+                const sourceWindows = expectedPrivateReview.sourceWindows;
+                assert.deepEqual(
+                  drafts.map((draft) => ({
+                    ...draft,
+                    messages: draft.messages.map(({ text, canAuthorize }) => ({
+                      text,
+                      canAuthorize,
+                    })),
+                  })),
+                  sourceWindows.map((words, index) => ({
+                    kind: 'chat',
+                    draftId: null,
+                    connectionId: null,
+                    target: index === 0 ? { inheritedConditions: [] } : {},
+                    messages: words.map((text) => ({
+                      text,
+                      canAuthorize: false,
+                    })),
+                    unavailable: true,
+                  })),
+                );
+                return { review: 'clear', clearedDrafts: drafts.map((_draft, index) => index) };
+              }
               return { review: 'clear' };
+            }
             if (task === 'remember') {
               rememberInputs.push(JSON.stringify(input));
               await whilePreparing?.(signal);
@@ -499,7 +547,27 @@ test(
       assert.ok(contexts.at(-1)!.includes('synthetic-portal-statement'));
 
       const forget = 'Forget my synthetic weekday review routine.';
+      const sourceWords = [
+        'Synthetic runtime startup probe.',
+        'Review my synthetic project notes.',
+        explicit,
+        punctuation,
+        'Export my synthetic statement.',
+        'Export my synthetic statement once more.',
+        routineStart,
+        routineEnd,
+        forget,
+      ];
+      expectedPrivateReview = {
+        action: 'NOD_memory_forget',
+        ownerText: forget,
+        args: { path: routinePath, note: routineEnd },
+        sourceWindows: sourceWords.map((_text, index) =>
+          sourceWords.slice(Math.max(0, index - 4), index + 1),
+        ),
+      };
       await ask(forget, [personal('memory_forget', { path: routinePath })]);
+      expectedPrivateReview = undefined;
       assert.equal(await savedEntry(routineEnd), undefined);
       assert.ok(reviews.some((input) => input.includes('memory_forget')));
       assert.ok(reviews.every((input) => !input.includes(marker)));
@@ -653,7 +721,24 @@ test(
       );
 
       const clear = 'Clear everything you saved about me.';
+      const clearWords = [
+        ...sourceWords,
+        'Export my synthetic statement a third time.',
+        'Export my synthetic statement again.',
+        clear,
+      ];
+      const clearWindows = clearWords.map((_text, index) =>
+        clearWords.slice(Math.max(0, index - 4), index + 1),
+      );
+      clearWindows.splice(11, 0, clearWords.slice(7, 11), clearWords.slice(7, 11));
+      expectedPrivateReview = {
+        action: 'NOD_memory_control',
+        ownerText: clear,
+        args: { clear: true },
+        sourceWindows: clearWindows,
+      };
       await ask(clear, [personal('memory_control', { clear: true, quote: clear })]);
+      expectedPrivateReview = undefined;
       assert.deepEqual((await view()).notes, []);
       await t.test('setup requires a model and finishes without a connected inbox', async () => {
         await pool.query('DELETE FROM messages WHERE owner_id=$1', [ownerId]);

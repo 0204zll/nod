@@ -620,10 +620,18 @@ test(
         };
         const curator = {
           id: 'fixture', configured: true,
-          curate: async ({ input }) => input.purpose === 'confirmation'
-            ? { text: 'Create this schedule?', action: 'Create schedule' }
-            : input.purpose === 'confirmation_review' ? { valid: true }
-            : input.purpose === 'review_requirement' ? { review: 'clear' } : { run: false },
+          curate: async ({ input }) => {
+            if (input.purpose === 'message_condition_capture') {
+              assert.deepEqual(input.newMessages.map(message => message.text), ['Create the synthetic queued channel schedule.']);
+              assert.ok(input.newMessages.every(message => message.canAuthorize === false));
+              assert.deepEqual(input.inheritedConditions, []);
+              return { messageCondition: 'clear', probability: 1 };
+            }
+            return input.purpose === 'confirmation'
+              ? { text: 'Create this schedule?', action: 'Create schedule' }
+              : input.purpose === 'confirmation_review' ? { valid: true }
+              : input.purpose === 'review_requirement' ? { review: 'clear' } : { run: false };
+          },
         };
         const transport = createChatSdkTransport(pool, { TELEGRAM_ENABLED: 'true', TELEGRAM_BOT_TOKEN: '987:fixture-not-live', TELEGRAM_ALLOWED_USER_ID: '123456', TELEGRAM_WEBHOOK_SECRET_TOKEN: 'fixture-webhook-secret-32-characters' });
         let application;
@@ -661,6 +669,10 @@ test(
           }
           assert.ok(card, 'The queued request did not produce its complete approval after startup.');
           assert.equal(card.status, 'pending');
+          const source = (await query('SELECT state,revision,policy_revision FROM chat_draft_instructions WHERE message_id=$1', [submitted.messageId])).rows[0];
+          assert.equal(source.state, 'clear');
+          assert.match(source.revision, /^[a-f0-9]{64}$/);
+          assert.match(source.policy_revision, /^[a-f0-9]{64}$/);
           assert.ok(card.text.includes(prompt));
           assert.ok(card.text.includes('Synthetic startup review'));
           assert.equal(calls, 1);

@@ -6674,19 +6674,64 @@ test(
               assert.equal(newChat?.authorizingIds.includes(creator.messageId) ?? false, false);
               assert.ok(newChat?.authorizingIds.includes(fresh.messageId));
               const { createTrust } = await import('../src/server/trust.ts');
-              const oldGrant = await createTrust({
-                pool: db.pool,
-                ownerId,
-                review: async (_instructions, input) =>
-                  Object(input).purpose === 'review_requirement'
-                    ? { review: 'clear' }
-                    : { run: true, because: prompt },
-              }).check(
-                { threadId: creator.threadId, turnId: fresh.turnId },
-                'SYNTHETIC_SEND_REPORT',
-                { target: 'synthetic-report' },
+              let primaryInput: Record<string, unknown> | undefined;
+              let restrictionInput: Record<string, unknown> | undefined;
+              await assert.rejects(
+                createTrust({
+                  pool: db.pool,
+                  ownerId,
+                  review: async (_instructions, input) => {
+                    if (Object(input).purpose === 'review_requirement') {
+                      restrictionInput = input as Record<string, unknown>;
+                      return { review: 'clear' };
+                    }
+                    primaryInput = input as Record<string, unknown>;
+                    return { run: true, because: prompt };
+                  },
+                }).check(
+                  { threadId: creator.threadId, turnId: fresh.turnId },
+                  'SYNTHETIC_SEND_REPORT',
+                  { target: 'synthetic-report' },
+                ),
+                (error: unknown) => {
+                  assert.ok(error instanceof Error);
+                  assert.equal(
+                    error.message,
+                    'Nod cannot show and verify the complete message for the required review. No action was run.',
+                  );
+                  assert.equal((error as { notRun?: boolean }).notRun, true);
+                  return true;
+                },
               );
-              assert.equal(oldGrant.confirm, true);
+              for (const input of [primaryInput, restrictionInput]) {
+                assert.ok(input);
+                assert.deepEqual(input.action, {
+                  name: 'SYNTHETIC_SEND_REPORT',
+                  arguments: { target: 'synthetic-report' },
+                });
+                const words = input.userMessages as Array<{ text: string; canAuthorize?: boolean }>;
+                assert.ok(
+                  words.some(
+                    (message) => message.text === freshPrompt && message.canAuthorize === true,
+                  ),
+                );
+                assert.ok(
+                  words.every(
+                    (message) => message.text !== prompt || message.canAuthorize === false,
+                  ),
+                );
+                assert.ok(
+                  words.some(
+                    (message) => message.text === restriction && message.canAuthorize === false,
+                  ),
+                );
+                assert.ok(
+                  (input.messageDrafts as Array<{ unavailable?: boolean }>).some(
+                    (draft) => draft.unavailable === true,
+                  ),
+                );
+              }
+              assert.deepEqual(primaryInput!.userMessages, restrictionInput!.userMessages);
               assert.deepEqual(
                 (
                   await db.pool.query('SELECT status,withdrawn,error FROM turns WHERE id=$1', [

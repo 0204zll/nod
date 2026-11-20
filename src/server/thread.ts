@@ -348,6 +348,7 @@ export function withDraftLock<T>(
   turn: { threadId: string; turnId: string },
   signal: AbortSignal | undefined,
   operation: (client: PoolClient) => Promise<T>,
+  database: Pool = pool,
 ) {
   signal ??= running.get(turn.turnId)?.signal;
   return transaction(
@@ -362,7 +363,7 @@ export function withDraftLock<T>(
         client,
       );
     },
-    pool,
+    database,
     signal,
   );
 }
