@@ -1837,6 +1837,84 @@ test(
       assert.ok(!JSON.stringify(await f.retained()).includes(reply.text));
     });
 
+    await t.test(
+      'legacy backfill keeps the first main input scope after a child reference',
+      async () => {
+        const f = await fixture();
+        const original = await f.add(
+          'Show the synthetic legacy report before sending.',
+          '2026-11-19T09:58:00.000Z',
+        );
+        const taskId = randomUUID();
+        const childTurnId = randomUUID();
+        await database.query(
+          'INSERT INTO tasks(id,owner_id,title,created_at) VALUES($1,$2,$3,$4)',
+          [taskId, f.ownerId, 'Synthetic child task', '2026-11-19T10:00:00.000Z'],
+        );
+        await database.query(
+          "INSERT INTO turns(id,owner_id,thread_id,message_id,source,created_at,task_id,parent_turn_id) VALUES($1,$2,$3,$4,'task',$5,$6,$7)",
+          [
+            childTurnId,
+            f.ownerId,
+            f.threadId,
+            original.id,
+            '2026-11-19T10:01:00.000Z',
+            taskId,
+            original.turnId,
+          ],
+        );
+        await initializeChatDraftInstructions(database);
+        const row = await f.row(original.id);
+        assert.equal(row.turn_id, original.turnId);
+        assert.equal(row.task_id, null);
+        const retained = await f.retained();
+        assert.equal(retained.length, 1);
+        assert.equal(retained[0].unavailable, true);
+        assert.ok(JSON.stringify(retained).includes(original.text));
+      },
+    );
+
+    await t.test('legacy backfill keeps a queued reply with its first accepting task', async () => {
+      const f = await fixture();
+      const original = await f.add(
+        'Prepare the synthetic parent report.',
+        '2026-11-19T09:58:00.000Z',
+      );
+      const reply = await f.add(
+        'Show the synthetic task report before sending.',
+        '2026-11-19T10:02:00.000Z',
+        original.turnId,
+      );
+      const tasks = [randomUUID(), randomUUID()];
+      const turns = [randomUUID(), randomUUID()];
+      for (const [index, taskId] of tasks.entries()) {
+        await database.query(
+          'INSERT INTO tasks(id,owner_id,title,created_at) VALUES($1,$2,$3,$4)',
+          [taskId, f.ownerId, `Synthetic accepting task ${index}.`, '2026-11-19T10:00:00.000Z'],
+        );
+        await database.query(
+          "INSERT INTO turns(id,owner_id,thread_id,message_id,source,created_at,task_id,parent_turn_id) VALUES($1,$2,$3,$4,'task',$5,$6,$7)",
+          [
+            turns[index],
+            f.ownerId,
+            f.threadId,
+            reply.id,
+            `2026-11-19T10:0${index + 2}:00.000Z`,
+            taskId,
+            original.turnId,
+          ],
+        );
+      }
+      await initializeChatDraftInstructions(database);
+      const row = await f.row(reply.id);
+      assert.equal(row.turn_id, turns[0]);
+      assert.equal(row.task_id, tasks[0]);
+      const main = await f.retained();
+      assert.ok(!JSON.stringify(main).includes(reply.text));
+      const task = await f.retained(tasks[0]);
+      assert.ok(JSON.stringify(task).includes(reply.text));
+    });
+
     await t.test('legacy backfill preserves a missing message as pending', async () => {
       const f = await fixture();
       const message = await f.add('Synthetic legacy condition.');

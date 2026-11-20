@@ -94,7 +94,7 @@ export async function initializeChatDraftInstructions(database: Database) {
       WHERE u.message_id IS NOT NULL AND (u.source='user' OR (u.source IN ('task','resume')
         AND (m.role='user' OR m.id IS NULL))) AND m.approval_answer IS NULL
         AND (m.id IS NULL OR (m.role='user' AND ${ownerMessageContentSql('m')}))
-      ORDER BY u.message_id,u.created_at DESC,u.id DESC
+      ORDER BY u.message_id,u.created_at,u.id
       ON CONFLICT(message_id) DO NOTHING;
   `);
 }
