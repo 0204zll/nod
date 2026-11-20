@@ -12436,7 +12436,7 @@ test(
 );
 
 test(
-  'bug report drafts send their stored summary once and only for their owner',
+  'bug report drafts send their stored summary once, after a rejected attempt, and only for their owner',
   { skip: !process.env.TEST_DATABASE_URL, timeout: 30_000 },
   async (t) => {
     const f = await feedbackFixture(t);
@@ -12462,16 +12462,89 @@ test(
     );
     assert.equal((await other.app.inject(send)).statusCode, 404);
     assert.equal(f.state.envelopes.length, 0);
+    f.state.receiptStatus = 'rejected';
+    assert.equal((await owner.app.inject(send)).json().status, 'rejected');
+    assert.equal(
+      (await owner.app.inject({ method: 'GET', url: `/api/feedback/drafts/${id}` })).json().receipt,
+      null,
+    );
+    assert.equal(
+      (await owner.app.inject({ method: 'GET', url: `/api/feedback/${id}` })).json().status,
+      'rejected',
+    );
+    f.state.receiptStatus = 'submitted';
     assert.equal((await owner.app.inject(send)).json().status, 'submitted');
     assert.equal((await owner.app.inject(send)).json().status, 'submitted');
-    assert.equal(f.state.envelopes.length, 1);
-    assert.equal(f.state.envelopes[0]!.submissionId, id);
-    assert.equal(f.state.envelopes[0]!.feedback, 'Synthetic draft summary.');
+    assert.equal(f.state.envelopes.length, 2);
+    assert.equal(f.state.envelopes[1]!.submissionId, id);
+    assert.equal(f.state.envelopes[1]!.feedback, 'Synthetic draft summary.');
     assert.equal(
       (await owner.app.inject({ method: 'GET', url: `/api/feedback/drafts/${id}` })).json().receipt
         .status,
       'submitted',
     );
+    const uncertain = randomUUID();
+    await f.pool.query(
+      'INSERT INTO feedback_drafts(id,owner_id,thread_id,summary) VALUES($1,$2,$3,$4)',
+      [uncertain, owner.ownerId, randomUUID(), 'Synthetic uncertain summary.'],
+    );
+    const resend = { ...send, url: `/api/feedback/drafts/${uncertain}/send` };
+    f.state.receiptStatus = 'unknown';
+    assert.equal((await owner.app.inject(resend)).json().status, 'unknown');
+    f.state.receiptStatus = 'submitted';
+    assert.equal((await owner.app.inject(resend)).json().status, 'unknown');
+    assert.equal(f.state.envelopes.length, 3);
+    const claimed = randomUUID();
+    await f.pool.query(
+      'INSERT INTO feedback_drafts(id,owner_id,thread_id,summary) VALUES($1,$2,$3,$4)',
+      [claimed, owner.ownerId, randomUUID(), 'Synthetic claimed summary.'],
+    );
+    assert.equal(
+      (await owner.app.inject({ method: 'GET', url: `/api/feedback/${claimed}` })).json().status,
+      'rejected',
+    );
+    assert.equal(
+      (await owner.app.inject({ ...send, url: `/api/feedback/drafts/${claimed}/send` })).json()
+        .status,
+      'submitted',
+    );
+    assert.equal(f.state.envelopes.length, 4);
+    await f.pool.query(
+      "UPDATE feedback_submissions SET created_at=now()-interval '10 minutes' WHERE owner_id=$1 AND id=$2",
+      [owner.ownerId, uncertain],
+    );
+    const held: Array<() => void> = [];
+    let arrived = () => {};
+    const holding = (count: number) =>
+      new Promise<void>((done) => {
+        arrived = () => held.length >= count && done();
+        arrived();
+      });
+    f.state.beforeDeliver = () =>
+      held.length < 3
+        ? new Promise<void>((done) => {
+            held.push(done);
+            arrived();
+          })
+        : Promise.resolve();
+    f.state.receiptStatus = 'rejected';
+    const check = () => owner.app.inject({ method: 'GET', url: `/api/feedback/${uncertain}` });
+    const early = check();
+    await holding(1);
+    const late = check();
+    await holding(2);
+    held[0]!();
+    assert.equal((await early).json().status, 'rejected');
+    const retry = owner.app.inject(resend);
+    await holding(3);
+    held[1]!();
+    assert.equal((await late).json().status, 'unknown');
+    f.state.receiptStatus = 'submitted';
+    assert.equal((await owner.app.inject(resend)).json().status, 'unknown');
+    assert.equal(f.state.envelopes.length, 5);
+    held[2]!();
+    assert.equal((await retry).json().status, 'submitted');
+    f.state.beforeDeliver = undefined;
   },
 );
 
