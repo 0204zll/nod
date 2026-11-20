@@ -70,6 +70,17 @@ const telegramReaction = z.object({
     .array(z.object({ type: z.string(), emoji: z.string().min(1).max(64).optional() }))
     .max(10),
 });
+function telegramRefusal(status: number, data: unknown) {
+  const body = z
+    .object({ error_code: z.number().int().optional(), description: z.string().optional() })
+    .catch({})
+    .parse(data);
+  const code = body.error_code ?? status;
+  return code >= 400 && code < 500 && ![401, 403, 404, 429].includes(code)
+    ? body.description || `Telegram refused it with status ${code}.`
+    : undefined;
+}
+
 class TelegramMarkdown extends TelegramFormatConverter {
   override fromMarkdown(markdown: string) {
     return telegramText(markdown);
@@ -100,6 +111,18 @@ class Telegram extends TelegramAdapter {
         : payload,
       request,
     );
+  }
+
+  protected override throwTelegramApiError(
+    method: string,
+    status: number,
+    data: { ok: boolean; error_code?: number; description?: string },
+  ): never {
+    try {
+      return super.throwTelegramApiError(method, status, data);
+    } catch (cause) {
+      throw Object.assign(cause as Error, { refusal: telegramRefusal(status, data) });
+    }
   }
 
   fits(text: string, limit: number) {
@@ -947,6 +970,15 @@ export function createChatSdkTransport(
           });
         }
       }
+      const refusals = new Map<(typeof attachments)[number], string>();
+      const sendCaption = async () => {
+        if (caption)
+          for (const part of telegram!.chunks(input.text)) {
+            const sent = await post({ markdown: part });
+            id ||= sent.id;
+            ids.push(sent.id);
+          }
+      };
       for (const file of attachments) {
         if (unsent.includes(file)) continue;
         if (input.channelId === 'telegram' && /^audio\/(ogg|mpeg|mp4)$/.test(file.mimeType)) {
@@ -969,7 +1001,16 @@ export function createChatSdkTransport(
             `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`,
             { method: 'POST', body, signal: AbortSignal.timeout(60_000), redirect: 'error' },
           );
-          if (!response.ok) throw new Error('Voice delivery was not confirmed.');
+          if (!response.ok) {
+            const refusal = telegramRefusal(
+              response.status,
+              await response.json().catch(() => undefined),
+            );
+            if (!refusal) throw new Error('Voice delivery was not confirmed.');
+            refusals.set(file, refusal);
+            unsent.push(file);
+            continue;
+          }
           const sent = z
             .object({
               ok: z.literal(true),
@@ -985,12 +1026,7 @@ export function createChatSdkTransport(
         try {
           bytes = await file.read();
         } catch {
-          if (caption)
-            for (const part of telegram!.chunks(input.text)) {
-              const sent = await post({ markdown: part });
-              id ||= sent.id;
-              ids.push(sent.id);
-            }
+          await sendCaption();
           unsent.push(file);
           continue;
         }
@@ -1097,8 +1133,14 @@ export function createChatSdkTransport(
               },
             );
             if (!response.ok) {
-              await response.body?.cancel().catch(() => {});
-              throw new Error('Message delivery was not confirmed.');
+              const refusal = telegramRefusal(
+                response.status,
+                await response.json().catch(() => undefined),
+              );
+              if (!refusal) throw new Error('Message delivery was not confirmed.');
+              refusals.set(file, refusal);
+              unsent.push(file);
+              break;
             }
             const sent = z
               .object({
@@ -1134,15 +1176,21 @@ export function createChatSdkTransport(
             id ||= sent.id;
             ids.push(sent.id);
           },
-          () => {
-            if (caption) throw new Error('Media delivery was not confirmed.');
+          async (cause: { refusal?: string } | undefined) => {
+            if (caption) {
+              if (!cause?.refusal) throw new Error('Media delivery was not confirmed.');
+              await sendCaption();
+            }
+            if (cause?.refusal) refusals.set(file, cause.refusal);
             unsent.push(file);
           },
         );
       }
       if (unsent.length) {
         const notice = await input
-          .attachmentFailure?.(unsent.map((file) => file.name))
+          .attachmentFailure?.(
+            unsent.map((file) => ({ name: file.name, reason: refusals.get(file) })),
+          )
           .catch(() => undefined);
         const notices =
           input.channelId === 'telegram'
