@@ -7810,6 +7810,165 @@ test('ShipIt waiting promotes a confirmed request and checks current work after 
   }
 });
 
+test('ShipIt waiting restarts a staged update without another source check', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let active = true;
+  let online = true;
+  let lookups = 0;
+  let downloads = 0;
+  const restarts = [];
+  const prompts = [];
+  const candidate = { version: '0.3.0', feedUrl: 'https://updates.example.invalid/0.3.0' };
+  const native = new EventEmitter();
+  native.setFeedURL = ({ url }) => assert.equal(url, candidate.feedUrl);
+  native.checkForUpdates = () => {
+    downloads++;
+    queueMicrotask(() => native.emit('update-downloaded', {}, '', 'Nod 0.3.0'));
+  };
+  const updater = createDesktopUpdater({
+    currentVersion: '0.2.0',
+    source: {
+      latest: async () => {
+        lookups++;
+        if (!online) throw new Error('Synthetic update source is offline.');
+        return candidate;
+      },
+    },
+    native,
+    prepareRuntime: async () => {},
+    restart: async (ready) => restarts.push(ready.version),
+  });
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
+    platform: 'darwin',
+    packaged: true,
+    version: '0.2.0',
+    updateResume: { version: '0.2.0' },
+    installerRunning: async () => active,
+    prompt: (options) => {
+      prompts.push(options.message);
+      return { response: 2 };
+    },
+  });
+  const pending = [];
+  try {
+    assert.equal(await updater.check(), candidate);
+    assert.equal(updater.ready, candidate);
+    assert.equal(downloads, 1);
+    online = false;
+    f.showEngine();
+    await new Promise(setImmediate);
+    const window = f.windows.at(-1);
+    const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+    assert.equal(await f.detectInstaller(), false);
+    pending.push(f.checkUpdates(updater, false));
+    pending.push(f.handlers.get('nod:updates:restart')(event));
+    await new Promise(setImmediate);
+    assert.equal(lookups, 1);
+    assert.deepEqual(restarts, []);
+    active = false;
+    t.mock.timers.tick(5_000);
+    await Promise.all(pending);
+    assert.equal(lookups, 1);
+    assert.equal(downloads, 1);
+    assert.deepEqual(restarts, ['0.3.0']);
+    assert.deepEqual(prompts, []);
+  } finally {
+    active = false;
+    t.mock.timers.tick(5_000);
+    await Promise.all(pending);
+    await updater.dispose();
+    f.crash();
+    await f.close();
+  }
+});
+
+test('ShipIt waiting preserves staged restart intent through later state changes', async (t) => {
+  for (const mode of ['concurrent restart', 'quit', 'current work', 'candidate unavailable'])
+    await t.test(mode, async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      let active = true;
+      let ready = { version: '0.3.0' };
+      let checks = 0;
+      let restarts = 0;
+      let installs = 0;
+      let quits = 0;
+      const events = [];
+      const f = await runningDesktop(
+        t,
+        (url) => {
+          assert.equal(new URL(url).pathname, '/api/desktop/status');
+          events.push('work read');
+          return Response.json({ running: [{ visible: true }] });
+        },
+        {
+          platform: 'darwin',
+          packaged: true,
+          version: '0.2.0',
+          updateResume: { version: '0.2.0' },
+          installerRunning: async () => active,
+          quitAndInstall: () => installs++,
+          prompt: (options) => {
+            assert.equal(options.message, 'Nod is still working.');
+            events.push('work question');
+            return { response: 1 };
+          },
+        },
+      );
+      const updater = {
+        get ready() {
+          return ready;
+        },
+        async check() {
+          checks++;
+          ready = { version: '0.4.0' };
+          return ready;
+        },
+        async restart() {
+          restarts++;
+          if (mode === 'current work') await f.restartForUpdate();
+          else await new Promise(setImmediate);
+        },
+        async dispose() {},
+      };
+      const pending = [];
+      try {
+        f.showEngine();
+        await new Promise(setImmediate);
+        const window = f.windows.at(-1);
+        const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+        assert.equal(await f.detectInstaller(), false);
+        pending.push(f.checkUpdates(updater, false));
+        const restart = f.handlers.get('nod:updates:restart');
+        pending.push(restart(event));
+        if (mode === 'concurrent restart') pending.push(restart(event), f.checkUpdates(updater));
+        await new Promise(setImmediate);
+        assert.equal(checks, 0);
+        assert.equal(restarts, 0);
+        assert.deepEqual(events, []);
+        if (mode === 'candidate unavailable') ready = undefined;
+        if (mode === 'quit') {
+          f.crash();
+          await f.quit(async () => quits++);
+        }
+        active = false;
+        t.mock.timers.tick(5_000);
+        await Promise.all(pending);
+        assert.equal(checks, mode === 'candidate unavailable' ? 1 : 0);
+        assert.equal(restarts, mode === 'quit' ? 0 : 1);
+        assert.equal(quits, mode === 'quit' ? 1 : 0);
+        assert.equal(installs, 0);
+        assert.deepEqual(events, mode === 'current work' ? ['work read', 'work question'] : []);
+        if (mode === 'candidate unavailable') assert.equal(ready.version, '0.4.0');
+      } finally {
+        active = false;
+        t.mock.timers.tick(5_000);
+        await Promise.all(pending);
+        f.crash();
+        await f.close();
+      }
+    });
+});
+
 test('automatic update checks retry failures sooner and return to the normal interval', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const powerMonitor = new EventEmitter();

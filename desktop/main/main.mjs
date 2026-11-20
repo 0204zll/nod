@@ -221,6 +221,7 @@ let updateSource;
 let updates;
 let checkingUpdates;
 let updateRequestedManually = false;
+let updateRestartRequested = false;
 let updateRestartConfirmed = false;
 let updatePhase = 'idle';
 let updateStep = 'checking';
@@ -2325,18 +2326,24 @@ async function checkForUpdates(manual = true, restartReady = false, confirmed = 
   if (!updates || quitting) return;
   if (checkingUpdates) {
     if (manual) updateRequestedManually = true;
+    if (restartReady) updateRestartRequested = true;
     if (confirmed) updateRestartConfirmed = true;
     return checkingUpdates;
   }
   if (macInstallerBusy) {
     updateRequestedManually = manual;
+    updateRestartRequested = restartReady;
     updateRestartConfirmed = confirmed;
     let waiting;
     waiting = waitForMacInstaller()
       .then(() => {
         if (quitting) return;
         if (checkingUpdates === waiting) checkingUpdates = undefined;
-        return checkForUpdates(updateRequestedManually, restartReady, updateRestartConfirmed);
+        return checkForUpdates(
+          updateRequestedManually,
+          updateRestartRequested && Boolean(updates.ready),
+          updateRestartConfirmed,
+        );
       })
       .finally(() => {
         if (checkingUpdates === waiting) checkingUpdates = undefined;
