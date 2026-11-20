@@ -97,6 +97,7 @@ export async function initializeDatabase() {
     CREATE UNIQUE INDEX IF NOT EXISTS turns_owner_source ON turns(owner_id,source_id) WHERE source_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS turns_thread_queue ON turns(thread_id,status,created_at,id);
     CREATE INDEX IF NOT EXISTS turns_owner_time ON turns(owner_id,created_at,id);
+    CREATE INDEX IF NOT EXISTS turns_owner_message ON turns(owner_id,message_id);
     CREATE UNIQUE INDEX IF NOT EXISTS turns_proactive_queued ON turns(owner_id,thread_id) WHERE proactive AND source='event' AND status='queued';
     CREATE TABLE IF NOT EXISTS turn_events (
       id uuid PRIMARY KEY, turn_id uuid NOT NULL REFERENCES turns(id), type text NOT NULL,
@@ -130,6 +131,7 @@ export async function initializeDatabase() {
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS display_text text;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS audio_caption text;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS suggestions jsonb;
+    CREATE INDEX IF NOT EXISTS messages_task_offers ON messages(owner_id,thread_id,created_at,id) WHERE role='assistant' AND suggestions IS NOT NULL;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS presentation jsonb;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS answer_choices jsonb;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS question_answer jsonb;

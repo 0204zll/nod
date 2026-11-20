@@ -23,6 +23,7 @@ export interface OwnerInstructions {
 export function ownerMessageContentSql(message: string) {
   return `NOT EXISTS (SELECT 1 FROM messages offer, jsonb_array_elements(offer.suggestions->'tasks') task
     WHERE offer.owner_id=${message}.owner_id AND offer.thread_id=${message}.thread_id AND offer.role='assistant'
+      AND offer.suggestions IS NOT NULL
       AND (offer.created_at,offer.id)<(${message}.created_at,${message}.id) AND task->>'title'=${message}.text)`;
 }
 
