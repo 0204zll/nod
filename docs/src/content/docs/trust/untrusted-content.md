@@ -19,6 +19,8 @@ Any tag in the content that could close the block early is neutralized. The same
 
 A connected MCP server's own guide to its tools, such as n8n's build steps, reaches the model the same way: Nod follows it for how to use that server's tools, but it never counts as your words or grants permission.
 
+When one [side chat](/use/tasks/#side-chats) reads another's work, the other chat's goal, result and latest messages reach the model in the same block, so one chat's text never instructs another.
+
 Results from Nod's workspace tools, such as reading a file, aren't wrapped, even when the file came from the web. Error messages from outside tools aren't wrapped either.
 
 ```mermaid

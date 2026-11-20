@@ -15,7 +15,7 @@ Nod follows your latest clear message's language, spoken or typed, including que
 
 ## Send a message
 
-Type in the message box and press Enter. Press Shift+Enter for a new line.
+Type in the message box and press Enter. Press Shift+Enter for a new line. On a phone, or a tablet without a trackpad, Return adds a new line, and the send button sends. On an iPad with a keyboard, Command+Return also sends.
 
 Pasted text stays literal by default. Nod uses the clipboard's plain text even when the source also offers formatting. Line breaks, indentation and Markdown-looking characters such as `*priority*`, `# call` and `<u>text</u>` stay as written in the composer, the sent message and Nod's request. If plain text in the same paragraph would change it, such as a `!` before a link or a `*` that pairs with italic text, the sent message adds backslashes: before that `!`, or before every `*`, `_`, `~` and backtick in the paragraph's plain text. A web or email address typed directly against formatting is sent as a link, such as `<https://example.com>`. An unsent pasted draft keeps them after a reload.
 
@@ -279,7 +279,7 @@ After first-time setup, a short invitation points to **Report bug**. Dismiss it 
 
 When something in Nod itself fails, or you tell Nod that something in Nod isn't working, Nod drafts a bug report once with a short summary of what happened. In the app, the draft appears in chat as a card with the summary, **Include diagnostic report**, **Review** and **Send report**. One click on **Send report** sends it to the same recipient as the dialog. Nod skips this for errors from outside services, such as a missing connection, credits, an app outage or a website's own error, and in background checks.
 
-A request, task or schedule run that stops on an unexpected error outside the model connection ends with the same card, with a short fixed summary. The error itself goes in the diagnostic report, not the summary. A model connection failure links to **Settings > Models** instead.
+A request, task or schedule run that stops on an unexpected error outside the model connection ends with the same card, with a short fixed summary. The error itself goes in the diagnostic report, not the summary. A model connection failure links to **Settings > Models** instead. A reply the model cut off at its output limit offers no bug report either: say continue to pick up where it stopped, or choose a model with a larger output limit in **Settings > Models**.
 
 In Telegram and WhatsApp, the draft arrives as text. Reply "send" to share the summary, without a diagnostic report, since you can't review one there. To add the report, send the same draft from its card in Nod on your computer. Nod sends it only when your reply clearly asks for that, and otherwise asks you to confirm first. Nothing is sent until you click **Send report** or reply to send it.
 

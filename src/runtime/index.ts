@@ -26,6 +26,7 @@ import {
   appConfirmation,
   ContextLimitError,
   ModelRequestError,
+  OutputLimitError,
   ToolFailureError,
 } from '../ports/agent.ts';
 import type { Computer, Workspace } from '../ports/computer.ts';
@@ -1340,7 +1341,9 @@ export function createAgentRuntime(dependencies: {
           `The model response was cut off because its context is full. Choose a model with a larger context in ${appPages['/settings/models']}.`,
         );
       if (modelIncomplete && status === 'succeeded')
-        throw new Error('The model response was incomplete. Say continue to try again.');
+        throw new OutputLimitError(
+          `The model response was cut off at its output limit. Say continue to pick up where it stopped, or choose a model with a larger output limit in ${appPages['/settings/models']}.`,
+        );
       if (stopped && status === 'succeeded') throw new Error('The turn was stopped.');
       if (status === 'succeeded' && (context.proactivity ? overBudget() : checkInStopped)) {
         status = 'waiting_user';
