@@ -1,5 +1,5 @@
-import { modelProviderInfo } from '../shared/models.ts';
 import { addRedactionSpan, redactionMatches, type RedactionSpan } from './redaction-spans.ts';
+export { environmentSecrets } from '../shared/environment-secrets.mjs';
 
 const payloadDefault = 16_384;
 const hidden = '[redacted]';
@@ -84,27 +84,6 @@ export function secretTextSpans(input: string) {
   suffix(secretAssignment);
   whole(base64Data, '[binary omitted]');
   return spans;
-}
-
-export function environmentSecrets(environment: Record<string, string | undefined>) {
-  const modelKeys = new Set(Object.values(modelProviderInfo).map((provider) => provider.env));
-  const secrets = Object.entries(environment)
-    .filter(
-      ([key]) =>
-        modelKeys.has(key) ||
-        /(?:API_KEY|SECRET|PASSWORD|VAULT_KEY|BOT_TOKEN|ACCESS_TOKEN|AUTH_TOKEN|FEEDBACK_TOKEN|TRACES_TOKEN|UPDATES_TOKEN)$/.test(
-          key,
-        ),
-    )
-    .flatMap(([, value]) => (value ? [value] : []));
-  if (environment.DATABASE_URL) {
-    secrets.push(environment.DATABASE_URL);
-    try {
-      const password = decodeURIComponent(new URL(environment.DATABASE_URL).password);
-      if (password) secrets.push(password);
-    } catch {}
-  }
-  return secrets;
 }
 
 export function redactSecretText(value: string): string {
