@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AppState, Artifact, Message, MessageHistoryPage, Task } from '../../shared/contracts';
 import { api, errorMessage } from '../lib/api';
-import { CarriedNote, ChatHeader } from '../components/named-chats';
+import { CarriedNote, ChatHeader, ChatStatus } from '../components/named-chats';
 import { Composer } from '../components/composer';
 import { Notice } from '../components/ui';
 import type { NamedChat as Named } from '../lib/named-chats';
@@ -130,6 +130,15 @@ export function NamedChat({
             chat.continuedFrom && (
               <CarriedNote messageId={chat.continuedFrom} onOpen={() => onNavigate('/')} />
             )
+          }
+          afterMessage={(message) =>
+            message.id === chat.requestMessageId ? (
+              <ChatStatus
+                chat={chat}
+                request={message.displayText ?? message.text}
+                live={state.activity?.find((item) => item.taskId === chat.id)}
+              />
+            ) : null
           }
           requestedMessage={firstMessage && { ...firstMessage, source: 'composer' }}
           onRequestHandled={onFirstMessageSent}

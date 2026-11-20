@@ -32,6 +32,7 @@ import { ChatSkeleton } from './components/startup';
 import { SetupProgress } from './components/setup-progress';
 import { ServerAccess } from './components/server-access';
 import { Sidebar } from './components/sidebar';
+import { PageHeader } from './components/page-title';
 import { DesktopUpdateToast } from './components/desktop-update-toast';
 import { FeedbackDialog } from './components/feedback';
 import { createFeedbackCapture } from './lib/feedback-capture';
@@ -232,63 +233,62 @@ function Workspace({
       <a href="#workspace" className="skip-link">
         Skip to content
       </a>
-      {!settingsPage(path) && (
-        <Sidebar
-          path={path}
-          chats={
-            <ChatList
-              chats={namedChats}
-              activeId={openChatId}
-              mainActive={path === '/'}
-              mainWorking={Boolean(
-                connected &&
-                state?.activity?.some(
-                  (item) =>
-                    !item.background &&
-                    !state.tasks?.some((task) => task.id === item.taskId && task.name),
-                ),
-              )}
-              mainUnread={path !== '/' && (unread.count > 0 || unread.pending)}
-              draftActive={draftOpen}
-              unread={(chat) => chat.id !== openChatId && chatUnread(chat, chatCursors)}
-              earlier={earlierChats(state?.tasks, namedChats)}
-              onNavigate={navigate}
-              onChanged={() => void refresh()}
-            />
-          }
-          unreadCount={Math.max(
-            0,
-            unread.count -
-              (state && unread.cursor
-                ? state.messages.filter(
-                    (message) =>
-                      message.role === 'assistant' &&
-                      message.chatId &&
-                      message.createdAt > unread.cursor!.createdAt &&
-                      (chatCursors[message.chatId] ?? '') >= message.createdAt,
-                  ).length
-                : 0),
-          )}
-          unreadPending={unread.pending}
-          presence={
-            !connected
-              ? undefined
-              : state?.turns[0]?.status === 'waiting' ||
-                  state?.tasks?.some((task) => task.status === 'needs_you')
-                ? 'waiting'
-                : state?.activity?.some((item) => !item.background)
-                  ? 'working'
-                  : undefined
-          }
-          panelHidden={panelHidden}
-          onToggle={toggleSidebar}
-          onNavigate={navigate}
-          account={account}
-        />
-      )}
+      <Sidebar
+        path={path}
+        chats={
+          <ChatList
+            chats={namedChats}
+            activeId={openChatId}
+            mainActive={path === '/'}
+            mainWorking={Boolean(
+              connected &&
+              state?.activity?.some(
+                (item) =>
+                  !item.background &&
+                  !state.tasks?.some((task) => task.id === item.taskId && task.name),
+              ),
+            )}
+            mainUnread={path !== '/' && (unread.count > 0 || unread.pending)}
+            draftActive={draftOpen}
+            unread={(chat) => chat.id !== openChatId && chatUnread(chat, chatCursors)}
+            earlier={earlierChats(state?.tasks, namedChats)}
+            onNavigate={navigate}
+            onChanged={() => void refresh()}
+          />
+        }
+        unreadCount={Math.max(
+          0,
+          unread.count -
+            (state && unread.cursor
+              ? state.messages.filter(
+                  (message) =>
+                    message.role === 'assistant' &&
+                    message.chatId &&
+                    message.createdAt > unread.cursor!.createdAt &&
+                    (chatCursors[message.chatId] ?? '') >= message.createdAt,
+                ).length
+              : 0),
+        )}
+        unreadPending={unread.pending}
+        presence={
+          !connected
+            ? undefined
+            : state?.turns[0]?.status === 'waiting' ||
+                state?.tasks?.some((task) => task.status === 'needs_you')
+              ? 'waiting'
+              : state?.activity?.some((item) => !item.background)
+                ? 'working'
+                : undefined
+        }
+        panelHidden={panelHidden}
+        onToggle={toggleSidebar}
+        onNavigate={navigate}
+        account={account}
+      />
       <div className="workspace-frame">
         <div className="workspace-body">
           <main id="workspace" className="main-workspace" tabIndex={-1}>
+            <PageHeader path={path} />
             <div className="chat-route" hidden={path !== '/'}>
               {state && <ChatHeader main toolsRef={setMainTools} />}
               {state ? (
@@ -720,11 +720,6 @@ function AuthenticatedApp({
                       });
                     });
                   }
-                }}
-                onTabChange={(tab, replace) => {
-                  if (replace) {
-                    replaceNavigation(settingsPath(tab));
-                  } else navigate(settingsPath(tab));
                 }}
                 onReplayOnboarding={
                   import.meta.env?.DEV === true && !desktopSettingsAvailable()

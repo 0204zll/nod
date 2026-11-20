@@ -45,6 +45,7 @@
   --primary-foreground: var(--black);
   --chat-sent: var(--pink-20);
   --chat-sent-foreground: var(--black);
+  --bubble-border: var(--gray-20);
   --control: var(--gray-15);
   --control-hover: var(--gray-10);
   --control-foreground: var(--foreground);
@@ -139,6 +140,7 @@
   --accent-border: var(--pink-70);
   --chat-sent: var(--pink-80);
   --chat-sent-foreground: var(--white);
+  --bubble-border: var(--gray-85);
   --control: color-mix(in srgb, var(--white) 12%, transparent);
   --control-hover: color-mix(in srgb, var(--white) 20%, transparent);
   --control-active: color-mix(in srgb, var(--white) 16%, transparent);

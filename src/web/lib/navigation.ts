@@ -13,7 +13,8 @@ export type SidebarSection = 'chat' | 'scheduled' | 'settings';
 
 export function sidebarSection(path: string): SidebarSection | undefined {
   if (path === '/tasks') return 'scheduled';
-  if (['/apps', '/channels', '/usage', '/vault'].includes(path)) return 'settings';
+  if (['/apps', '/channels', '/usage', '/vault'].includes(path) || path.startsWith('/settings'))
+    return 'settings';
   if (path === '/' || path.startsWith('/chat/') || path.startsWith('/prepared/')) return 'chat';
   return undefined;
 }

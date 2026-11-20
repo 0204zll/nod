@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
-import type { Task } from '../../shared/contracts';
+import type { Activity, Task } from '../../shared/contracts';
+import { taskLabels } from '../../shared/task-status';
+import { LiveLine } from './live-line';
 import { api, errorMessage } from '../lib/api';
 import { chatPath, chatState, draftChatPath, type NamedChat } from '../lib/named-chats';
 import { ChevronRight, Ellipsis, Plus } from './icons';
@@ -301,7 +303,33 @@ export function ChatLink({
       }}
     >
       {continued ? `Continued in ${chat.name}` : `Open ${chat.name}`}
+      <ChatMarker chat={chat} />
     </a>
+  );
+}
+
+export function ChatStatus({
+  chat,
+  live,
+  request,
+}: {
+  chat: NamedChat;
+  live?: Activity;
+  request: string;
+}) {
+  const state = chatState(chat);
+  if (state !== 'working' && state !== 'needs') return null;
+  const title = chat.title.trim() === request.trim() ? '' : chat.title;
+  return (
+    <section className="chat-status" data-state={state} aria-label={title || chat.name}>
+      <div className="chat-status-head">
+        {title && <p className="chat-status-title">{title}</p>}
+        <span className="chat-status-pill">{taskLabels[chat.status]}</span>
+      </div>
+      <div className="chat-status-now">
+        {state === 'working' ? <LiveLine item={live} /> : 'Waiting for your answer below.'}
+      </div>
+    </section>
   );
 }
 

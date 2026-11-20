@@ -94,7 +94,7 @@ Leave 8 px before a file preview that follows reply text or an action card in th
 
 Don't show a construction grid. Keep the existing reduced-motion behaviour. The brand guide doesn't define motion for product interfaces yet.
 
-The rail on the left is 96 px wide and holds **Chat**, **Scheduled** and **Settings**: 48 × 40 px icon tiles with their labels under them. The 272 px list next to it belongs to the selected icon. Hiding the list moves it under the rail with `transform` only, on `cubic-bezier(0.32, 0.72, 0, 1)` for 300 ms; the page beside it moves with transforms too, and its layout changes once. A keyboard shortcut changes it without motion, and reduced motion fades the list instead. Chat message actions and composer controls share 32 px targets and 4 px gaps.
+The rail on the left is 96 px wide and holds **Chat**, **Scheduled** and **Settings**: 48 × 40 px icon tiles with their labels under them. The 272 px list next to it belongs to the selected icon. Hiding the list moves it under the rail with `transform` only, on `cubic-bezier(0.32, 0.72, 0, 1)` for 300 ms; the page beside it moves with transforms too, and its layout changes once. A keyboard shortcut changes it without motion, and reduced motion fades the list instead. Nod's answers are white cards with a 1 px border and 12 px corners, and the owner's messages are pink with the same corners. The composer is one row: the message, then attach, voice and a round pink send button. New messages rise 8 px from 0.98 scale over 320 ms, list markers scale in, and a new **?** pings twice. Chat message actions and composer controls share 32 px targets and 4 px gaps.
 
 ## Tooltips and shortcuts
 

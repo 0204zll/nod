@@ -25,9 +25,9 @@ Tasks share one [workspace](/use/workspace/#one-workspace-for-all-tasks) and own
 
 Every task Nod starts from your request gets a side chat named after its subject, such as **Designer search** or **Hosting costs**. The list next to the icons starts with **Main chat**, where briefings, reminders and your Telegram and WhatsApp messages land. Your side chats follow. A moving dot marks a chat that's working, and **?** marks one that needs you.
 
-Main chat stays clean. When Nod hands work to a side chat, its message in Main chat links to it with **Continued in** and the chat's name. The work, its questions and approvals, and its answer stay in the side chat.
+Main chat stays clean. When Nod hands work to a side chat, its message in Main chat links to it with **Continued in** and the chat's name. The work, its questions and approvals, and its answer stay in the side chat. Inside the side chat, a card under your request shows what Nod is doing now, and says when it needs you.
 
-![Main chat with a link to the Reply check side chat, and the chat list with Main chat and Reply check.](../../../assets/screens/named-chats.png)
+![The Inbox replies side chat asking which day to promise, with a ? next to it in the chat list.](../../../assets/screens/named-chats.png)
 
 | You want to                      | Do this                                                                                      |
 | -------------------------------- | -------------------------------------------------------------------------------------------- |

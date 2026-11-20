@@ -334,14 +334,19 @@ export function Sidebar({
                 <ul className="panel-rows panel-rows-ruled">
                   {settingsSections.map((item) => (
                     <li key={item.id}>
-                      <button
-                        type="button"
-                        className="panel-row"
-                        onClick={(event) => account.onSettings(item.label, event.currentTarget)}
+                      <a
+                        href={item.path}
+                        className={`panel-row${path === item.path ? ' panel-row-active' : ''}`}
+                        aria-current={path === item.path ? 'page' : undefined}
+                        onClick={(event) => {
+                          if (!plain(event)) return;
+                          event.preventDefault();
+                          account.onSettings(item.label, event.currentTarget);
+                        }}
                       >
                         <item.icon size={16} aria-hidden="true" />
                         <span>{item.label}</span>
-                      </button>
+                      </a>
                     </li>
                   ))}
                 </ul>

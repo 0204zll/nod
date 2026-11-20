@@ -328,10 +328,12 @@ export function Chat({
   chat,
   onOpenChat,
   carried,
+  afterMessage,
 }: {
   chat?: NamedChat;
   onOpenChat?(path: string): void;
   carried?: ReactNode;
+  afterMessage?(message: Message): ReactNode;
   ownerId: string;
   state: AppState;
   streams: Record<string, string>;
@@ -2537,6 +2539,7 @@ export function Chat({
                       </div>
                     ) : null;
                   })()}
+                  {afterMessage?.(message)}
                   {message.id === introduction.data?.messageId && (
                     <ChatNotifications ownerId={ownerId} messageId={message.id} />
                   )}
@@ -2550,7 +2553,9 @@ export function Chat({
                       : undefined
                   }
                 />
-              ) : (
+              ) : chat?.requestMessageId &&
+                (chat.status === 'working' || chat.status === 'needs_you') &&
+                visibleMessages.some((message) => message.id === chat.requestMessageId) ? null : (
                 <Working
                   items={connected ? (holding && finishing ? [finishing, ...live] : live) : []}
                   sending={sending}

@@ -147,6 +147,7 @@ type Row = {
   chat_only_latest: Date | null;
   chat_only_latest_id: string | null;
   continued_from: string | null;
+  request_message_id: string | null;
 };
 
 function failure(message: string, statusCode = 400) {
@@ -232,7 +233,7 @@ export function createTasks(options: {
            COALESCE(q.text,CASE WHEN u.status='cancelled' THEN continuation.text END) AS question,
            COALESCE(q.id,CASE WHEN u.status='cancelled' THEN continuation.id END) AS question_message_id,
            t.model,CASE WHEN t.session_id=t.id THEN ${workKindSql('t', 'NULL')} END AS work,
-           work_schedule.model AS schedule_model,t.name,t.pinned,t.name_auto,t.archived_at,t.continued_from,last_reply.text AS last_reply,chat_only.count AS chat_only_count,
+           work_schedule.model AS schedule_model,t.name,t.pinned,t.name_auto,t.archived_at,t.continued_from,t.source_message_id AS request_message_id,last_reply.text AS last_reply,chat_only.count AS chat_only_count,
            chat_only.latest AS chat_only_latest,chat_only.latest_id AS chat_only_latest_id
          FROM ranked t LEFT JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
          ${workOriginSql('t')}
@@ -300,6 +301,7 @@ export function createTasks(options: {
               lastReply: row.last_reply,
               archivedAt: row.archived_at?.toISOString() ?? null,
               ...(row.continued_from ? { continuedFrom: row.continued_from } : {}),
+              ...(row.request_message_id ? { requestMessageId: row.request_message_id } : {}),
               chatOnly: {
                 count: row.chat_only_count ?? 0,
                 latestAt: row.chat_only_latest?.toISOString() ?? null,

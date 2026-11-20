@@ -332,6 +332,7 @@ export interface Task {
   archivedAt?: string | null;
   chatOnly?: { count: number; latestAt: string | null; latestId: string | null };
   continuedFrom?: string;
+  requestMessageId?: string;
 }
 export interface TaskDetail {
   task: Task;
