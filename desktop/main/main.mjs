@@ -290,6 +290,7 @@ const startupFeedback = createStartupFeedbackClient({
   },
 });
 const engineWindows = new Set();
+const overlayWindows = new WeakSet();
 const zoomStates = new WeakMap();
 let lastZoomWindow;
 let zoomPersistence = Promise.resolve();
@@ -519,7 +520,7 @@ function publishPreferences() {
   for (const window of [setupWindow, ...engineWindows]) {
     if (!window || window.isDestroyed()) continue;
     window.setBackgroundColor(value.resolvedTheme === 'dark' ? '#191919' : '#fafafa');
-    if (process.platform === 'win32')
+    if (overlayWindows.has(window))
       window.setTitleBarOverlay(windowsTitleBar(value.resolvedTheme === 'dark').titleBarOverlay);
     window.webContents.send('nod:preferences', value);
   }
@@ -1056,6 +1057,7 @@ function showSettings(section = 'general', loading = false) {
       partition: 'nod-settings',
     },
   });
+  if (process.platform === 'win32') overlayWindows.add(setupWindow);
   const window = setupWindow;
   let presented;
   const ready = new Promise((resolve) => {
@@ -1197,6 +1199,7 @@ function showEngine({ focus = true } = {}) {
     },
   });
   engineWindows.add(engineWindow);
+  if (process.platform === 'win32') overlayWindows.add(engineWindow);
   protectWindow(engineWindow, engineOrigin);
   const window = engineWindow;
   window.webContents.on('render-process-gone', (_event, details) => {
