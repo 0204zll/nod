@@ -142,12 +142,6 @@
   order: 2;
   margin-left: auto;
 }
-.sidebar-collapsed .nod-entry-status {
-  position: absolute;
-  top: 6px;
-  left: 34px;
-  margin: 0;
-}
 .nod-entry-count {
   min-width: 18px;
   padding: 0 5px;
@@ -398,20 +392,6 @@
 }
 .mobile-chats .chat-list {
   margin-top: 8px;
-}
-.sidebar-collapsed .chat-row {
-  grid-template-columns: 30px;
-  justify-content: center;
-  padding-inline: 0;
-}
-.sidebar-collapsed :is(.chat-row-name, .chat-row-meta, .chat-row-line, .chat-row-more),
-.sidebar-collapsed .chat-list-earlier {
-  display: none;
-}
-.sidebar-collapsed .chat-row-dot {
-  top: 8px;
-  right: calc(50% - 20px);
-  bottom: auto;
 }
 
 .chat-page .message.chat-card-slot > .message-content {
