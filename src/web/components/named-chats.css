@@ -542,9 +542,6 @@
   scrollbar-gutter: auto;
   overflow: hidden;
 }
-:root[data-desktop='true'] :is(.chat-route, .named-chat-route) .chat-page .conversation-scroll {
-  padding-top: 0;
-}
 .draft-chat {
   display: flex;
   flex: 1;

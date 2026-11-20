@@ -660,15 +660,7 @@ button.message-work:is(:hover, :focus-visible) {
 .chat-page .conversation-scroll {
   overflow-anchor: none;
   padding-top: 16px;
-  mask-image: linear-gradient(
-    to bottom,
-    transparent var(--chat-edge-offset, 0px),
-    black calc(var(--chat-edge-offset, 0px) + 24px)
-  );
-}
-:root[data-desktop='true'] .chat-page .conversation-scroll {
-  --chat-edge-offset: var(--desktop-titlebar-height);
-  padding-top: calc(var(--desktop-titlebar-height) + 16px);
+  mask-image: linear-gradient(to bottom, transparent 0, black 24px);
 }
 .chat-report-action {
   display: flex;
