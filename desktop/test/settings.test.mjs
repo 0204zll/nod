@@ -526,6 +526,7 @@ async function runningDesktop(
     exit = () => {},
     installerRunning = () => false,
     updateResume,
+    singleInstance = false,
     displays = [{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }],
   } = {},
 ) {
@@ -617,7 +618,8 @@ async function runningDesktop(
       setPath: (name, path) => paths.set(name, path),
       getPath: (name) => paths.get(name) || dirname(storage.path),
       getVersion: () => version,
-      requestSingleInstanceLock: () => false,
+      requestSingleInstanceLock: () => singleInstance,
+      whenReady: () => new Promise(() => {}),
       getLoginItemSettings: () => {
         const login = {
           status: openAtLogin ? 'enabled' : 'not-registered',
@@ -7678,6 +7680,132 @@ test('ShipIt waiting refuses installation before the current installer exits', a
     active = false;
     t.mock.timers.tick(5_000);
     await restarting;
+    await f.close();
+  }
+});
+
+test('ShipIt startup monitors one shared wait beyond fifteen minutes', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let active = true;
+  let lookups = 0;
+  let checks = 0;
+  const updater = {
+    ready: undefined,
+    async check() {
+      checks++;
+      this.ready = { version: '0.3.0' };
+      return this.ready;
+    },
+  };
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
+    platform: 'darwin',
+    packaged: true,
+    initialState: 'fresh',
+    singleInstance: true,
+    version: '0.2.0',
+    updateResume: { version: '0.2.0' },
+    installerRunning: async () => {
+      lookups++;
+      return active;
+    },
+  });
+  let waiting;
+  let checking;
+  try {
+    await new Promise(setImmediate);
+    assert.equal(lookups, 2);
+    waiting = f.monitorMacInstaller();
+    assert.equal(f.monitorMacInstaller(), waiting);
+    checking = f.checkUpdates(updater, false);
+    await new Promise(setImmediate);
+    assert.equal(lookups, 2);
+    for (let index = 0; index < 181; index++) {
+      t.mock.timers.tick(5_000);
+      await new Promise(setImmediate);
+    }
+    assert.equal(lookups, 183);
+    assert.equal(checks, 0);
+    assert.equal(f.installerBusy(), true);
+    assert.equal(f.updateMenu.enabled, false);
+    assert.equal(f.restartMenu.enabled, false);
+    active = false;
+    t.mock.timers.tick(5_000);
+    await Promise.all([waiting, checking]);
+    assert.equal(checks, 1);
+    assert.equal(f.installerBusy(), false);
+  } finally {
+    active = false;
+    t.mock.timers.tick(5_000);
+    await Promise.all([waiting, checking]);
+    await f.close();
+  }
+});
+
+test('ShipIt waiting promotes a confirmed request and checks current work after the wait', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let active = true;
+  let checks = 0;
+  let restarts = 0;
+  let installs = 0;
+  const events = [];
+  const f = await runningDesktop(
+    t,
+    (url) => {
+      assert.equal(new URL(url).pathname, '/api/desktop/status');
+      events.push('work read');
+      return Response.json({ running: [{ visible: true }] });
+    },
+    {
+      platform: 'darwin',
+      packaged: true,
+      version: '0.2.0',
+      updateResume: { version: '0.2.0' },
+      installerRunning: async () => active,
+      quitAndInstall: () => installs++,
+      prompt: (options) => {
+        assert.equal(options.message, 'Nod is still working.');
+        events.push('work question');
+        return { response: 1 };
+      },
+    },
+  );
+  const updater = {
+    ready: undefined,
+    async check() {
+      checks++;
+      this.ready = { version: '0.3.0' };
+      return this.ready;
+    },
+    async restart() {
+      restarts++;
+      return f.restartForUpdate();
+    },
+  };
+  const pending = [];
+  try {
+    f.showEngine();
+    await new Promise(setImmediate);
+    const window = f.windows.at(-1);
+    const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+    assert.equal(await f.detectInstaller(), false);
+    pending.push(f.checkUpdates(updater, false));
+    pending.push(f.handlers.get('nod:updates:restart')(event));
+    await new Promise(setImmediate);
+    assert.equal(checks, 0);
+    assert.equal(restarts, 0);
+    assert.deepEqual(events, []);
+    active = false;
+    t.mock.timers.tick(5_000);
+    await Promise.all(pending);
+    assert.equal(checks, 1);
+    assert.equal(restarts, 1);
+    assert.deepEqual(events, ['work read', 'work question']);
+    assert.equal(installs, 0);
+  } finally {
+    active = false;
+    t.mock.timers.tick(5_000);
+    await Promise.all(pending);
+    f.crash();
     await f.close();
   }
 });
