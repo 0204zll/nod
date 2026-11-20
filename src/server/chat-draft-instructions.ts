@@ -194,7 +194,10 @@ async function load(database: Database, ownerId: string, lock: boolean, extraIds
     string,
     { revision: string; available: boolean; conditions: DraftConditionSource[] }
   >();
-  const conditionStates = new Map<string, { revision: string; available: boolean }>();
+  const conditionStates = new Map<
+    string,
+    { revision: string; available: boolean; nodes: Array<{ key: string; revision: string }> }
+  >();
   const conditionNode = (ref: Pick<DraftConditionSource, 'kind' | 'id'>) => {
     const key = `${ref.kind}:${ref.id}`;
     const cached = conditionNodes.get(key);
@@ -240,6 +243,16 @@ async function load(database: Database, ownerId: string, lock: boolean, extraIds
       const next = pending.pop()!;
       const key = `${next.kind}:${next.id}`;
       if (visited.has(key)) continue;
+      const known = conditionStates.get(key);
+      if (known) {
+        available &&= known.available;
+        for (const node of known.nodes)
+          if (!visited.has(node.key)) {
+            visited.add(node.key);
+            nodes.push(node);
+          }
+        continue;
+      }
       visited.add(key);
       const node = conditionNode(next);
       available &&= node.available;
@@ -249,6 +262,7 @@ async function load(database: Database, ownerId: string, lock: boolean, extraIds
     const result = {
       revision: hash(nodes.sort((a, b) => a.key.localeCompare(b.key))),
       available,
+      nodes,
     };
     conditionStates.set(cacheKey, result);
     return result;
@@ -296,6 +310,7 @@ async function load(database: Database, ownerId: string, lock: boolean, extraIds
       !source.payload.context.some((entry) => entry.unavailable)
     );
   };
+  const inheritedRevisions = new Map<string, string>();
   const snapshot = (source: Source) => {
     const task = source.task_id ? byTask.get(source.task_id) : undefined;
     const eligible = (message: Message) =>
@@ -328,16 +343,20 @@ async function load(database: Database, ownerId: string, lock: boolean, extraIds
     const context = allContext.filter(visible);
     const inherited = source.inherited_ids.map((id) => {
       const parent = bySource.get(id);
-      return (
-        parent && {
+      if (!parent) return undefined;
+      let descriptorDigest = inheritedRevisions.get(id);
+      if (!descriptorDigest) {
+        descriptorDigest = hash({
           id,
           state: parent.state,
           revision: parent.revision,
           sources: parent.source_ids,
           context: parent.context_ids,
           inherited: parent.inherited_ids,
-        }
-      );
+        });
+        inheritedRevisions.set(id, descriptorDigest);
+      }
+      return { id, descriptorDigest };
     });
     const intact =
       allOwners.length === source.source_ids.length &&
@@ -385,18 +404,27 @@ export async function draftConditionBindingStates(
   ownerId: string,
   refs: DraftConditionSource[],
 ) {
+  if (!refs.length)
+    return new Map<
+      string,
+      { state: Source['state'] | undefined; revision: string; available: boolean }
+    >();
   const current = await load(database, ownerId, false);
   return new Map(
-    refs.map((ref) => [
-      `${ref.kind}:${ref.id}`,
-      {
-        state: (ref.kind === 'chat'
-          ? current.sources.find((source) => source.message_id === ref.id)
-          : current.authorities.find((source) => source.key === ref.id)
-        )?.state,
-        ...current.conditionState(ref),
-      },
-    ]),
+    refs.map((ref) => {
+      const { revision, available } = current.conditionState(ref);
+      return [
+        `${ref.kind}:${ref.id}`,
+        {
+          state: (ref.kind === 'chat'
+            ? current.sources.find((source) => source.message_id === ref.id)
+            : current.authorities.find((source) => source.key === ref.id)
+          )?.state,
+          revision,
+          available,
+        },
+      ];
+    }),
   );
 }
 
@@ -635,6 +663,7 @@ export async function chatDraftInstructionBindings(
   ownerId: string,
   messageIds: string[],
 ) {
+  if (!messageIds.length) return [];
   const current = await load(database, ownerId, false);
   const ids = new Set(messageIds);
   for (let changed = true; changed;) {

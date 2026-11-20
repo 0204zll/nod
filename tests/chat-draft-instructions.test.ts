@@ -121,8 +121,9 @@ test(
     const authority = async (
       f: Awaited<ReturnType<typeof fixture>>,
       text = 'Show the saved synthetic report before sending.',
+      at = '2026-11-19T10:00:00.000Z',
     ) => {
-      const message = await f.add(text);
+      const message = await f.add(text, at);
       const payload: Parameters<typeof pendingDraftAuthorityInstructions>[4][number] = {
         kind: 'schedule',
         scope: randomUUID(),
@@ -1037,9 +1038,10 @@ test(
           async () => {
             const f = await fixture();
             const condition = `Show synthetic draft X before sending. complete-${prior}-${next}`;
-            if (prior === 'chat') await f.capture(await f.add(condition), 'relevant');
+            if (prior === 'chat')
+              await f.capture(await f.add(condition, '2026-11-17T10:00:00.000Z'), 'relevant');
             else {
-              const a = await authority(f, condition);
+              const a = await authority(f, condition, '2026-11-17T10:00:00.000Z');
               const captured = await prepareDraftAuthorityCapture(
                 database,
                 f.ownerId,
@@ -1058,6 +1060,26 @@ test(
               await f.capture(message, 'clear');
               unrelated.push(message);
             }
+            const priorSources =
+              prior === 'chat'
+                ? await f.retained()
+                : await retainedDraftAuthorityInstructions(
+                    database,
+                    f.ownerId,
+                    f.threadId,
+                    null,
+                    '1',
+                  );
+            assert.ok(
+              priorSources.some(
+                (source) =>
+                  !source.unavailable &&
+                  source.messages.some(
+                    (message) =>
+                      message.text === condition && message.at === '2026-11-17T10:00:00.000Z',
+                  ),
+              ),
+            );
             const message = await f.add(
               'Use that same review step for synthetic draft Y.',
               '2026-11-19T10:07:00.000Z',

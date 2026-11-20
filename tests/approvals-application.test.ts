@@ -3059,15 +3059,14 @@ test(
         reviewedSends = [];
         try {
           plans.set(text, { tool: 'apps', action: 'GMAIL_SEND_EMAIL', args });
-          const submitting = request('POST', '/api/messages', { text });
+          const submitted = await request('POST', '/api/messages', { text });
+          assert.equal(submitted.statusCode, 200, submitted.body);
           await Promise.race([
             selecting,
             delay(5000).then(() => assert.fail('The Trust caller did not select a model.')),
           ]);
           model = 'replacement';
           release();
-          const submitted = await submitting;
-          assert.equal(submitted.statusCode, 200, submitted.body);
           const turn = submitted.json().turnId;
           await waitFor(turn, 'waiting');
           assert.equal(usedSelections.size, 1);
