@@ -734,6 +734,11 @@ export async function retainedChatDraftInstructions(
     const outsideTask =
       taskId && source.task_id !== taskId && (!task || source.input_at > task.created_at);
     if (outsideTask && !forced) return [];
+    const inScope =
+      !outsideTask &&
+      source.thread_id === threadId &&
+      (source.task_id === taskId || (taskId !== null && source.task_id === null));
+    if (!inScope && !forced) return [];
     const snapshot = current.snapshot(source);
     const verified =
       snapshot.complete &&
@@ -748,11 +753,6 @@ export async function retainedChatDraftInstructions(
       source.policy_revision === policyRevision
     )
       return [];
-    const inScope =
-      !outsideTask &&
-      source.thread_id === threadId &&
-      (source.task_id === taskId || (taskId !== null && source.task_id === null));
-    if (!inScope && !forced) return [];
     return [
       {
         sourceRevision: createHash('sha256')
