@@ -9,7 +9,7 @@ Chat is where you give Nod work, answer its questions and get the results.
 
 Nod keeps one ongoing conversation with you. The desktop app, the web app, Telegram and WhatsApp all add to that same conversation, so Nod remembers what you said in any of them.
 
-To change topics, type your new request in this conversation. Bigger work goes to a [named chat](/use/tasks/#named-chats) that Nod starts for it, and **New chat** in the sidebar starts one yourself. You do not need to delete data to change topics.
+To change topics, type your new request in this conversation. Bigger work goes to a [side chat](/use/tasks/#side-chats) that Nod starts for it, and **New chat** in the chat list starts one yourself. You do not need to delete data to change topics.
 
 Nod follows your latest clear message's language, spoken or typed, including questions, confirmations and connection instructions. An explicit language request takes precedence. Only your own messages set it, never your email or other data, and before you've written anything, such as at the start of setup, Nod writes in English. Asking for an email or document in a different language applies to that output; a neutral acknowledgement such as "OK" keeps the preceding language. What Nod reads on websites, in email and in documents comes back translated. It keeps the original wording only in quotes, such as a menu or button name you need to find, with a short translation when the meaning isn't clear. Voice, region, date format and time zone are separate preferences.
 
@@ -146,7 +146,7 @@ In the web and desktop apps, if Nod cannot recover from a context error, a small
 
 The banner appears only after automatic recovery fails and the chat has stopped. It is hidden when you start another chat request. Connection, access and quota errors keep their specific error and recovery steps.
 
-In the sidebar, the Chat item shows a moving dot while Nod works and a solid dot when it's waiting for you.
+The **Chat** icon on the left shows a moving dot while Nod works and a solid dot when it's waiting for you. In the chat list, a moving dot marks a side chat that's working and **?** marks one that needs you.
 
 ### In Telegram and WhatsApp
 
@@ -231,13 +231,13 @@ If Nod may have sent or changed something, verify the result yourself or ask Nod
 
 Open the **Settings** page, then **Models** to choose the model Nod uses from your connected providers. See [Models](/connect/models/).
 
-## Adjust the sidebar
+## Show or hide the list
 
-On a wide screen, move your pointer near the sidebar's right edge to reveal its middle button. Select it to expand or collapse the sidebar. You can also Tab to the button; on touch screens, it stays visible. Narrow screens use the navigation menu at the top.
+The icons on the left open **Chat**, **Scheduled** and **Settings**. Each one shows its list next to the icons. Select the panel button next to the list's title to hide the list, and the same button at the top of the page to show it again. Narrow screens use the navigation menu at the top.
 
 ## Desktop shortcuts
 
-In the desktop app, hold Command on a Mac or Ctrl on Windows and Linux to reveal the navigation tooltips. These are the same tooltips shown on hover. Use that key with 1–6 for Chat, Scheduled, Apps, Channels, Usage and Vault, including while the chat message box is focused; B expands or collapses the sidebar, and comma opens Settings. Web browsers keep their own shortcuts.
+In the desktop app, hold Command on a Mac or Ctrl on Windows and Linux to reveal the navigation tooltips. These are the same tooltips shown on hover. Use that key with 1–6 for Chat, Scheduled, Apps, Channels, Usage and Vault, including while the chat message box is focused; B shows or hides the list, and comma opens Settings > General. Web browsers keep their own shortcuts.
 
 ## React to messages
 
@@ -249,17 +249,17 @@ Nod sometimes reacts to your messages too, such as ✅ when you say yes to somet
 
 Links to Nod screens open in the current window. A link to **Settings > Models** opens that Settings tab. Close Settings to return to the screen and control you used before. Browser Back and Forward also work.
 
-| To see or change                          | Open                                      |
-| ----------------------------------------- | ----------------------------------------- |
-| Your conversation                         | **Chat** in the sidebar                   |
-| Scheduled work                            | **Scheduled** in the sidebar              |
-| App connections                           | **Apps** in the sidebar                   |
-| Telegram and WhatsApp                     | **Channels** in the sidebar               |
-| Spending and activity                     | **Usage** in the sidebar                  |
-| Saved logins, cards, and browser sessions | **Vault** in the sidebar                  |
-| General preferences                       | **Settings** at the bottom of the sidebar |
-| Model connections and selection           | **Settings > Models**                     |
-| Saved notes and skills                    | **Settings > Memory**                     |
+| To see or change                          | Open                    |
+| ----------------------------------------- | ----------------------- |
+| Your conversation                         | **Chat**                |
+| Scheduled work                            | **Scheduled**           |
+| App connections                           | **Settings > Apps**     |
+| Telegram and WhatsApp                     | **Settings > Channels** |
+| Spending and activity                     | **Settings > Usage**    |
+| Saved logins, cards, and browser sessions | **Settings > Vault**    |
+| General preferences                       | **Settings > General**  |
+| Model connections and selection           | **Settings > Models**   |
+| Saved notes and skills                    | **Settings > Memory**   |
 
 In Telegram and WhatsApp, a screen link opens a public page. Select **Open in Nod** on the computer where Nod is installed. On a phone, use the location on that page to continue in Nod on your computer. The link contains only the screen name. It cannot change settings or approve an action.
 

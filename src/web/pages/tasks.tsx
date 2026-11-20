@@ -1,7 +1,4 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { navigate } from '../lib/navigation';
-import { ChatCard } from '../components/named-chats';
-import { isNamedChat } from '../lib/named-chats';
 import Markdown from 'react-markdown';
 import {
   CalendarClock,
@@ -473,7 +470,7 @@ export function Scheduled({
 }) {
   const schedules = usePageData<Schedule[]>('/api/schedules');
   const tasks = usePageData<Task[]>('/api/tasks');
-  const open = (tasks.data ?? []).filter((task) => !closed(task));
+  const open = (tasks.data ?? []).filter((task) => !task.name && !closed(task));
   const upcoming = (schedules.data ?? [])
     .filter((schedule) => schedule.enabled && schedule.nextRun)
     .sort((a, b) => a.nextRun!.localeCompare(b.nextRun!) || a.id.localeCompare(b.id));
@@ -507,23 +504,13 @@ export function Scheduled({
       )}
       {open.length > 0 && (
         <div className="saved-plan-list open-task-list">
-          {open.map((task) =>
-            isNamedChat(task) ? (
-              <ChatCard
-                key={task.id}
-                chat={task}
-                live={activity.find((item) => item.taskId === task.id)}
-                unread={false}
-                onOpen={navigate}
-              />
-            ) : (
-              <TaskCard
-                key={task.id}
-                task={task}
-                live={activity.find((item) => item.taskId === task.id)}
-              />
-            ),
-          )}
+          {open.map((task) => (
+            <TaskCard
+              key={task.id}
+              task={task}
+              live={activity.find((item) => item.taskId === task.id)}
+            />
+          ))}
         </div>
       )}
       {!schedules.data ? (

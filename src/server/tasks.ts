@@ -145,6 +145,8 @@ type Row = {
   archived_at: Date | null;
   chat_only_count: number | null;
   chat_only_latest: Date | null;
+  chat_only_latest_id: string | null;
+  continued_from: string | null;
 };
 
 function failure(message: string, statusCode = 400) {
@@ -230,14 +232,15 @@ export function createTasks(options: {
            COALESCE(q.text,CASE WHEN u.status='cancelled' THEN continuation.text END) AS question,
            COALESCE(q.id,CASE WHEN u.status='cancelled' THEN continuation.id END) AS question_message_id,
            t.model,CASE WHEN t.session_id=t.id THEN ${workKindSql('t', 'NULL')} END AS work,
-           work_schedule.model AS schedule_model,t.name,t.pinned,t.name_auto,t.archived_at,last_reply.text AS last_reply,chat_only.count AS chat_only_count,
-           chat_only.latest AS chat_only_latest
+           work_schedule.model AS schedule_model,t.name,t.pinned,t.name_auto,t.archived_at,t.continued_from,last_reply.text AS last_reply,chat_only.count AS chat_only_count,
+           chat_only.latest AS chat_only_latest,chat_only.latest_id AS chat_only_latest_id
          FROM ranked t LEFT JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
          ${workOriginSql('t')}
-         LEFT JOIN LATERAL (SELECT count(*)::int AS count,max(cm.created_at) AS latest FROM messages cm
+         LEFT JOIN LATERAL (SELECT count(*) OVER ()::int AS count,cm.created_at AS latest,cm.id AS latest_id FROM messages cm
            JOIN turns cu ON cu.id=cm.turn_id AND cu.owner_id=cm.owner_id
            WHERE t.name IS NOT NULL AND cm.owner_id=t.owner_id AND cu.task_id=t.id AND cm.chat_only
-             AND cm.role='assistant' AND cm.hidden_at IS NULL) chat_only ON true
+             AND cm.role='assistant' AND cm.hidden_at IS NULL
+           ORDER BY cm.created_at DESC,cm.id DESC LIMIT 1) chat_only ON true
          LEFT JOIN LATERAL (SELECT left(split_part(btrim(lm.text),E'\\n\\n',1),240) AS text FROM messages lm
            JOIN turns lu ON lu.id=lm.turn_id AND lu.owner_id=lm.owner_id
            WHERE t.name IS NOT NULL AND lm.owner_id=t.owner_id AND lu.task_id=t.id AND lm.role='assistant'
@@ -296,9 +299,11 @@ export function createTasks(options: {
               ...(row.name_auto ? { nameAuto: true } : {}),
               lastReply: row.last_reply,
               archivedAt: row.archived_at?.toISOString() ?? null,
+              ...(row.continued_from ? { continuedFrom: row.continued_from } : {}),
               chatOnly: {
                 count: row.chat_only_count ?? 0,
                 latestAt: row.chat_only_latest?.toISOString() ?? null,
+                latestId: row.chat_only_latest_id,
               },
             }
           : {}),
@@ -1115,16 +1120,44 @@ export function createTasks(options: {
         .object({
           name: z.string().optional(),
           brief: z.string().trim().max(2000).optional(),
+          from: z.uuid().optional(),
         })
         .strict()
+        .refine((value) => !(value.from && (value.name || value.brief)), {
+          message: 'A chat continued from the main chat takes its name and brief from there.',
+        })
         .parse(request.body);
-      const id = randomUUID();
+      let id: string = randomUUID();
       await transaction(async (client) => {
         const thread = await lockThread(client);
+        const origin = body.from
+          ? (
+              await client.query<{ request: string | null; chat: string | null }>(
+                `SELECT q.text AS request,
+                   (SELECT k.id FROM tasks k WHERE k.owner_id=m.owner_id AND k.continued_from=m.id
+                     ORDER BY k.created_at LIMIT 1) AS chat
+                 FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+                 LEFT JOIN messages q ON q.id=u.message_id AND q.owner_id=m.owner_id AND q.role='user'
+                   AND q.hidden_at IS NULL AND NOT ${withdrawnSql('q')}
+                 WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.role='assistant'
+                   AND m.hidden_at IS NULL AND NOT m.chat_only AND m.text<>'' AND u.session_id=$3
+                   AND NOT ${withdrawnSql('m')}`,
+                [body.from, ownerId, thread.id],
+              )
+            ).rows[0]
+          : undefined;
+        if (body.from && !origin)
+          throw failure('This answer can’t be continued in a side chat.', 404);
+        if (origin?.chat) {
+          id = origin.chat;
+          await reviveChat(client, ownerId, thread.id, id);
+          return;
+        }
+        const request = origin?.request ? ownerChatRequest(origin.request, 'Side chat') : undefined;
         const given = body.name !== undefined;
         const name = given
           ? chatName(body.name!)
-          : await defaultChatName(client, ownerId, thread.id, 'New chat');
+          : await defaultChatName(client, ownerId, thread.id, origin ? 'Side chat' : 'New chat');
         if (given) await assertChatNameFree(client, ownerId, thread.id, name);
         const turnId = randomUUID();
         await client.query(
@@ -1133,19 +1166,23 @@ export function createTasks(options: {
           [turnId, ownerId, thread.id, id, `New chat: ${name}`],
         );
         await client.query(
-          `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,brief,now_text,state,closed_at,applied_revision,name,pinned,name_auto)
-           VALUES($1,$2,$3,$1,$4,$5,$6,'','done',now(),1,$4,true,$7)`,
+          `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,brief,now_text,state,closed_at,applied_revision,name,pinned,name_auto,continued_from)
+           VALUES($1,$2,$3,$1,$4,$5,$6,'','done',now(),1,$7,true,$8,$9)`,
           [
             id,
             ownerId,
             turnId,
-            name,
+            request?.title ?? name,
             'Each request in this chat is answered.',
             body.brief ||
-              (given
-                ? `The owner created this chat by hand. Its name, ${name}, is its subject.`
-                : 'The owner created this chat by hand. Its first request sets its subject.'),
+              (origin
+                ? `The owner continued this chat from their main chat, where you answered their request. ${request ? `Their request there: ${request.title}` : 'Its first request here sets its subject.'}`
+                : given
+                  ? `The owner created this chat by hand. Its name, ${name}, is its subject.`
+                  : 'The owner created this chat by hand. Its first request sets its subject.'),
+            name,
             !given,
+            body.from ?? null,
           ],
         );
         await client.query('UPDATE turns SET task_id=$1 WHERE id=$2 AND owner_id=$3', [

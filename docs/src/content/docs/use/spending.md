@@ -11,7 +11,7 @@ Nod itself doesn't charge you. Your model provider bills you for the requests No
 
 ## See your spending
 
-Open **Usage** in the sidebar (⌘5 in the Mac app, Ctrl+5 in the Windows or Linux app).
+Open **Settings > Usage** (⌘5 in the Mac app, Ctrl+5 in the Windows or Linux app).
 
 - **The sentence at the top.** With an API model selected, this month's API spending and your monthly limit. Select the total to inspect spending or the limit to change it. With a ChatGPT plan selected, it says your usage comes from that plan.
 - **The list.** Your requests and Nod's runs, sign-ins and card submissions, grouped by day. Each row shows the request, when it ran, where it came from, such as **Schedule**, **Activity check** or **Task Nod started**, and what it changed, such as _Gmail: send email_ or _Change a schedule_. A source check that found nothing to prepare says so, and a task's planned check reads **Checked on** with the task's name.

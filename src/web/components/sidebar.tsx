@@ -1,5 +1,6 @@
-import { Fragment, type Ref, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { LayoutGrid, Moon, Settings, Sun } from './icons';
+import { Fragment, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { Clock, LayoutGrid, Moon, PanelLeftClose, PanelLeftOpen, Settings, Sun } from './icons';
+import { settingsSections } from './account-settings';
 import { BrandMark } from './brand';
 import { Tooltip } from './tooltip';
 import { desktopSettingsAvailable } from '../lib/desktop';
@@ -10,6 +11,8 @@ import {
   navigationShortcut,
   shortcutLabel,
   sidebarItems,
+  sidebarSection,
+  type SidebarSection,
 } from '../lib/navigation';
 
 export function Sidebar({
@@ -18,20 +21,20 @@ export function Sidebar({
   unreadCount = 0,
   unreadPending = false,
   presence,
+  panelHidden = false,
   onToggle,
   onNavigate,
   account,
-  actionsRef,
 }: {
   path: string;
+  panelHidden?: boolean;
   chats?: React.ReactNode;
   unreadCount?: number;
   unreadPending?: boolean;
   presence?: 'working' | 'waiting';
-  onToggle(): void;
+  onToggle(animate: boolean): void;
   onNavigate(path: string): void;
   account?: AccountControls;
-  actionsRef?: Ref<HTMLDivElement>;
 }) {
   const [hints, setHints] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -44,7 +47,7 @@ export function Sidebar({
           : 'Checking unread messages'
         : `${unreadCount} unread ${unreadCount === 1 ? 'message' : 'messages'}`;
   const chatLabel = [
-    'Nod',
+    'Chat',
     unreadCount || unreadPending ? unreadLabel : null,
     presence === 'waiting' ? 'waiting for you' : presence === 'working' ? 'Nod is working' : null,
   ]
@@ -159,7 +162,7 @@ export function Sidebar({
       event.stopPropagation();
       if (action.type === 'sidebar') {
         if (window.innerWidth <= 640) setMobileMenuOpen((open) => !open);
-        else toggles.current.onToggle();
+        else toggles.current.onToggle(false);
         return;
       }
       navigate.current(action.path);
@@ -200,112 +203,171 @@ export function Sidebar({
       document.removeEventListener('visibilitychange', clear);
     };
   }, [mac, desktop]);
-  const navItem = (item: (typeof sidebarItems)[number]) => {
-    const Icon = item.icon;
-    const label = desktop ? shortcutLabel(item.key, mac) : undefined;
-    return (
-      <Fragment key={item.path}>
-        <li>
-          <Tooltip
-            content={item.path === '/' ? 'Nod' : item.label}
-            shortcut={label}
-            side="right"
-            forceOpen={hints}
-          >
-            <a
-              href={item.path}
-              aria-label={item.path === '/' ? chatLabel : item.label}
-              aria-current={path === item.path ? 'page' : undefined}
-              aria-keyshortcuts={desktop ? `${mac ? 'Meta' : 'Control'}+${item.key}` : undefined}
-              className={`nav-link ${path === item.path ? 'nav-link-active' : ''}`}
-              onClick={(event) => {
-                if (
-                  event.metaKey ||
-                  event.ctrlKey ||
-                  event.shiftKey ||
-                  event.altKey ||
-                  event.button !== 0
-                )
-                  return;
-                event.preventDefault();
-                onNavigate(item.path);
-              }}
-            >
-              <span className="nav-icon">
-                <Icon size={20} solid={path === item.path} aria-hidden="true" />
-                {item.path === '/' && unreadBadge}
-                {item.path === '/' && statusDot}
-              </span>
-              <span className="nav-label">{item.path === '/' ? 'Nod' : item.label}</span>
-            </a>
-          </Tooltip>
-        </li>
-      </Fragment>
-    );
-  };
+  const plain = (event: React.MouseEvent) =>
+    !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0);
+  const section = sidebarSection(path);
+  const lastPaths = useRef<Partial<Record<SidebarSection, string>>>({});
+  if (section) lastPaths.current[section] = path;
+  const railItem = (
+    item: SidebarSection,
+    label: string,
+    icon: React.ReactNode,
+    target: string,
+    key: string,
+    extra?: React.ReactNode,
+  ) => (
+    <Tooltip
+      content={label}
+      shortcut={desktop ? shortcutLabel(key, mac) : undefined}
+      side="right"
+      forceOpen={hints}
+    >
+      <a
+        href={target}
+        className={`rail-item${section === item ? ' rail-item-active' : ''}`}
+        aria-label={item === 'chat' ? chatLabel : label}
+        aria-current={section === item ? 'page' : undefined}
+        aria-keyshortcuts={desktop ? `${mac ? 'Meta' : 'Control'}+${key}` : undefined}
+        onClick={(event) => {
+          if (!plain(event)) return;
+          event.preventDefault();
+          onNavigate(target);
+        }}
+      >
+        <span className="rail-icon">
+          {icon}
+          {extra}
+        </span>
+        <span className="rail-label">{label}</span>
+      </a>
+    </Tooltip>
+  );
+  const panelLink = (
+    target: string,
+    label: string,
+    Icon?: (typeof sidebarItems)[number]['icon'],
+  ) => (
+    <li key={target}>
+      <a
+        href={target}
+        className={`panel-row${path === target ? ' panel-row-active' : ''}`}
+        aria-current={path === target ? 'page' : undefined}
+        onClick={(event) => {
+          if (!plain(event)) return;
+          event.preventDefault();
+          onNavigate(target);
+        }}
+      >
+        {Icon && <Icon size={16} aria-hidden="true" />}
+        <span>{label}</span>
+      </a>
+    </li>
+  );
+  const panelTitle =
+    section === 'scheduled' ? 'Scheduled' : section === 'settings' ? 'Settings' : 'Chat';
   return (
     <aside className="sidebar" aria-label="Sidebar">
-      <div className="sidebar-header">
-        <a
-          href="/"
-          className={`brand nod-entry${path === '/' ? ' nod-entry-active' : ''}`}
-          aria-label={chatLabel}
-          aria-current={path === '/' ? 'page' : undefined}
-          onClick={(event) => {
-            if (
-              event.metaKey ||
-              event.ctrlKey ||
-              event.shiftKey ||
-              event.altKey ||
-              event.button !== 0
-            )
-              return;
-            event.preventDefault();
-            onNavigate('/');
-          }}
-        >
-          <BrandMark />
-          {unreadCount || unreadPending ? (
-            <span className="nod-entry-status nod-entry-count" aria-hidden="true">
-              {unreadCount > 99 ? '99+' : unreadCount || '…'}
-            </span>
-          ) : presence ? (
-            <span
-              className="nod-entry-status nod-entry-dot"
-              data-state={presence}
-              aria-hidden="true"
-            />
-          ) : null}
-          <span>Nod</span>
-        </a>
-      </div>
-      <nav className="main-nav main-nav-chats" aria-label="Main navigation" id="sidebar-navigation">
-        <ul
-          onKeyDown={(event) => {
-            if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-            const links = Array.from(event.currentTarget.querySelectorAll('a'));
-            const index = links.indexOf(document.activeElement as HTMLAnchorElement);
-            const next =
-              event.key === 'Home'
-                ? 0
-                : event.key === 'End'
-                  ? links.length - 1
-                  : event.key === 'ArrowDown' || event.key === 'ArrowRight'
-                    ? (index + 1) % links.length
-                    : event.key === 'ArrowUp' || event.key === 'ArrowLeft'
-                      ? (index - 1 + links.length) % links.length
-                      : -1;
-            if (next < 0) return;
-            event.preventDefault();
-            links[next]?.focus();
-          }}
-        >
-          {chats && <li className="nav-chats">{chats}</li>}
-        </ul>
-        <ul className="nav-pages">
-          {sidebarItems.filter((item) => item.path !== '/').map(navItem)}
-        </ul>
+      <nav className="rail" aria-label="Main navigation" id="sidebar-navigation">
+        {railItem(
+          'chat',
+          'Chat',
+          <BrandMark />,
+          section === 'chat' ? '/' : (lastPaths.current.chat ?? '/'),
+          '1',
+          unreadBadge ?? statusDot,
+        )}
+        <div className="rail-spacer" />
+        {railItem('scheduled', 'Scheduled', <Clock size={22} aria-hidden="true" />, '/tasks', '2')}
+        {account ? (
+          railItem(
+            'settings',
+            'Settings',
+            <Settings size={22} solid={section === 'settings'} aria-hidden="true" />,
+            lastPaths.current.settings ?? '/apps',
+            '3',
+          )
+        ) : (
+          <Tooltip content={themeLabel} side="right">
+            <button
+              type="button"
+              className="rail-item"
+              aria-label={themeLabel}
+              onClick={toggleTheme}
+            >
+              <span className="rail-icon">
+                <ThemeIcon size={22} aria-hidden="true" />
+              </span>
+              <span className="rail-label">Theme</span>
+            </button>
+          </Tooltip>
+        )}
       </nav>
+      <section className="side-panel" aria-label={panelTitle} inert={panelHidden}>
+        <header className="side-panel-header">
+          <h2>{panelTitle}</h2>
+          <Tooltip
+            content="Hide menu"
+            shortcut={desktop ? shortcutLabel('b', mac) : undefined}
+            side="bottom"
+          >
+            <button
+              type="button"
+              className="side-panel-toggle"
+              aria-label="Hide menu"
+              onClick={() => onToggle(true)}
+            >
+              <PanelLeftClose size={16} aria-hidden="true" />
+            </button>
+          </Tooltip>
+        </header>
+        <div className="side-panel-body">
+          {section === 'scheduled' ? (
+            <ul className="panel-rows">{panelLink('/tasks', 'All schedules')}</ul>
+          ) : section === 'settings' ? (
+            <>
+              <ul className="panel-rows">
+                {sidebarItems
+                  .filter((item) => sidebarSection(item.path) === 'settings')
+                  .map((item) => panelLink(item.path, item.label, item.icon))}
+              </ul>
+              {account && (
+                <ul className="panel-rows panel-rows-ruled">
+                  {settingsSections.map((item) => (
+                    <li key={item.id}>
+                      <button
+                        type="button"
+                        className="panel-row"
+                        onClick={(event) => account.onSettings(item.label, event.currentTarget)}
+                      >
+                        <item.icon size={16} aria-hidden="true" />
+                        <span>{item.label}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          ) : (
+            chats
+          )}
+        </div>
+      </section>
+      {panelHidden && (
+        <Tooltip
+          content="Show menu"
+          shortcut={desktop ? shortcutLabel('b', mac) : undefined}
+          side="right"
+        >
+          <button
+            type="button"
+            className="side-panel-show"
+            aria-label="Show menu"
+            onClick={() => onToggle(true)}
+          >
+            <PanelLeftOpen size={16} aria-hidden="true" />
+          </button>
+        </Tooltip>
+      )}
       <div className="mobile-top-bar">
         <a
           href="/"
@@ -332,7 +394,7 @@ export function Sidebar({
             {statusDot}
           </span>
         </a>
-        <div className="mobile-toolbar-actions" ref={actionsRef} />
+        <div className="mobile-top-spacer" />
         <button
           type="button"
           ref={mobileTrigger}
@@ -357,6 +419,18 @@ export function Sidebar({
             <nav className="mobile-sections" aria-label="Sections">
               {sidebarItems.map((item) => {
                 const Icon = item.icon;
+                if (item.path === '/' && chats)
+                  return (
+                    <div
+                      key={item.path}
+                      className="mobile-chats"
+                      onClick={(event) => {
+                        if ((event.target as HTMLElement).closest('a')) closeMobileMenu();
+                      }}
+                    >
+                      {chats}
+                    </div>
+                  );
                 return (
                   <Fragment key={item.path}>
                     <a
@@ -381,19 +455,9 @@ export function Sidebar({
                       <span className="nav-icon">
                         <Icon size={20} solid={path === item.path} aria-hidden="true" />
                       </span>
-                      <span>{item.path === '/' ? 'Nod' : item.label}</span>
+                      <span>{item.path === '/' ? 'Main chat' : item.label}</span>
                       {item.path === '/' && unreadBadge}
                     </a>
-                    {item.path === '/' && chats && (
-                      <div
-                        className="mobile-chats"
-                        onClick={(event) => {
-                          if ((event.target as HTMLElement).closest('a')) closeMobileMenu();
-                        }}
-                      >
-                        {chats}
-                      </div>
-                    )}
                   </Fragment>
                 );
               })}
@@ -417,41 +481,6 @@ export function Sidebar({
             )}
           </div>
         </dialog>
-      </div>
-      <div className="sidebar-bottom">
-        {!account && (
-          <Tooltip content={themeLabel} side="right">
-            <button
-              type="button"
-              className="nav-link theme-toggle"
-              aria-label={themeLabel}
-              onClick={toggleTheme}
-            >
-              <ThemeIcon size={20} aria-hidden="true" />
-              <span className="nav-label">{theme === 'dark' ? 'Light theme' : 'Dark theme'}</span>
-            </button>
-          </Tooltip>
-        )}
-        {account && (
-          <Tooltip
-            content="Settings"
-            shortcut={desktop ? shortcutLabel(',', mac) : undefined}
-            side="right"
-            forceOpen={hints}
-          >
-            <button
-              type="button"
-              className={`nav-link ${path.startsWith('/settings') ? 'nav-link-active' : ''}`}
-              aria-label="Settings"
-              aria-current={path.startsWith('/settings') ? 'page' : undefined}
-              aria-keyshortcuts={desktop ? `${mac ? 'Meta' : 'Control'}+,` : undefined}
-              onClick={(event) => account.onSettings('General', event.currentTarget)}
-            >
-              <Settings size={20} solid={path.startsWith('/settings')} aria-hidden="true" />
-              <span className="nav-label">Settings</span>
-            </button>
-          </Tooltip>
-        )}
       </div>
     </aside>
   );

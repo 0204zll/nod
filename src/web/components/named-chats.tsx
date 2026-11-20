@@ -1,74 +1,16 @@
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
-import Markdown from 'react-markdown';
-import type { Activity, Task } from '../../shared/contracts';
-import { taskLabels } from '../../shared/task-status';
+import type { Task } from '../../shared/contracts';
 import { api, errorMessage } from '../lib/api';
-import {
-  chatLine,
-  chatPath,
-  chatState,
-  draftChatPath,
-  elapsed,
-  firstParagraphMarkdown,
-  relativeTime,
-  type ChatState,
-  type NamedChat,
-} from '../lib/named-chats';
-import { BrandMark } from './brand';
-import { ArrowUpRight, ChevronRight, CornerUpLeft, Ellipsis, Plus } from './icons';
+import { chatPath, chatState, draftChatPath, type NamedChat } from '../lib/named-chats';
+import { ChevronRight, Ellipsis, Plus } from './icons';
 import { ActionMenu, ActionMenuItem } from './action-menu';
 
 function plain(event: MouseEvent) {
   return !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0);
 }
 
-function useNow(enabled: boolean, every = 1000) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!enabled) return;
-    const timer = window.setInterval(() => setNow(Date.now()), every);
-    return () => window.clearInterval(timer);
-  }, [enabled, every]);
-  return now;
-}
-
-const spinDelay = () => ({ '--chat-spin-delay': `-${Date.now() % 1400}ms` }) as React.CSSProperties;
-
-export function ChatAvatar({
-  name,
-  state,
-  size = 'md',
-  draft = false,
-}: {
-  name?: string;
-  state?: ChatState;
-  size?: 'xs' | 'sm' | 'md' | 'lg';
-  draft?: boolean;
-}) {
-  return (
-    <span
-      className={`chat-avatar chat-avatar-${size}${state ? ` chat-avatar-${state}` : ''}${draft ? ' chat-avatar-draft' : ''}`}
-      style={state === 'working' ? spinDelay() : undefined}
-      aria-hidden="true"
-    >
-      {draft ? null : name === undefined ? <BrandMark small /> : [...name][0]?.toUpperCase()}
-    </span>
-  );
-}
-
-const stateLabels: Record<NonNullable<ChatState>, string> = {
-  working: 'working',
-  needs: 'needs you',
-  failed: 'failed',
-};
-
-function KeepMark() {
-  return (
-    <svg className="chat-pin" viewBox="0 0 24 24" role="img" aria-label="Kept">
-      <path d="M9 4h6l-1 6 3 3H7l3-3-1-6Zm3 9v7" />
-    </svg>
-  );
-}
+export const mainChatSubtitle = 'Briefings, reminders and messenger messages land here.';
+export const sideChatSubtitle = 'Side chat. Same Nod, same memory and apps.';
 
 export async function changeChat(id: string, body: object) {
   await api(`/api/chats/${id}`, {
@@ -158,13 +100,32 @@ function ChatMenu({
   );
 }
 
+function ChatMarker({ chat }: { chat: Task }) {
+  const state = chatState(chat);
+  if (state === 'working')
+    return (
+      <span className="chat-marker chat-marker-working">
+        <span className="sr-only">working</span>
+      </span>
+    );
+  if (state === 'needs')
+    return (
+      <span className="chat-marker chat-marker-needs">
+        <span aria-hidden="true">?</span>
+        <span className="sr-only">needs you</span>
+      </span>
+    );
+  return null;
+}
+
 export function ChatList({
   chats,
   activeId,
+  mainActive,
+  mainWorking,
+  mainUnread,
   draftActive = false,
   unread,
-  live,
-  drafts,
   earlier = [],
   onNavigate,
   onChanged,
@@ -172,10 +133,11 @@ export function ChatList({
   chats: NamedChat[];
   earlier?: NamedChat[];
   activeId?: string;
+  mainActive: boolean;
+  mainWorking: boolean;
+  mainUnread: boolean;
   draftActive?: boolean;
   unread(chat: Task): boolean;
-  live(chat: Task): Activity | undefined;
-  drafts: Record<string, string>;
   onNavigate(path: string): void;
   onChanged(): void;
 }) {
@@ -197,17 +159,19 @@ export function ChatList({
     }
     known.current = next;
   }, [ids]);
-  const anyWorking = chats.some((chat) => chatState(chat) === 'working');
-  const now = useNow(true, anyWorking ? 15_000 : 60_000);
+  const link = (path: string) => (event: MouseEvent) => {
+    if (!plain(event)) return;
+    event.preventDefault();
+    onNavigate(path);
+  };
   const row = (chat: NamedChat, old = false) => {
-    const state = old ? undefined : chatState(chat);
     const isUnread = !old && unread(chat);
-    const draft = old ? undefined : drafts[chat.id];
-    const line = draft ?? chatLine(chat, live(chat));
-    const time = state
-      ? ''
-      : relativeTime(chat.chatOnly?.latestAt ?? chat.closedAt ?? chat.updatedAt, now);
-    const label = [chat.name, state ? stateLabels[state] : null, isUnread ? 'new messages' : null]
+    const state = old ? undefined : chatState(chat);
+    const label = [
+      chat.name,
+      state === 'working' ? 'working' : state === 'needs' ? 'needs you' : null,
+      isUnread ? 'new messages' : null,
+    ]
       .filter(Boolean)
       .join(', ');
     return (
@@ -215,9 +179,8 @@ export function ChatList({
         <a
           href={chatPath(chat.id)}
           className={[
-            'chat-row',
-            chat.id === activeId && 'chat-row-active',
-            state === 'needs' && 'chat-row-needs',
+            'panel-row chat-row',
+            chat.id === activeId && 'panel-row-active',
             isUnread && 'chat-row-unread',
             old && 'chat-row-earlier',
           ]
@@ -225,28 +188,10 @@ export function ChatList({
             .join(' ')}
           aria-label={label}
           aria-current={chat.id === activeId ? 'page' : undefined}
-          onClick={(event) => {
-            if (!plain(event)) return;
-            event.preventDefault();
-            onNavigate(chatPath(chat.id));
-          }}
+          onClick={link(chatPath(chat.id))}
         >
-          <ChatAvatar name={chat.name} state={state} />
           <span className="chat-row-name">{chat.name}</span>
-          <span className="chat-row-meta">
-            {chat.pinned && <KeepMark />}
-            {time}
-          </span>
-          <span className={`chat-row-line${state === 'working' && !draft ? ' chat-live' : ''}`}>
-            {draft ? (
-              <>
-                <em>Draft</em> {draft}
-              </>
-            ) : (
-              line
-            )}
-          </span>
-          {isUnread && <span className="chat-row-dot" aria-hidden="true" />}
+          {!old && <ChatMarker chat={chat} />}
         </a>
         {!old && (
           <ChatMenu
@@ -272,39 +217,51 @@ export function ChatList({
   };
   return (
     <section className="chat-list" aria-label="Chats">
-      <ul>
+      <ul className="panel-rows">
+        <li>
+          <a
+            href="/"
+            className={[
+              'panel-row chat-row',
+              mainActive && 'panel-row-active',
+              mainUnread && 'chat-row-unread',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+            aria-current={mainActive ? 'page' : undefined}
+            onClick={link('/')}
+          >
+            <span className="chat-row-name">Main chat</span>
+            {mainWorking && (
+              <span className="chat-marker chat-marker-working">
+                <span className="sr-only">working</span>
+              </span>
+            )}
+          </a>
+        </li>
+        {chats.map((chat) => row(chat))}
         {draftActive && (
           <li className="chat-row-fresh">
-            <a href={draftChatPath} className="chat-row chat-row-active" aria-current="page">
-              <ChatAvatar draft />
-              <span className="chat-row-name chat-row-name-draft">New chat</span>
-            </a>
-          </li>
-        )}
-        {chats.map((chat) => row(chat))}
-        {!draftActive && (
-          <li>
             <a
               href={draftChatPath}
-              className="chat-row chat-row-new"
-              onClick={(event) => {
-                if (!plain(event)) return;
-                event.preventDefault();
-                onNavigate(draftChatPath);
-              }}
+              className="panel-row chat-row panel-row-active"
+              aria-current="page"
             >
-              <span className="chat-avatar chat-avatar-md chat-avatar-add" aria-hidden="true">
-                <Plus size={16} />
-              </span>
               <span className="chat-row-name">New chat</span>
             </a>
           </li>
         )}
+        <li>
+          <a href={draftChatPath} className="panel-row panel-row-new" onClick={link(draftChatPath)}>
+            <Plus size={16} aria-hidden="true" />
+            <span>New chat</span>
+          </a>
+        </li>
         {earlier.length > 0 && (
           <li>
             <button
               type="button"
-              className="chat-list-earlier"
+              className="panel-row chat-list-earlier"
               aria-expanded={showEarlier}
               onClick={() => setShowEarlier((value) => !value)}
             >
@@ -324,148 +281,97 @@ export function ChatList({
   );
 }
 
-export function ChatCard({
+export function ChatLink({
   chat,
-  live,
-  unread,
-  showQuestion = true,
+  continued,
   onOpen,
-  onReply,
-  onChanged,
 }: {
   chat: NamedChat;
-  live?: Activity;
-  unread: boolean;
-  showQuestion?: boolean;
+  continued?: boolean;
   onOpen(path: string): void;
-  onReply?(): void;
-  onChanged?(): void;
 }) {
-  const state = chatState(chat);
-  const [keeping, setKeeping] = useState(false);
-  const [keepError, setKeepError] = useState('');
-  const now = useNow(state === 'working');
-  const open = (event: MouseEvent) => {
-    if (!plain(event)) return;
-    event.preventDefault();
-    onOpen(chatPath(chat.id));
-  };
-  const working = state === 'working';
-  const finished =
-    chat.status === 'done' || chat.status === 'cancelled' || chat.status === 'failed';
-  const outcome = finished
-    ? firstParagraphMarkdown(chat.result || chat.lastReply || chat.now || '')
-    : '';
-  const meta = working
-    ? live
-      ? elapsed(live.since, now)
-      : ''
-    : state === 'needs'
-      ? 'Needs you'
-      : finished
-        ? taskLabels[chat.status]
-        : chat.status === 'waiting' || chat.status === 'scheduled'
-          ? taskLabels[chat.status]
-          : '';
-  return (
-    <article
-      className={`chat-card${state ? ` chat-card-${state}` : ''}${finished ? ' chat-card-finished' : ''}${unread ? ' chat-card-unread' : ''}`}
-      data-chat-card={chat.id}
-    >
-      <ChatAvatar name={chat.name} state={state} size="lg" />
-      <a href={chatPath(chat.id)} className="chat-card-name" onClick={open}>
-        {chat.name}
-      </a>
-      <span className="chat-card-meta">
-        {chat.pinned && <KeepMark />}
-        {meta}
-        {working && <ChevronRight size={14} aria-hidden="true" />}
-      </span>
-      <span className={`chat-card-line${working ? ' chat-live' : ''}`}>
-        {working ? chatLine(chat, live) : chat.title === chat.name ? '' : chat.title}
-      </span>
-      {state === 'needs' && showQuestion && chat.question && <CardText text={chat.question} />}
-      {finished && outcome && <CardText text={outcome} />}
-      {(state === 'needs' || finished) && (
-        <div className="chat-card-actions">
-          {state === 'needs' && onReply && (
-            <button type="button" className="chat-button chat-button-primary" onClick={onReply}>
-              <CornerUpLeft size={15} aria-hidden="true" />
-              Reply
-            </button>
-          )}
-          <a
-            href={chatPath(chat.id)}
-            className="chat-button"
-            aria-label={`Open ${chat.name}`}
-            onClick={open}
-          >
-            Open
-            <ChevronRight size={15} aria-hidden="true" />
-          </a>
-          {finished && !chat.pinned && !chat.archivedAt && onChanged && (
-            <button
-              type="button"
-              className="chat-button chat-button-quiet"
-              aria-label={`Keep ${chat.name}`}
-              disabled={keeping}
-              onClick={() => {
-                setKeeping(true);
-                setKeepError('');
-                void changeChat(chat.id, { pinned: true })
-                  .then(onChanged)
-                  .catch((cause) => setKeepError(errorMessage(cause)))
-                  .finally(() => setKeeping(false));
-              }}
-            >
-              <KeepMark />
-              Keep
-            </button>
-          )}
-        </div>
-      )}
-      {keepError && (
-        <p className="chat-card-error" role="alert">
-          {keepError}
-        </p>
-      )}
-    </article>
-  );
-}
-
-function CardText({ text }: { text: string }) {
-  return (
-    <p className="chat-card-body">
-      <Markdown allowedElements={['strong', 'em', 'code']} unwrapDisallowed>
-        {firstParagraphMarkdown(text, 600)}
-      </Markdown>
-    </p>
-  );
-}
-
-export function ChatReceipt({ chat, onOpen }: { chat: NamedChat; onOpen(path: string): void }) {
   return (
     <a
       href={chatPath(chat.id)}
-      className="chat-receipt"
+      className="chat-link"
       onClick={(event) => {
         if (!plain(event)) return;
         event.preventDefault();
         onOpen(chatPath(chat.id));
       }}
     >
-      <ArrowUpRight size={13} aria-hidden="true" />
-      <ChatAvatar name={chat.name} state={chatState(chat)} size="xs" />
-      {chat.name}
+      {continued ? `Continued in ${chat.name}` : `Open ${chat.name}`}
     </a>
   );
 }
 
-export function FromNodLink({ messageId, onOpen }: { messageId: string; onOpen(): void }) {
+export function ContinueLink({
+  messageId,
+  onOpen,
+}: {
+  messageId: string;
+  onOpen(path: string): void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  return (
+    <>
+      <button
+        type="button"
+        className="chat-link"
+        disabled={busy}
+        onClick={() => {
+          setBusy(true);
+          setError('');
+          void api<Task>('/api/chats', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ from: messageId }),
+          })
+            .then((chat) => onOpen(chatPath(chat.id)))
+            .catch((cause) => setError(errorMessage(cause)))
+            .finally(() => setBusy(false));
+        }}
+      >
+        Continue in a side chat
+      </button>
+      {error && (
+        <p className="chat-link-error" role="alert">
+          {error}
+        </p>
+      )}
+    </>
+  );
+}
+
+export function CarriedNote({ messageId, onOpen }: { messageId: string; onOpen(): void }) {
+  return (
+    <p className="chat-carried">
+      Carried over from Main chat: your request and Nod’s answer.{' '}
+      <a
+        href="/"
+        onClick={(event) => {
+          if (!plain(event)) return;
+          event.preventDefault();
+          onOpen();
+          window.setTimeout(
+            () =>
+              window.dispatchEvent(new CustomEvent('nod:focus-message', { detail: { messageId } })),
+            120,
+          );
+        }}
+      >
+        Show
+      </a>
+    </p>
+  );
+}
+
+export function FromMainLink({ messageId, onOpen }: { messageId: string; onOpen(): void }) {
   return (
     <a
       href="/"
-      className="chat-from-nod"
+      className="chat-from-main"
       onClick={(event) => {
         if (!plain(event)) return;
         event.preventDefault();
@@ -477,28 +383,25 @@ export function FromNodLink({ messageId, onOpen }: { messageId: string; onOpen()
         );
       }}
     >
-      <CornerUpLeft size={13} aria-hidden="true" />
-      from your chat with
-      <ChatAvatar size="xs" />
-      Nod
+      From Main chat
     </a>
   );
 }
 
 export function ChatHeader({
   chat,
-  onBack,
+  main = false,
   onChanged,
   onDetails,
   onLeave,
   toolsRef,
 }: {
   chat?: NamedChat;
+  main?: boolean;
   onDetails?(): void;
   onLeave?(): void;
   toolsRef?(element: HTMLDivElement | null): void;
-  onBack(): void;
-  onChanged(): void;
+  onChanged?(): void;
 }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(chat?.name ?? '');
@@ -523,25 +426,20 @@ export function ChatHeader({
     try {
       await changeChat(chat.id, { name: next });
       setEditing(false);
-      onChanged();
+      onChanged?.();
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
       setBusy(false);
     }
   }
-  const subtitle = error || (chat && chat.title !== chat.name ? chat.title : '');
   return (
     <header className="chat-header">
-      <button type="button" className="chat-header-back" aria-label="Back to Nod" onClick={onBack}>
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="m14 6-6 6 6 6" />
-        </svg>
-      </button>
-      <ChatAvatar name={chat?.name} state={chat ? chatState(chat) : undefined} draft={!chat} />
       <div className="chat-header-copy">
-        {!chat ? (
-          <h1 className="chat-header-draft">New chat</h1>
+        {main ? (
+          <h1>Main chat</h1>
+        ) : !chat ? (
+          <h1>New chat</h1>
         ) : editing ? (
           <form
             onSubmit={(event) => {
@@ -572,14 +470,15 @@ export function ChatHeader({
             </button>
           </h1>
         )}
-        {subtitle && <p role={error ? 'alert' : undefined}>{subtitle}</p>}
+        <p role={error ? 'alert' : undefined}>
+          {error || (main ? mainChatSubtitle : sideChatSubtitle)}
+        </p>
       </div>
-      {chat?.pinned && <KeepMark />}
       <div className="chat-header-tools" ref={toolsRef} />
       {chat && (
         <ChatMenu
           chat={chat}
-          onChanged={onChanged}
+          onChanged={() => onChanged?.()}
           onArchived={onLeave}
           onError={setError}
           onRename={() => setEditing(true)}

@@ -330,7 +330,8 @@ export interface Task {
   nameAuto?: boolean;
   lastReply?: string | null;
   archivedAt?: string | null;
-  chatOnly?: { count: number; latestAt: string | null };
+  chatOnly?: { count: number; latestAt: string | null; latestId: string | null };
+  continuedFrom?: string;
 }
 export interface TaskDetail {
   task: Task;

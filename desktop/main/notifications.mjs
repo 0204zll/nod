@@ -307,9 +307,27 @@ export function watchAssistantMessages({ request, onMessage, onState, retryMs = 
       if (initialized && !seen.has(message.id) && message.role === 'assistant') received = message;
       seen.add(message.id);
     }
+    const chats = [];
+    for (const task of Array.isArray(body.tasks) ? body.tasks : []) {
+      const id = task?.chatOnly?.latestId;
+      if (typeof task?.id !== 'string' || typeof task.name !== 'string' || typeof id !== 'string')
+        continue;
+      if (initialized && !seen.has(id))
+        chats.push({
+          message: {
+            id,
+            role: 'assistant',
+            text: task.status === 'needs_you' && task.question ? task.question : task.lastReply,
+          },
+          chat: { id: task.id, name: task.name },
+        });
+      seen.add(id);
+    }
     while (seen.size > 1000) seen.delete(seen.values().next().value);
     initialized = true;
-    if (received && !controller.signal.aborted) onMessage(received, threadId);
+    if (controller.signal.aborted) return;
+    if (received) onMessage(received, threadId);
+    for (const { message, chat } of chats) onMessage(message, threadId, chat);
   }
   async function subscribe() {
     while (!controller.signal.aborted) {

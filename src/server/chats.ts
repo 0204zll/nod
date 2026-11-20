@@ -3,8 +3,6 @@ import { inChatSql, withdrawnSql } from './turn-chain.ts';
 
 type Queryable = Pick<PoolClient, 'query'>;
 
-export type MessageKind = 'plain' | 'decision' | 'notice';
-
 export const chatNameLimit = 24;
 export const chatResultLimit = 300;
 
@@ -14,6 +12,7 @@ export const chatColumnsSql = `
   ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pinned boolean NOT NULL DEFAULT false;
   ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_at timestamptz;
   ALTER TABLE tasks ADD COLUMN IF NOT EXISTS request_started_at timestamptz;
+  ALTER TABLE tasks ADD COLUMN IF NOT EXISTS continued_from uuid REFERENCES messages(id);
 `;
 
 function failure(message: string, statusCode = 400) {
@@ -160,13 +159,7 @@ export async function latestChatMessages(
   };
 }
 
-export async function chatOnlyPlacement(
-  client: Queryable,
-  ownerId: string,
-  turnId: string,
-  kind: MessageKind,
-) {
-  if (kind !== 'plain') return false;
+export async function chatOnlyPlacement(client: Queryable, ownerId: string, turnId: string) {
   const turn = (
     await client.query<{ task_id: string | null; channel: string }>(
       "SELECT to_jsonb(u)->>'task_id' AS task_id,u.channel FROM turns u WHERE u.id=$1 AND u.owner_id=$2",

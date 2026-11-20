@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
   type SetStateAction,
 } from 'react';
 import { createPortal, flushSync } from 'react-dom';
@@ -31,14 +32,8 @@ import { ChatTools } from '../components/chat-tools';
 import { ServiceLogo } from '../components/service-logo';
 import { Composer, type ComposerHandle, type ComposerSendResult } from '../components/composer';
 import { TaskCard } from './tasks';
-import { ChatCard, ChatReceipt, FromNodLink } from '../components/named-chats';
-import {
-  chatNewsAt,
-  chatPath,
-  isNamedChat,
-  type ChatMessage,
-  type NamedChat,
-} from '../lib/named-chats';
+import { ChatLink, ContinueLink, FromMainLink } from '../components/named-chats';
+import { isNamedChat, type ChatMessage, type NamedChat } from '../lib/named-chats';
 import { MessageBubble, type MessageWork } from '../components/message';
 import { conversationFiles } from '../components/attachment-card';
 import { ArtifactWorkspace } from '../components/artifact-drawer';
@@ -332,11 +327,11 @@ export function Chat({
   onReturnToMemory,
   chat,
   onOpenChat,
-  chatUnread,
+  carried,
 }: {
   chat?: NamedChat;
   onOpenChat?(path: string): void;
-  chatUnread?(task: NamedChat): boolean;
+  carried?: ReactNode;
   ownerId: string;
   state: AppState;
   streams: Record<string, string>;
@@ -796,7 +791,7 @@ export function Chat({
     : undefined;
   const workOf = (message: Message): MessageWork | undefined => {
     const work = message.work;
-    if (!work) return undefined;
+    if (!work || (work.kind === 'task' && work.id === chat?.id)) return undefined;
     const item = live.find((entry) =>
       work.kind === 'task' ? entry.taskId === work.id : entry.runId === work.id,
     );
@@ -929,74 +924,28 @@ export function Chat({
     )
     .join(';');
   const files = useMemo(() => conversationFiles(visibleMessages), [fileKey]);
-  const cardsAfter = new Map<string, NamedChat[]>();
-  const movedCards = new Set<string>();
-  const askedInCard = new Set<string>();
-  for (const task of chat ? [] : (state.tasks ?? []).filter(isNamedChat)) {
-    const start = visibleMessages.findIndex((message) => message.id === task.messageId);
-    if (start < 0) continue;
-    const question =
-      task.status === 'needs_you'
-        ? visibleMessages.find((message) => message.id === task.questionMessageId)
-        : undefined;
-    if (question && !question.answerChoices && !question.approval) askedInCard.add(question.id);
-    const newsAt = chatNewsAt(task, visibleMessages);
-    if (!newsAt) continue;
-    let anchor = -1;
-    for (let index = visibleMessages.length - 1; index > start; index--)
-      if (visibleMessages[index]!.createdAt <= newsAt) {
-        anchor = index;
-        break;
-      }
-    if (anchor < 0) continue;
-    movedCards.add(task.id);
-    const id = visibleMessages[anchor]!.id;
-    cardsAfter.set(id, [...(cardsAfter.get(id) ?? []), task]);
-  }
-  const namedById = new Map(
-    (chat ? [] : (state.tasks ?? []).filter(isNamedChat)).map((task) => [task.id, task]),
-  );
-  const cardAnchor = (task: NamedChat) =>
-    movedCards.has(task.id)
-      ? [...cardsAfter].find(([, tasks]) => tasks.includes(task))?.[0]
-      : task.messageId;
-  const cardRightAfter = (index: number, task: NamedChat) => {
-    const anchor = cardAnchor(task);
-    if (visibleMessages[index]?.id === anchor) return true;
-    for (let next = index + 1; next < visibleMessages.length; next++) {
-      const id = visibleMessages[next]!.id;
-      if (id === anchor) return true;
-      if (id !== task.messageId && !askedInCard.has(id)) return false;
-    }
-    return false;
-  };
-  const requestChat = (message: Message, index: number) => {
-    if (chat || message.role !== 'user' || message.replyTo || !message.chatId) return undefined;
-    const task = namedById.get(message.chatId);
-    return task && !cardRightAfter(index, task) ? task : undefined;
-  };
-  const replyToChat = (task: NamedChat) => {
-    const question = allMessages.find((message) => message.id === task.questionMessageId);
-    if (!question) return onOpenChat?.(chatPath(task.id));
-    taskReply.current = question.id;
-    setReplyTo({ ...question, from: task.name });
-    composer.current?.focus();
-  };
-  const chatCard = (task: NamedChat) => (
-    <div key={`chat-${task.id}`} className="message message-assistant chat-card-slot">
-      <div className="message-content">
-        <ChatCard
-          chat={task}
-          live={live.find((item) => item.taskId === task.id)}
-          unread={chatUnread?.(task) ?? false}
-          showQuestion={!task.questionMessageId || askedInCard.has(task.questionMessageId)}
-          onOpen={(path) => onOpenChat?.(path)}
-          onReply={task.status === 'needs_you' ? () => replyToChat(task) : undefined}
-          onChanged={() => void refresh()}
-        />
-      </div>
-    </div>
-  );
+  const sideChats = chat ? [] : (state.tasks ?? []).filter(isNamedChat);
+  const linkedChat = (message: Message) =>
+    sideChats.find((task) => task.messageId === message.id || task.continuedFrom === message.id);
+  const lastVisible = visibleMessages.at(-1);
+  const continuable =
+    !chat &&
+    !working &&
+    !sending &&
+    !welcoming &&
+    lastVisible?.role === 'assistant' &&
+    lastVisible.turnId &&
+    lastVisible.text.trim() &&
+    !lastVisible.chatId &&
+    !lastVisible.approval &&
+    !lastVisible.answerChoices &&
+    !lastVisible.suggestions &&
+    !lastVisible.streamId?.includes('failure') &&
+    !streamIds.has(lastVisible.streamId ?? '') &&
+    !linkedChat(lastVisible) &&
+    visibleMessages.some((message) => message.role === 'user')
+      ? lastVisible.id
+      : undefined;
   const planning =
     state.planningTasks === true && !allMessages.some((message) => message.suggestions);
   const unseen = away
@@ -2389,6 +2338,7 @@ export function Chat({
               aria-live="polite"
               aria-relevant="additions"
             >
+              {carried}
               {visibleMessages.map((message, index) => (
                 <Fragment key={message.streamId ?? message.id}>
                   {(!index ||
@@ -2440,39 +2390,25 @@ export function Chat({
                         void send(task.title, [], null, 'task_card');
                       }}
                     />
-                  ) : state.tasks?.some(
-                      (task) => task.messageId === message.id && task.id !== chat?.id,
-                    ) ? (
+                  ) : state.tasks?.some((task) => task.messageId === message.id && !task.name) ? (
                     state.tasks
-                      ?.filter((task) => task.messageId === message.id)
-                      .map((task) =>
-                        isNamedChat(task) ? (
-                          movedCards.has(task.id) ? (
-                            visibleMessages[index - 1]?.chatId === task.id ? null : (
-                              <div key={task.id} className="chat-receipt-slot">
-                                <ChatReceipt chat={task} onOpen={(path) => onOpenChat?.(path)} />
-                              </div>
-                            )
-                          ) : (
-                            chatCard(task)
-                          )
-                        ) : (
-                          <TaskCard
-                            key={task.id}
-                            task={task}
-                            live={live.find((item) => item.taskId === task.id)}
-                            onReply={() => {
-                              const target =
-                                allMessages.find((item) => item.id === task.questionMessageId) ??
-                                message;
-                              taskReply.current = target.id;
-                              setReplyTo(target);
-                              composer.current?.focus();
-                            }}
-                          />
-                        ),
-                      )
-                  ) : askedInCard.has(message.id) ? null : (
+                      ?.filter((task) => task.messageId === message.id && !task.name)
+                      .map((task) => (
+                        <TaskCard
+                          key={task.id}
+                          task={task}
+                          live={live.find((item) => item.taskId === task.id)}
+                          onReply={() => {
+                            const target =
+                              allMessages.find((item) => item.id === task.questionMessageId) ??
+                              message;
+                            taskReply.current = target.id;
+                            setReplyTo(target);
+                            composer.current?.focus();
+                          }}
+                        />
+                      ))
+                  ) : (
                     <MessageBubble
                       message={message}
                       chatLabel={
@@ -2579,19 +2515,28 @@ export function Chat({
                     />
                   )}
                   {chat && message.role === 'user' && (message as ChatMessage).inMain && (
-                    <div className="chat-from-slot">
-                      <FromNodLink messageId={message.id} onOpen={() => onOpenChat?.('/')} />
+                    <div className="chat-link-slot chat-link-slot-user">
+                      <FromMainLink messageId={message.id} onOpen={() => onOpenChat?.('/')} />
                     </div>
                   )}
                   {(() => {
-                    const task = requestChat(message, index);
-                    return task ? (
-                      <div className="chat-receipt-slot">
-                        <ChatReceipt chat={task} onOpen={(path) => onOpenChat?.(path)} />
+                    const linked = linkedChat(message);
+                    return linked ? (
+                      <div className="chat-link-slot">
+                        <ChatLink chat={linked} continued onOpen={(path) => onOpenChat?.(path)} />
+                      </div>
+                    ) : message.id === continuable ? (
+                      <div className="chat-link-slot">
+                        <ContinueLink
+                          messageId={message.id}
+                          onOpen={(path) => {
+                            void refresh();
+                            onOpenChat?.(path);
+                          }}
+                        />
                       </div>
                     ) : null;
                   })()}
-                  {cardsAfter.get(message.id)?.map(chatCard)}
                   {message.id === introduction.data?.messageId && (
                     <ChatNotifications ownerId={ownerId} messageId={message.id} />
                   )}
@@ -2788,7 +2733,6 @@ export function Chat({
               key={`${ownerId}.${threadId}.${chat?.id ?? ''}`}
               active={visible}
               ref={composer}
-              name={chat?.name}
               draftKey={`nod.chat-draft.${ownerId}.${threadId}${chat ? `.${chat.id}` : ''}`}
               privateReply={Boolean(state.verificationRequests?.length)}
               restoreReply={(saved) => {

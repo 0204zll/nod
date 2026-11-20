@@ -659,8 +659,8 @@ function synchronizeNotifications() {
     const stop = watchAssistantMessages({
       request: (path, options) => engineRequest(path, options),
       onState: (state) => badge.update(state),
-      onMessage: (message, threadId) =>
-        void notifyAssistantMessage(message, threadId).catch(() => {}),
+      onMessage: (message, threadId, chat) =>
+        void notifyAssistantMessage(message, threadId, chat).catch(() => {}),
     });
     stopNotifications = (options) => {
       stop();
@@ -670,7 +670,7 @@ function synchronizeNotifications() {
   }
 }
 
-async function notifyAssistantMessage(message, threadId) {
+async function notifyAssistantMessage(message, threadId, chat) {
   if (!preferences.notifications || !Notification.isSupported() || quitting) return;
   if ([...engineWindows].some((window) => !window.isDestroyed() && window.isFocused())) return;
   const sourceEngine = remoteConnection || engine;
@@ -685,7 +685,7 @@ async function notifyAssistantMessage(message, threadId) {
   )
     return;
   const notification = new Notification({
-    title: 'Nod',
+    title: chat?.name ?? 'Nod',
     icon: notificationIcon,
     body: assistantNotificationPreview(message, knownSecrets),
   });
@@ -703,7 +703,9 @@ async function notifyAssistantMessage(message, threadId) {
       if (quitting || window.isDestroyed() || status.phase !== 'ready') return;
       window.webContents.send(
         'nod:focus-message',
-        (remoteConnection || engine) === sourceEngine ? { threadId, messageId: message.id } : null,
+        (remoteConnection || engine) === sourceEngine
+          ? { threadId, messageId: message.id, ...(chat ? { chatId: chat.id } : {}) }
+          : null,
       );
     };
     if (window.webContents.isLoadingMainFrame()) window.webContents.once('did-finish-load', focus);

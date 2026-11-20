@@ -64,7 +64,7 @@ Your messages from a turn you stopped, or whose model request failed at the prov
 
 Only your words carry authority. The checker never reads the web pages or emails Nod read, so their text reaches it only where Nod copies it into the action itself, such as an email body, or into a message of Nod's that you answered. The one exception is a computer use step: the checker sees the app window's current content, including any email text in it, as data, never as your words. The checker is an AI model and can be wrong.
 
-In a [named chat](/use/tasks/#named-chats), the checker sees the words you addressed to that chat's current request. Words you typed in the main chat or in another chat do not count there, and a new request in a finished chat does not inherit what an earlier request allowed.
+In a [side chat](/use/tasks/#side-chats), the checker sees the words you addressed to that chat's current request. Words you typed in the main chat or in another chat do not count there, and a new request in a finished chat does not inherit what an earlier request allowed.
 
 ## Because you said
 
@@ -201,7 +201,7 @@ Nod doesn't add its own confirmation on top of the trust check or payment approv
 It checks connected-app actions, browser steps that could submit or change something, Nod's own changes and [sign-ins](/trust/vault/). Card entry always goes through [payment approval](/trust/payments/). The checker judges a browser step by the label the website gives the control and, for a form, the address it sends to. A button that acts through page scripts instead of a form shows only its label, so a deceptive site can still mislabel it. Your request covers the steps it needs on the website you named, so a page could steer Nod to another step there that also fits, such as adding a second item to the basket; payment approval shows the total before any card is used. Opening a link Nod found counts as reading. The checker is a best-effort judge and can be wrong.
 :::
 
-A typed reply answers only a confirmation shown where you typed it. A "yes" in one named chat cannot approve what another chat asked.
+A typed reply answers only a confirmation shown where you typed it. A "yes" in one side chat cannot approve what another chat asked.
 
 ## Where this is enforced
 

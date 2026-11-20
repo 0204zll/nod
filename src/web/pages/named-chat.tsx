@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AppState, Artifact, Message, MessageHistoryPage, Task } from '../../shared/contracts';
 import { api, errorMessage } from '../lib/api';
-import { ChatHeader } from '../components/named-chats';
+import { CarriedNote, ChatHeader } from '../components/named-chats';
 import { Composer } from '../components/composer';
 import { Notice } from '../components/ui';
 import type { NamedChat as Named } from '../lib/named-chats';
@@ -80,7 +80,9 @@ export function NamedChat({
       hiddenMessageIds: [],
       chatRecovery: undefined,
       planningTasks: false,
-      activity: state.activity?.filter((item) => item.taskId === chat.id),
+      activity: state.activity
+        ?.filter((item) => item.taskId === chat.id)
+        .map(({ background: _background, ...item }) => ({ ...item, taskId: null })),
     }),
     [state, page, chat.id],
   );
@@ -96,7 +98,6 @@ export function NamedChat({
     <div className="named-chat-route">
       <ChatHeader
         chat={chat}
-        onBack={() => onNavigate('/')}
         onChanged={() => void refresh()}
         onLeave={() => onNavigate('/')}
         onDetails={() => setDetails((value) => !value)}
@@ -125,6 +126,11 @@ export function NamedChat({
           readUnavailable
           onFeedback={onFeedback}
           onOpenChat={onNavigate}
+          carried={
+            chat.continuedFrom && (
+              <CarriedNote messageId={chat.continuedFrom} onOpen={() => onNavigate('/')} />
+            )
+          }
           requestedMessage={firstMessage && { ...firstMessage, source: 'composer' }}
           onRequestHandled={onFirstMessageSent}
         />
@@ -161,12 +167,15 @@ export function DraftChat({
   }, [onNavigate]);
   return (
     <div className="named-chat-route">
-      <ChatHeader onBack={() => onNavigate('/')} onChanged={() => {}} />
+      <ChatHeader />
       <div className="draft-chat">
+        <p className="draft-chat-intro">
+          A new side chat. It is the same Nod, with the same memory and apps. Your main chat stays
+          clean.
+        </p>
         {error && <Notice kind="error">{error}</Notice>}
         <Composer
-          name="a new chat"
-          placeholder="What’s this chat about?"
+          placeholder="Start a new topic"
           draftKey={`nod.chat-draft.${ownerId}.${threadId}.new`}
           ready={ready}
           text={text}

@@ -35,7 +35,7 @@ import {
   workOriginSql,
   taskMessageSql,
 } from './turn-chain.ts';
-import { chatOnlyPlacement, type MessageKind } from './chats.ts';
+import { chatOnlyPlacement } from './chats.ts';
 import { dataRoot, databaseUrl, ownerId } from './config.ts';
 import { delta, refresh, working } from './events.ts';
 import {
@@ -430,7 +430,6 @@ export async function insertAssistantMessage(
   presentation?: Presentation,
   answerChoices?: AnswerChoices,
   analytics?: CaptureAnalytics,
-  kind?: MessageKind,
 ) {
   const visual =
     presentation === undefined
@@ -490,12 +489,7 @@ export async function insertAssistantMessage(
     ).rows[0]?.id;
   await assertReplyTarget(client, turn.threadId, replyToMessageId);
   const id = randomUUID();
-  const chatOnly = await chatOnlyPlacement(
-    client,
-    ownerId,
-    turn.turnId,
-    kind ?? (choices || streamId?.includes('failure') ? 'notice' : 'plain'),
-  );
+  const chatOnly = await chatOnlyPlacement(client, ownerId, turn.turnId);
   await client.query(
     'INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,attachments,stream_id,reply_to_message_id,presentation,answer_choices,chat_only) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)',
     [
@@ -2698,7 +2692,6 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
           undefined,
           answerChoices,
           dependencies.analytics,
-          'decision',
         );
         if (result.status === 'waiting_credentials' || result.waitingFor === 'credentials')
           await dependencies.bindVerificationQuestion?.(turnId, messageId, client);

@@ -127,21 +127,24 @@ function fixture(t, onState) {
   const snapshots = [];
   const threadId = 'synthetic-thread-1';
   let messages = [{ id: 'historical-assistant', role: 'assistant' }];
+  let tasks = [];
   const delivered = [];
   const threads = [];
+  const chats = [];
   const stop = watchAssistantMessages({
     retryMs: 1,
     onState,
-    onMessage: (message, threadId) => {
+    onMessage: (message, threadId, chat) => {
       delivered.push(message);
       threads.push(threadId);
+      chats.push(chat);
     },
     request: async (path, options) => {
       assert.equal(options.redirect, 'error');
       assert.ok(options.signal instanceof AbortSignal);
       if (path === '/api/state') {
         snapshots.push(messages);
-        return Response.json({ threadId, messages });
+        return Response.json({ threadId, messages, tasks });
       }
       assert.equal(path, '/api/events');
       const stream = { signal: options.signal };
@@ -166,6 +169,10 @@ function fixture(t, onState) {
     stop,
     delivered,
     threads,
+    chats,
+    tasks(value) {
+      tasks = value;
+    },
     get notifications() {
       return delivered.length;
     },
@@ -207,6 +214,35 @@ test('assistant notifications use committed messages without history, delta, or 
   assert.equal(f.notifications, 1);
   f.stop();
   assert.equal(f.streams[0].signal.aborted, true);
+});
+
+test('a side chat reply notifies once with its chat and a waiting question shows the question', async (t) => {
+  const chat = (latestId, extra = {}) => [
+    {
+      id: 'synthetic-chat',
+      name: 'Inbox replies',
+      status: 'done',
+      lastReply: 'Synthetic chat reply',
+      chatOnly: { count: 1, latestId },
+      ...extra,
+    },
+  ];
+  const f = fixture(t);
+  f.tasks(chat('chat-message-1'));
+  await eventually(() => f.snapshots.length === 1);
+  f.tasks(chat('chat-message-2'));
+  f.send('data: {"type":"refresh"}\n\n');
+  await eventually(() => f.notifications === 1);
+  assert.equal(f.delivered[0].id, 'chat-message-2');
+  assert.equal(f.delivered[0].text, 'Synthetic chat reply');
+  assert.deepEqual(f.chats[0], { id: 'synthetic-chat', name: 'Inbox replies' });
+  f.send('data: {"type":"refresh"}\n\n');
+  await eventually(() => f.snapshots.length === 3);
+  assert.equal(f.notifications, 1);
+  f.tasks(chat('chat-message-3', { status: 'needs_you', question: 'Synthetic question?' }));
+  f.send('data: {"type":"refresh"}\n\n');
+  await eventually(() => f.notifications === 2);
+  assert.equal(f.delivered[1].text, 'Synthetic question?');
 });
 
 test('notification reconnect reconciles missed messages and stop aborts subscription', async (t) => {

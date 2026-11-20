@@ -2400,6 +2400,8 @@ test(
               return { status: 'succeeded' };
             }
             if (context.taskContext?.id !== chat?.id || !chat) return;
+            if (context.prompt === 'Synthetic question in the chat')
+              return { status: 'waiting_user', message: 'Synthetic chat question?' };
             await context.task!({
               action: 'finish',
               id: chat.id,
@@ -2626,6 +2628,70 @@ test(
           ).json().messages as Array<{ id: string }>;
           assert.ok(kept.some(({ id }) => id === request.messageId));
           assert.equal((await tasks.read()).filter(({ name }) => name === 'Recruiter').length, 1);
+
+          const asked = await userMessages.submit('Synthetic question in the chat', [], {
+            chatId: chat!.id,
+          });
+          await waitFor(settled(asked.turnId));
+          const question = (
+            await db.pool.query(
+              "SELECT id,chat_only FROM messages WHERE turn_id=$1 AND role='assistant'",
+              [asked.turnId],
+            )
+          ).rows[0];
+          assert.equal(question.chat_only, true);
+          assert.equal((await tasks.read()).find(({ id }) => id === chat!.id)?.status, 'needs_you');
+          const mainNow = (
+            await app.inject({ method: 'GET', url: '/api/messages', headers })
+          ).json().messages as Array<{ id: string }>;
+          assert.ok(!mainNow.some(({ id }) => id === question.id));
+          const answered = await userMessages.submit('Synthetic answer in the chat', [], {
+            chatId: chat!.id,
+          });
+          assert.equal(
+            (await db.pool.query('SELECT parent_turn_id FROM turns WHERE id=$1', [answered.turnId]))
+              .rows[0].parent_turn_id,
+            asked.turnId,
+          );
+          await waitFor(settled(answered.turnId));
+
+          const origin = (
+            await db.pool.query(
+              `SELECT m.id,q.text AS request FROM messages m JOIN turns u ON u.id=m.turn_id
+               JOIN messages q ON q.id=u.message_id
+               WHERE m.role='assistant' AND NOT m.chat_only AND m.text<>'' AND u.session_id=u.thread_id
+               ORDER BY m.created_at DESC LIMIT 1`,
+            )
+          ).rows[0];
+          const continued = await app.inject({
+            method: 'POST',
+            url: '/api/chats',
+            headers,
+            payload: { from: origin.id },
+          });
+          assert.equal(continued.statusCode, 200);
+          assert.equal(continued.json().name, 'Side chat');
+          assert.equal(continued.json().nameAuto, true);
+          assert.equal(continued.json().continuedFrom, origin.id);
+          assert.equal(continued.json().title, origin.request);
+          const repeated = await app.inject({
+            method: 'POST',
+            url: '/api/chats',
+            headers,
+            payload: { from: origin.id },
+          });
+          assert.equal(repeated.json().id, continued.json().id);
+          assert.equal(
+            (
+              await app.inject({
+                method: 'POST',
+                url: '/api/chats',
+                headers,
+                payload: { from: question.id },
+              })
+            ).statusCode,
+            404,
+          );
         },
       );
 

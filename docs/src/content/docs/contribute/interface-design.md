@@ -87,16 +87,14 @@ Leave 8 px before a file preview that follows reply text or an action card in th
 | Item               | Rule                                                                                                                                  |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
 | Icon set           | [n8n icons](https://n8n-icons.vercel.app/) from `src/web/components/icons.tsx`; Lucide only where the set has no icon yet             |
-| Icon sizes         | The 12 px drawing at 14 px and below, the 16 px drawing up to 18 px, scaled to 28 px for sidebar navigation; page titles have no icon |
+| Icon sizes         | The 12 px drawing at 14 px and below, the 16 px drawing up to 18 px, scaled to 22 px for rail navigation; page titles have no icon    |
 | Icon style         | Outline by default, Solid for the selected navigation item; neutral color, pink for selected navigation, state colors on status icons |
 | Connected services | Logos keep their official colors                                                                                                      |
 | Dot grid           | 24 px, only on the sign-in story and the empty conversation. Never in messages, tables, forms, app lists or Settings.                 |
 
 Don't show a construction grid. Keep the existing reduced-motion behaviour. The brand guide doesn't define motion for product interfaces yet.
 
-The sidebar is 96 px wide when collapsed and 224 px when expanded. Keep its 44 px Nod mark and navigation icons the same size and position through the width transition. Chat message actions and composer controls share 32 px targets and 4 px gaps.
-
-The sidebar toggle sits at the middle of its divider. Its rounded panel outline has a wider sidebar pane when open and a narrow inset when closed. Keep a 44 × 44 px target around the 32 × 32 px circular face. Reveal it near the edge after 120 ms, wait 300 ms before hiding it, and keep it visible through the sidebar transition. Keyboard focus and touch keep it available; reduced motion removes the animation and delays.
+The rail on the left is 96 px wide and holds **Chat**, **Scheduled** and **Settings**: 48 × 40 px icon tiles with their labels under them. The 272 px list next to it belongs to the selected icon. Hiding the list moves it under the rail with `transform` only, on `cubic-bezier(0.32, 0.72, 0, 1)` for 300 ms; the page beside it moves with transforms too, and its layout changes once. A keyboard shortcut changes it without motion, and reduced motion fades the list instead. Chat message actions and composer controls share 32 px targets and 4 px gaps.
 
 ## Tooltips and shortcuts
 

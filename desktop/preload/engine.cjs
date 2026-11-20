@@ -17,9 +17,22 @@ let pendingFeedback = false;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 let pendingFocus;
 ipcRenderer.on('nod:focus-message', (_event, value) => {
-  if (value !== null && (!value || !uuid.test(value.threadId) || !uuid.test(value.messageId)))
+  if (
+    value !== null &&
+    (!value ||
+      !uuid.test(value.threadId) ||
+      !uuid.test(value.messageId) ||
+      (value.chatId !== undefined && !uuid.test(value.chatId)))
+  )
     return;
-  const target = value === null ? null : { threadId: value.threadId, messageId: value.messageId };
+  const target =
+    value === null
+      ? null
+      : {
+          threadId: value.threadId,
+          messageId: value.messageId,
+          ...(value.chatId ? { chatId: value.chatId } : {}),
+        };
   if (focusListeners.size === 0) pendingFocus = target;
   else for (const listener of focusListeners) listener(target);
 });

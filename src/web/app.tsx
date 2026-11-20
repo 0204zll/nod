@@ -1,8 +1,10 @@
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { ArrowLeft } from './components/icons';
 import { Chat } from './pages/chat';
 import { DraftChat, NamedChat, type FirstChatMessage } from './pages/named-chat';
-import { ChatList } from './components/named-chats';
+import { ChatHeader, ChatList } from './components/named-chats';
+import { movePanel } from './lib/panel-motion';
 import {
   chatIdOf,
   chatPath,
@@ -30,9 +32,7 @@ import { ChatSkeleton } from './components/startup';
 import { SetupProgress } from './components/setup-progress';
 import { ServerAccess } from './components/server-access';
 import { Sidebar } from './components/sidebar';
-import { DesktopToolbar } from './components/desktop-toolbar';
 import { DesktopUpdateToast } from './components/desktop-update-toast';
-import { SidebarToggle } from './components/sidebar-toggle';
 import { FeedbackDialog } from './components/feedback';
 import { createFeedbackCapture } from './lib/feedback-capture';
 import { navigate, replaceNavigation, sidebarItems, subscribeNavigation } from './lib/navigation';
@@ -126,18 +126,10 @@ function Workspace({
   useBrowserNotifications(session.user!.id, state);
   useSavedDateFormat();
   useBrowserTimeZone();
-  const [collapsed, setCollapsed] = useState(() => readUiPreference('nod.sidebar') !== 'expanded');
-  const [toolbarActions, setToolbarActions] = useState<HTMLDivElement | null>(null);
-  const [mobileActions, setMobileActions] = useState<HTMLDivElement | null>(null);
-  const [mobileHeader, setMobileHeader] = useState(
-    () => window.matchMedia?.('(max-width: 640px)').matches ?? false,
+  const [panelHidden, setPanelHidden] = useState(
+    () => readUiPreference('nod.side-panel') === 'hidden',
   );
-  useEffect(() => {
-    const media = window.matchMedia?.('(max-width: 640px)');
-    const update = () => setMobileHeader(media?.matches ?? false);
-    media?.addEventListener('change', update);
-    return () => media?.removeEventListener('change', update);
-  }, []);
+  const [mainTools, setMainTools] = useState<HTMLDivElement | null>(null);
   const [pendingMessageFocus, setPendingMessageFocus] = useState(initialFocusMessageId);
   useEffect(() => {
     if (initialFocusMessageId) onFocusMessageHandled();
@@ -145,6 +137,7 @@ function Workspace({
   const [notificationTarget, setNotificationTarget] = useState<{
     threadId: string;
     messageId: string;
+    chatId?: string;
   } | null>();
   const [chatRequests, setChatRequests] = useState<Array<{ id: string; text: string }>>([]);
   const ownerId = session.user!.id;
@@ -157,21 +150,6 @@ function Workspace({
   }, [ownerId, state?.threadId]);
   const namedChats = sidebarChats(state?.tasks, chatCursors, openChatId);
   const openChat = state?.tasks?.filter(isNamedChat).find((task) => task.id === openChatId);
-  const chatDrafts = Object.fromEntries(
-    namedChats.flatMap((chat) => {
-      if (chat.id === openChatId || !state) return [];
-      try {
-        const saved = JSON.parse(
-          window.localStorage.getItem(`nod.chat-draft.${ownerId}.${state.threadId}.${chat.id}`) ??
-            'null',
-        ) as { text?: string } | null;
-        const text = saved?.text?.trim();
-        return text ? [[chat.id, text.slice(0, 60)]] : [];
-      } catch {
-        return [];
-      }
-    }),
-  ) as Record<string, string>;
   const chatTurns = new Set(
     (state?.activity ?? [])
       .filter((item) => state?.tasks?.some((task) => task.id === item.taskId && task.name))
@@ -193,12 +171,17 @@ function Workspace({
     if (notificationTarget === undefined || (notificationTarget && !state)) return;
     setNotificationTarget(undefined);
     if (notificationTarget && notificationTarget.threadId !== state?.threadId) return;
-    navigate('/');
+    const chatId = notificationTarget?.chatId;
+    navigate(chatId ? chatPath(chatId) : '/');
     if (notificationTarget)
-      window.dispatchEvent(
-        new CustomEvent('nod:focus-message', {
-          detail: { messageId: notificationTarget.messageId },
-        }),
+      window.setTimeout(
+        () =>
+          window.dispatchEvent(
+            new CustomEvent('nod:focus-message', {
+              detail: { messageId: notificationTarget.messageId, ...(chatId ? { chatId } : {}) },
+            }),
+          ),
+        chatId ? 300 : 0,
       );
   }, [notificationTarget, state]);
   useEffect(() => {
@@ -235,19 +218,20 @@ function Workspace({
     ]);
   }, []);
   useEffect(() => {
-    writeUiPreference('nod.sidebar', collapsed ? 'collapsed' : 'expanded');
-  }, [collapsed]);
-  function toggleSidebar() {
-    setCollapsed((value) => !value);
+    writeUiPreference('nod.side-panel', panelHidden ? 'hidden' : 'shown');
+  }, [panelHidden]);
+  const shell = useRef<HTMLDivElement>(null);
+  function toggleSidebar(animate: boolean) {
+    movePanel(shell.current, () => flushSync(() => setPanelHidden((value) => !value)), animate);
   }
   return (
     <div
-      className={`app-shell ${collapsed ? 'sidebar-collapsed' : ''} ${entering ? 'shell-entering' : ''} ${settingsPage(path) ? 'settings-open' : ''}`}
+      ref={shell}
+      className={`app-shell ${panelHidden ? 'panel-hidden' : ''} ${entering ? 'shell-entering' : ''} ${settingsPage(path) ? 'settings-open' : ''}`}
     >
       <a href="#workspace" className="skip-link">
         Skip to content
       </a>
-      {desktopSettingsAvailable() && <DesktopToolbar actionsRef={setToolbarActions} />}
       {!settingsPage(path) && (
         <Sidebar
           path={path}
@@ -255,10 +239,18 @@ function Workspace({
             <ChatList
               chats={namedChats}
               activeId={openChatId}
+              mainActive={path === '/'}
+              mainWorking={Boolean(
+                connected &&
+                state?.activity?.some(
+                  (item) =>
+                    !item.background &&
+                    !state.tasks?.some((task) => task.id === item.taskId && task.name),
+                ),
+              )}
+              mainUnread={path !== '/' && (unread.count > 0 || unread.pending)}
               draftActive={draftOpen}
               unread={(chat) => chat.id !== openChatId && chatUnread(chat, chatCursors)}
-              live={(chat) => state?.activity?.find((item) => item.taskId === chat.id)}
-              drafts={chatDrafts}
               earlier={earlierChats(state?.tasks, namedChats)}
               onNavigate={navigate}
               onChanged={() => void refresh()}
@@ -288,17 +280,17 @@ function Workspace({
                   ? 'working'
                   : undefined
           }
+          panelHidden={panelHidden}
           onToggle={toggleSidebar}
           onNavigate={navigate}
           account={account}
-          actionsRef={setMobileActions}
         />
       )}
       <div className="workspace-frame">
-        {!settingsPage(path) && <SidebarToggle collapsed={collapsed} onToggle={toggleSidebar} />}
         <div className="workspace-body">
           <main id="workspace" className="main-workspace" tabIndex={-1}>
             <div className="chat-route" hidden={path !== '/'}>
+              {state && <ChatHeader main toolsRef={setMainTools} />}
               {state ? (
                 <Chat
                   ownerId={session.user!.id}
@@ -307,16 +299,9 @@ function Workspace({
                   connected={connected}
                   refresh={refresh}
                   onOpenChat={navigate}
-                  chatUnread={(chat) => chatUnread(chat, chatCursors)}
                   initialFocusMessageId={pendingMessageFocus}
                   onReturnToMemory={onReturnToMemory}
-                  toolbarActions={
-                    path === '/'
-                      ? !desktopSettingsAvailable() && mobileHeader
-                        ? mobileActions
-                        : toolbarActions
-                      : null
-                  }
+                  toolbarActions={path === '/' ? mainTools : null}
                   visible={path === '/'}
                   readCursor={unread.cursor}
                   readUnavailable={unread.unavailable}

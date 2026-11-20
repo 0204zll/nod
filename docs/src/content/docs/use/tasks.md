@@ -21,38 +21,39 @@ The main chat stays available while tasks work. Each task keeps its goal and his
 
 Tasks share one [workspace](/use/workspace/#one-workspace-for-all-tasks) and owner memory. Each task has its own working folder and saved session. See [Task sessions](/how-it-works/task-sessions/) for the architecture.
 
-## Named chats
+## Side chats
 
-Every task Nod starts from your request is a chat named after its subject, such as **Designer search** or **Hosting costs**. The sidebar starts with **Nod**, where you ask for anything. Your chats follow, latest first, each with one line: what it is doing, its question or its result.
+Every task Nod starts from your request gets a side chat named after its subject, such as **Designer search** or **Hosting costs**. The list next to the icons starts with **Main chat**, where briefings, reminders and your Telegram and WhatsApp messages land. Your side chats follow. A moving dot marks a chat that's working, and **?** marks one that needs you.
 
-In your chat with Nod, each chat is one card. While it works, a turning ring on its avatar and the card's line show its current step. When it has news, the card moves to the bottom of the conversation, and a small link under your request still leads to it. A question shows on the card with **Reply**. A finished chat shows its result in one sentence, and the full answer, such as a table or a draft, stays in the chat.
+Main chat stays clean. When Nod hands work to a side chat, its message in Main chat links to it with **Continued in** and the chat's name. The work, its questions and approvals, and its answer stay in the side chat.
 
-![Nod's chat with the Designer search card showing its result in one sentence, and Designer search in the sidebar under Nod.](../../../assets/screens/named-chats.png)
+![Main chat with a link to the Reply check side chat, and the chat list with Main chat and Reply check.](../../../assets/screens/named-chats.png)
 
-| You want to                      | Do this                                                                               |
-| -------------------------------- | ------------------------------------------------------------------------------------- |
-| Hand over a piece of work        | Ask Nod. It starts a chat for the work and stays free.                                |
-| See the whole conversation       | Select the chat in the sidebar.                                                       |
-| Ask a follow-up                  | Type in the chat. Nod answers there.                                                  |
-| Keep a subject in one place      | Select **New chat** and write your first message. It names the chat.                  |
-| Answer a chat's question         | Select **Reply** on its card, or answer inside the chat.                              |
-| Send related work                | Ask Nod. It sends the work to the chat that already exists.                           |
-| Keep a chat in the list          | Select **Keep** on its card when it finishes, or in its menu.                         |
-| Rename or archive                | Use the chat's menu in the sidebar or at the top right of the chat.                   |
-| See steps, activity or the model | Open the chat's menu and select **Details**.                                          |
-| Find an older or archived chat   | Select **Earlier** under the chat list. Open an archived chat and select **Restore**. |
-| Search one chat                  | Open the chat, then search. Results come from that chat only.                         |
-| Jump to a chat                   | Open the command menu and type the chat's name.                                       |
+| You want to                      | Do this                                                                                      |
+| -------------------------------- | -------------------------------------------------------------------------------------------- |
+| Hand over a piece of work        | Ask in Main chat. Nod starts a side chat for the work and stays free.                        |
+| Move an answer into its own chat | Select **Continue in a side chat** under Nod's latest answer in Main chat.                   |
+| Start a subject yourself         | Select **New chat** and write your first message. Nod names the chat after it.               |
+| Ask a follow-up                  | Type in the side chat. Nod answers there.                                                    |
+| Answer a question or approval    | Open the chat marked **?** and answer there.                                                 |
+| Send related work                | Ask in Main chat. Nod sends it to the side chat that already covers the subject.             |
+| Keep a chat in the list          | Open the chat's menu and select **Keep**.                                                    |
+| Rename or archive                | Use the chat's menu in the list or at the top right of the chat.                             |
+| See steps, activity or the model | Open the chat's menu and select **Details**.                                                 |
+| Find an older or archived chat   | Select **Earlier** under the chat list. Open an archived chat and select **Restore**.        |
+| Search one chat                  | Open the chat, then search. Results come from that chat only.                                |
+| Jump to a chat                   | Open the command menu and type the chat's name.                                              |
+| Hide the list                    | Select the panel button next to the list's title. The same button at the top shows it again. |
 
-Nod answers where you asked. A follow-up you start inside a chat stays in that chat. Anything that needs you, such as a question or an approval, also shows in your chat with Nod, and you can answer it in either place.
+A chat you continue from Main chat starts with your request and Nod's answer as context. It's called **Side chat** until your first message there, which names it.
 
-A chat keeps its own conversation, so one subject does not crowd another. Every chat knows which other chats exist and what each is doing, and reads another chat's goal, result and latest messages when your request depends on it. Ask in one chat what another one found, and Nod looks it up. What a chat reads there is information only: it never counts as your permission for an action. Your memory, files, connected apps and rules are shared across all of them.
+A side chat keeps its own conversation, so one subject does not crowd another. Every chat knows which other chats exist and what each is doing, and reads another chat's goal, result and latest messages when your request depends on it. Ask in one chat what another one found, and Nod looks it up. What a chat reads there is information only: it never counts as your permission for an action. Your memory, files, connected apps and rules are shared across all of them.
 
 Nod sends new work to the chat whose subject covers it. A second request about the same hire goes to the chat you already have, not to a new one.
 
 Each new request in a finished chat stands alone. An earlier message in that chat can give Nod context, but it cannot approve a new action.
 
-A chat you keep stays in the list, and Nod gives it new work on its subject. Nod never keeps a chat on its own. Other chats leave the list a day after they finish and move to **Earlier**. When a reply arrives only in a chat while Nod is in the background, the browser notification opens that chat.
+A chat you start or keep stays in the list, and Nod gives it new work on its subject. Nod never keeps a chat on its own. Other chats leave the list a day after they finish and move to **Earlier**. A notification for a side chat opens that chat, in the browser and in the desktop app.
 
 Telegram and WhatsApp keep one conversation, and your chats work inside it. Nod's first message for a chat carries its name, and the chat's questions and results reply to that message, so you can see which chat is talking. To talk to a chat, reply to any of its messages or just say what you need: Nod sends it to the chat that covers the subject. `/tasks` lists your chats.
 

@@ -1,5 +1,4 @@
 import { lazy, memo, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ChatAvatar } from './named-chats';
 import { createPortal } from 'react-dom';
 import { Copy, Check, CornerUpLeft, Ellipsis, SmilePlus } from './icons';
 import Markdown from 'react-markdown';
@@ -706,12 +705,7 @@ export function MessageBubble({
       tabIndex={-1}
     >
       <div className="message-content">
-        {chatLabel && !work && (
-          <span className="message-chat-label">
-            <ChatAvatar name={chatLabel} size="sm" />
-            {chatLabel}
-          </span>
-        )}
+        {chatLabel && !work && <span className="message-chat-label">{chatLabel}</span>}
         {work && <WorkLabel work={work} />}
         {run && <ScheduleRunTrack run={run} />}
         <div className="message-row" hidden={run?.outcome === 'failed'}>
