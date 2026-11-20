@@ -478,6 +478,14 @@ export function Scheduled({
     .filter((schedule) => schedule.enabled && schedule.nextRun)
     .sort((a, b) => a.nextRun!.localeCompare(b.nextRun!) || a.id.localeCompare(b.id));
   const inactive = (schedules.data ?? []).filter((schedule) => !upcoming.includes(schedule));
+  const inactiveGroup = useRef<HTMLDetailsElement>(null);
+  const showInactiveByDefault = upcoming.length === 0;
+  const hasActiveInactiveSchedule = inactive.some(
+    (schedule) => schedule.activeRun || activity.some((item) => item.scheduleId === schedule.id),
+  );
+  useEffect(() => {
+    if (hasActiveInactiveSchedule && inactiveGroup.current) inactiveGroup.current.open = true;
+  }, [hasActiveInactiveSchedule, showInactiveByDefault]);
   const empty = Boolean(schedules.data && !schedules.data.length);
   return (
     <div className="content-page secondary-page tasks-page">
@@ -525,7 +533,12 @@ export function Scheduled({
           {upcoming.length ? (
             <div className="saved-plan-list">
               {upcoming.map((schedule) => (
-                <ScheduleRow key={schedule.id} schedule={schedule} onAsk={onAsk} />
+                <ScheduleRow
+                  key={schedule.id}
+                  schedule={schedule}
+                  activity={activity}
+                  onAsk={onAsk}
+                />
               ))}
             </div>
           ) : empty ? (
@@ -545,14 +558,19 @@ export function Scheduled({
             <p className="muted">No upcoming schedules.</p>
           )}
           {inactive.length > 0 && (
-            <details className="schedule-inactive" open={!upcoming.length}>
+            <details className="schedule-inactive" ref={inactiveGroup} open={showInactiveByDefault}>
               <summary>
                 Inactive <span>{inactive.length}</span>
                 <ChevronDown size={16} aria-hidden="true" />
               </summary>
               <div className="saved-plan-list">
                 {inactive.map((schedule) => (
-                  <ScheduleRow key={schedule.id} schedule={schedule} onAsk={onAsk} />
+                  <ScheduleRow
+                    key={schedule.id}
+                    schedule={schedule}
+                    activity={activity}
+                    onAsk={onAsk}
+                  />
                 ))}
               </div>
             </details>

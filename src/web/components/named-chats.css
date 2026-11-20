@@ -198,6 +198,11 @@
 .sidebar .main-nav.main-nav-chats + .sidebar-bottom {
   margin-top: 4px;
 }
+@media (max-width: 640px) {
+  .sidebar .main-nav.main-nav-chats {
+    display: none;
+  }
+}
 .chat-list ul {
   display: grid;
   gap: 1px;
