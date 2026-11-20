@@ -691,6 +691,42 @@ test(
       assert.deepEqual(source.messages, []);
     });
 
+    await t.test('two first callers claim one chat capture', async () => {
+      const f = await fixture();
+      const message = await f.add('Show the synthetic message before sending.');
+      await f.pending(message);
+      let winner: Awaited<ReturnType<typeof prepareChatDraftCapture>>;
+      let interleaved = false;
+      const competing = new Proxy(database, {
+        get(target, property, receiver) {
+          if (property !== 'query') return Reflect.get(target, property, receiver);
+          return async (...args: unknown[]) => {
+            if (
+              !interleaved &&
+              typeof args[0] === 'string' &&
+              args[0].startsWith('UPDATE chat_draft_instructions SET source_ids=')
+            ) {
+              interleaved = true;
+              winner = await prepareChatDraftCapture(database, f.ownerId, message.id, {
+                messages: [message],
+              });
+              assert.ok(winner?.complete);
+            }
+            return Reflect.apply(target.query, target, args);
+          };
+        },
+      });
+      const lost = await prepareChatDraftCapture(competing, f.ownerId, message.id, {
+        messages: [message],
+      });
+      assert.equal(interleaved, true);
+      assert.equal(lost, undefined);
+      assert.ok(winner?.complete);
+      assert.equal((await f.row(message.id)).revision, winner.revision);
+      await finishChatDraftCapture(database, f.ownerId, winner, 'relevant');
+      assert.equal((await f.retained())[0].unavailable, false);
+    });
+
     await t.test('two first callers claim one authority capture', async () => {
       const f = await fixture();
       const [key] = await pendingDraftAuthorityInstructions(

@@ -585,7 +585,7 @@ export async function prepareChatDraftCapture(
   source.condition_sources = conditionContext.conditions;
   source.policy_revision = policyRevision;
   const captured = current.snapshot(source);
-  await database.query(
+  const claimed = await database.query(
     `UPDATE chat_draft_instructions SET source_ids=$3,context_ids=$4,inherited_ids=$5,revision=$6,policy_revision=$7,condition_sources=$8
      WHERE owner_id=$1 AND message_id=$2 AND revision IS NULL AND state='pending'`,
     [
@@ -599,6 +599,7 @@ export async function prepareChatDraftCapture(
       JSON.stringify(source.condition_sources),
     ],
   );
+  if (!claimed.rowCount) return;
   return {
     messageId,
     revision: captured.revision,

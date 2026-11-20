@@ -17,7 +17,7 @@ import { piUsageMetrics } from './usage.ts';
 import { piModelTrace } from './traces.ts';
 import type { ProviderUsageEvent } from '../../ports/provider-usage.ts';
 import type { ModelTraces } from '../../ports/traces.ts';
-import { modelContext, sourceCaptureInputBytes } from './context.ts';
+import { sourceCaptureInputBytes } from './context.ts';
 
 const untraced = new Set([
   'access',
@@ -169,15 +169,10 @@ export function createPiMemoryCurator(options: {
         task === 'review' &&
         (input as { purpose?: unknown }).purpose === 'message_condition_capture'
       ) {
-        const policy = modelContext(model);
-        const maximum = Math.min(
-          sourceCaptureInputBytes,
-          Math.max(0, policy.model.contextWindow - policy.model.maxTokens - policy.margin),
-        );
         const bytes = Buffer.byteLength(instructions + JSON.stringify(input));
-        if (bytes > maximum)
+        if (bytes > sourceCaptureInputBytes)
           throw new Error(
-            `The complete draft-condition input is ${bytes} bytes; the selected model limit is ${maximum} bytes. No condition was classified.`,
+            `The complete draft-condition input is ${bytes} bytes; the source capture limit is ${sourceCaptureInputBytes} bytes. No condition was classified.`,
           );
       }
       const sessionId = ['opencode', 'opencode-go'].includes(model.provider)

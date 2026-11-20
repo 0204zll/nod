@@ -599,6 +599,84 @@ test('model checks fit the output limit of the selected text model', async (t) =
     });
 });
 
+test('draft-condition capture uses byte limits', async (t) => {
+  for (const mode of ['complete', 'context overflow', 'provider refusal', 'over byte limit'])
+    await t.test(mode, async (t) => {
+      const access = smallContextAccess('compatible', 'fixture-source-capture', 8192);
+      const instructions = 'Classify the complete synthetic source as JSON.';
+      const input = {
+        purpose: 'message_condition_capture',
+        message: 'Complete synthetic draft. '.repeat(mode === 'over byte limit' ? 3000 : 300),
+        tail: 'synthetic-source-end',
+      };
+      const requests: Array<{
+        max_tokens: number;
+        messages: Array<{ role: string; content: string }>;
+      }> = [];
+      t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+        assert.equal(String(url), 'http://127.0.0.1:1/v1/chat/completions');
+        const body = JSON.parse(String(init?.body));
+        requests.push(body);
+        if (mode === 'context overflow' || mode === 'provider refusal')
+          return Response.json(
+            {
+              error: {
+                message:
+                  mode === 'context overflow'
+                    ? 'Synthetic context_length_exceeded: the complete request does not fit.'
+                    : 'Synthetic access_denied: this model is not available to this key.',
+              },
+            },
+            { status: mode === 'context overflow' ? 400 : 403 },
+          );
+        return new Response(
+          `data: ${JSON.stringify({
+            id: 'fixture-source-capture',
+            choices: [
+              {
+                index: 0,
+                delta: { content: '{"messageCondition":"clear","probability":1}' },
+                finish_reason: 'stop',
+              },
+            ],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+          })}\n\ndata: [DONE]\n\n`,
+          { headers: { 'content-type': 'text/event-stream' } },
+        );
+      });
+      const curator = createPiMemoryCurator({
+        provider: access.provider,
+        configured: () => true,
+        resolve: async () => access,
+      });
+      const capture = curator.curate({ task: 'review', instructions, input });
+      if (mode === 'over byte limit') {
+        await assert.rejects(capture, /source capture limit is 64000 bytes/);
+        assert.equal(requests.length, 0);
+        return;
+      }
+      if (mode === 'complete')
+        assert.deepEqual(await capture, { messageCondition: 'clear', probability: 1 });
+      else
+        await assert.rejects(capture, (error: Error & { providerStatus?: number }) => {
+          assert.match(
+            error.message,
+            mode === 'context overflow'
+              ? /Synthetic context_length_exceeded: the complete request does not fit/
+              : /Synthetic access_denied: this model is not available to this key/,
+          );
+          assert.equal(error.providerStatus, mode === 'context overflow' ? 400 : 403);
+          return true;
+        });
+      assert.equal(requests.length, 1);
+      assert.ok(requests[0].max_tokens > 0 && requests[0].max_tokens <= 2048);
+      assert.deepEqual(requests[0].messages, [
+        { role: 'system', content: instructions },
+        { role: 'user', content: JSON.stringify(input) },
+      ]);
+    });
+});
+
 test('wide output models reserve room for request input', async (t) => {
   const { bodies, url, close } = await contextRecoveryServer(0, 1, -1, false, 100_000);
   t.after(close);

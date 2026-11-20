@@ -2847,6 +2847,119 @@ test(
       });
 
       await t.test(
+        'a source capture failure after intake keeps owner text and reports failure',
+        async () => {
+          const prompt = `capture-intake-${randomUUID()}`;
+          const text = 'Show the synthetic message before sending it.';
+          const reason = 'Synthetic source capture unavailable after message intake.';
+          const originalRun = dependencies.runTurn;
+          const originalPresent = dependencies.present;
+          let release!: () => void;
+          const held = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          let entered = false;
+          let captures = 0;
+          let attempts = 0;
+          let followingActions = 0;
+          let queued: SubmitMessageResponse | undefined;
+          const runtime = createAgentRuntime({
+            agent: {
+              open: async (input) => ({
+                resumed: false,
+                abort() {},
+                dispose() {},
+                async prompt() {
+                  entered = true;
+                  await held;
+                  await input.nextMessages!();
+                  followingActions++;
+                  await input.tools
+                    .find((tool) => tool.name === 'apps')!
+                    .execute({
+                      action: 'GMAIL_SEND_EMAIL',
+                      args: {
+                        recipient_email: 'synthetic@example.test',
+                        subject: 'Synthetic message',
+                        body: 'Synthetic text.',
+                      },
+                    });
+                },
+              }),
+              dispose() {},
+            },
+            computer: fakeComputer(),
+            workspace: fakeWorkspace(),
+          });
+          dependencies.present = undefined;
+          dependencies.runTurn = async (context) => {
+            if (context.prompt !== prompt) return originalRun(context);
+            attempts++;
+            return runtime.runTurn({
+              ...context,
+              captureInstructions: async () => {
+                if (++captures === 1) return;
+                assert.ok(queued);
+                assert.equal(
+                  (
+                    await db.pool.query('SELECT turn_id FROM messages WHERE id=$1', [
+                      queued.messageId,
+                    ])
+                  ).rows[0].turn_id,
+                  context.turnId,
+                );
+                throw new Error(reason);
+              },
+            });
+          };
+          try {
+            const first = await thread.submitUserMessage(prompt);
+            await waitFor(() => entered);
+            queued = await thread.submitUserMessage(text);
+            assert.equal(await turnStatus(queued.turnId), 'queued');
+            release();
+            await waitFor(settled(first.turnId));
+            assert.equal(await turnStatus(first.turnId), 'failed');
+            await waitFor(async () =>
+              Boolean(
+                (await request('GET', '/api/messages'))
+                  .json()
+                  .messages.some(
+                    (message: Message) =>
+                      message.role === 'assistant' && message.text.includes(reason),
+                  ),
+              ),
+            );
+            const visible = (await request('GET', '/api/messages')).json().messages as Message[];
+            assert.equal(visible.find((message) => message.id === queued!.messageId)?.text, text);
+            const saved = (
+              await db.pool.query('SELECT text,turn_id FROM messages WHERE id=$1', [
+                queued.messageId,
+              ])
+            ).rows[0];
+            assert.deepEqual(saved, { text, turn_id: first.turnId });
+            assert.equal(
+              (
+                await db.pool.query(
+                  'SELECT state FROM chat_draft_instructions WHERE message_id=$1',
+                  [queued.messageId],
+                )
+              ).rows[0].state,
+              'pending',
+            );
+            assert.equal(captures, 2);
+            assert.equal(attempts, 1);
+            assert.equal(followingActions, 0);
+          } finally {
+            release();
+            dependencies.runTurn = originalRun;
+            dependencies.present = originalPresent;
+            await runtime.dispose();
+          }
+        },
+      );
+
+      await t.test(
         'a failed usage check leaves queued input separate from a completed response',
         async () => {
           const prompt = `usage-intake-${randomUUID()}`;
