@@ -216,10 +216,12 @@ let guidedStartup = false;
 let quitting = false;
 let installingUpdate = false;
 let macInstallerBusy = false;
+let macInstallerWait;
 let updateSource;
 let updates;
 let checkingUpdates;
 let updateRequestedManually = false;
+let updateRestartRequested = false;
 let updateRestartConfirmed = false;
 let updatePhase = 'idle';
 let updateStep = 'checking';
@@ -2243,10 +2245,36 @@ function publishUpdateStatus() {
     if (!window.isDestroyed()) window.webContents.send('nod:updates:status', value);
 }
 
+function waitForMacInstaller() {
+  if (!macInstallerBusy || quitting) return Promise.resolve();
+  if (macInstallerWait) return macInstallerWait;
+  let waiting;
+  waiting = (async () => {
+    while (!quitting && macInstallerBusy) {
+      const running = await macInstallerRunning('dev.nod.desktop.ShipIt').catch(() => true);
+      if (!running) {
+        macInstallerBusy = false;
+        break;
+      }
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 5_000);
+        timer.unref?.();
+      });
+    }
+  })().finally(() => {
+    if (macInstallerWait === waiting) macInstallerWait = undefined;
+    refreshUpdateMenu();
+  });
+  macInstallerWait = waiting;
+  refreshUpdateMenu();
+  return waiting;
+}
+
 function refreshUpdateMenu() {
   if (quitting) return;
-  const label =
-    updatePhase === 'downloading' && updateProgress !== undefined
+  const label = macInstallerBusy
+    ? 'Waiting for update installer…'
+    : updatePhase === 'downloading' && updateProgress !== undefined
       ? `Downloading update… ${updateProgress}%`
       : {
           checking: 'Checking for updates…',
@@ -2256,7 +2284,7 @@ function refreshUpdateMenu() {
   const item = Menu.getApplicationMenu?.()?.getMenuItemById('desktop-update');
   if (item) {
     item.label = label;
-    item.enabled = Boolean(updates) && !checkingUpdates;
+    item.enabled = Boolean(updates) && !checkingUpdates && !macInstallerBusy;
   }
   const restartLabel = updates?.ready
     ? `Restart to update to ${updates.ready.version}…`
@@ -2265,7 +2293,7 @@ function refreshUpdateMenu() {
   if (restartItem) {
     restartItem.label = restartLabel;
     restartItem.visible = Boolean(updates?.ready);
-    restartItem.enabled = Boolean(updates?.ready) && !checkingUpdates;
+    restartItem.enabled = Boolean(updates?.ready) && !checkingUpdates && !macInstallerBusy;
   }
   if (tray)
     tray.setContextMenu(
@@ -2275,13 +2303,13 @@ function refreshUpdateMenu() {
         { label: 'Report bug…', click: showFeedback },
         {
           label,
-          enabled: Boolean(updates) && !checkingUpdates,
+          enabled: Boolean(updates) && !checkingUpdates && !macInstallerBusy,
           click: () => void checkForUpdates(),
         },
         {
           label: restartLabel,
           visible: Boolean(updates?.ready),
-          enabled: Boolean(updates?.ready) && !checkingUpdates,
+          enabled: Boolean(updates?.ready) && !checkingUpdates && !macInstallerBusy,
           click: () => void checkForUpdates(true, true),
         },
         ...(process.platform === 'win32'
@@ -2298,8 +2326,32 @@ async function checkForUpdates(manual = true, restartReady = false, confirmed = 
   if (!updates || quitting) return;
   if (checkingUpdates) {
     if (manual) updateRequestedManually = true;
+    if (restartReady) updateRestartRequested = true;
     if (confirmed) updateRestartConfirmed = true;
     return checkingUpdates;
+  }
+  if (macInstallerBusy) {
+    updateRequestedManually = manual;
+    updateRestartRequested = restartReady;
+    updateRestartConfirmed = confirmed;
+    let waiting;
+    waiting = waitForMacInstaller()
+      .then(() => {
+        if (quitting) return;
+        if (checkingUpdates === waiting) checkingUpdates = undefined;
+        return checkForUpdates(
+          updateRequestedManually,
+          updateRestartRequested && Boolean(updates.ready),
+          updateRestartConfirmed,
+        );
+      })
+      .finally(() => {
+        if (checkingUpdates === waiting) checkingUpdates = undefined;
+        refreshUpdateMenu();
+      });
+    checkingUpdates = waiting;
+    refreshUpdateMenu();
+    return waiting;
   }
   updateRequestedManually = manual;
   updateRestartConfirmed = confirmed;
@@ -2439,6 +2491,8 @@ async function preloadUpdateImages(assets, signal) {
 }
 
 async function restartForUpdate() {
+  if (quitting) return;
+  if (macInstallerBusy) await waitForMacInstaller();
   if (quitting) return;
   void updateEvent('restart-requested', { version: updates?.ready?.version });
   if (!(await confirmRestart())) return updateEvent('restart-deferred');
@@ -3000,6 +3054,7 @@ if (!app.requestSingleInstanceLock()) app.exit();
 else if (process.argv.includes('--quit')) app.exit();
 else if (await openedDuringUpdateRestart()) app.exit();
 else {
+  if (macInstallerBusy) void waitForMacInstaller();
   if (testInstall) process.on('SIGTERM', () => app.quit());
   app.on('second-instance', (_event, argv) => {
     if (argv.includes('--quit')) {
@@ -3172,13 +3227,14 @@ else {
               {
                 id: 'desktop-update',
                 label: 'Check for Updates…',
-                enabled: Boolean(updates),
+                enabled: Boolean(updates) && !macInstallerBusy,
                 click: () => void checkForUpdates(),
               },
               {
                 id: 'desktop-restart',
                 label: 'Restart to update…',
                 visible: false,
+                enabled: Boolean(updates?.ready) && !macInstallerBusy,
                 click: () => void checkForUpdates(true, true),
               },
               { label: 'Replay onboarding…', click: replayOnboarding },

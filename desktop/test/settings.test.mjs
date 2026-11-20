@@ -524,6 +524,9 @@ async function runningDesktop(
     quitAndInstall = () => assert.fail('No update should install.'),
     startWindowsInstall = () => assert.fail('No Windows update should install.'),
     exit = () => {},
+    installerRunning = () => false,
+    updateResume,
+    singleInstance = false,
     displays = [{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }],
   } = {},
 ) {
@@ -615,7 +618,8 @@ async function runningDesktop(
       setPath: (name, path) => paths.set(name, path),
       getPath: (name) => paths.get(name) || dirname(storage.path),
       getVersion: () => version,
-      requestSingleInstanceLock: () => false,
+      requestSingleInstanceLock: () => singleInstance,
+      whenReady: () => new Promise(() => {}),
       getLoginItemSettings: () => {
         const login = {
           status: openAtLogin ? 'enabled' : 'not-registered',
@@ -696,11 +700,14 @@ async function runningDesktop(
     mkdir,
     appendFile: appendDiagnostic,
     readFile: (file, ...args) =>
-      buildMetadata && file === fileURLToPath(new URL('../package.json', import.meta.url))
-        ? Promise.resolve(nativeMetadataRead()).then(() =>
-            JSON.stringify({ nodBuild: buildMetadata }),
-          )
-        : readFile(file, ...args),
+      updateResume &&
+      file === join(dirname(storage.path), 'nod', 'profiles', 'local', 'update-resume.json')
+        ? Promise.resolve(JSON.stringify(updateResume))
+        : buildMetadata && file === fileURLToPath(new URL('../package.json', import.meta.url))
+          ? Promise.resolve(nativeMetadataRead()).then(() =>
+              JSON.stringify({ nodBuild: buildMetadata }),
+            )
+          : readFile(file, ...args),
     open: openFile,
     rename,
     stat,
@@ -714,6 +721,7 @@ async function runningDesktop(
     Date: Object.assign(class extends Date {}, { now }),
     setTimeout,
     clearTimeout,
+    macInstallerRunning: installerRunning,
     fetch: async (resource, options) => {
       if (String(resource) === `${posthogHost.host}/i/v0/e/`) {
         nativeAnalytics.push(JSON.parse(options.body));
@@ -1040,6 +1048,10 @@ async function runningDesktop(
       status: () => status,
       notifyReady: updateReadinessNotice,
       checkUpdates: (updater, manual = true, restartReady = false) => { updates = updater; return checkForUpdates(manual, restartReady); },
+      detectInstaller: async () => { const restart = await openedDuringUpdateRestart(); refreshUpdateMenu(); return restart; },
+      installerBusy: () => macInstallerBusy,
+      setMacInstallerBusy: (busy) => { macInstallerBusy = busy; refreshUpdateMenu(); },
+      monitorMacInstaller: () => waitForMacInstaller(),
       reportUpdateStatus,
       registerFiles: () => { ${source.slice(source.indexOf('      disposeArtifactFiles = registerArtifactFileHandlers('), source.indexOf("      ipcMain.handle('nod:renderer-ready'"))} },
       quit,
@@ -7475,6 +7487,486 @@ test('retrying a failed manual refresh checks again instead of restarting an old
   assert.equal(selections, 3);
   assert.equal(updater.ready.version, '0.4.1');
   assert.equal(prompts, 2);
+});
+
+test('the startup installer monitor disables update actions until ShipIt exits', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let installerRunning = true;
+  let checks = 0;
+  const updater = {
+    ready: undefined,
+    async check() {
+      checks++;
+      this.ready = { version: '0.2.0' };
+      return this.ready;
+    },
+  };
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
+    installerRunning: async () => installerRunning,
+    prompt: () => ({ response: 1 }),
+  });
+  await f.checkUpdates(updater, false);
+  assert.equal(checks, 1);
+  assert.equal(f.updateMenu.enabled, true);
+  assert.equal(f.restartMenu.enabled, true);
+  f.setMacInstallerBusy(true);
+  const monitoring = f.monitorMacInstaller();
+  await new Promise(setImmediate);
+  assert.equal(f.updateMenu.enabled, false);
+  assert.equal(f.restartMenu.enabled, false);
+  assert.equal(f.updateMenu.label, 'Waiting for update installer…');
+  const checking = f.checkUpdates(updater);
+  await new Promise(setImmediate);
+  assert.equal(checks, 1);
+  installerRunning = false;
+  t.mock.timers.tick(5_000);
+  await Promise.all([monitoring, checking]);
+  assert.equal(checks, 2);
+  assert.equal(f.updateMenu.enabled, true);
+  assert.equal(f.restartMenu.enabled, true);
+  assert.equal(f.updateMenu.label, 'Check for Updates…');
+});
+
+test('ShipIt startup keeps manual update checks held until the installer exits', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let active = true;
+  let checks = 0;
+  const updater = {
+    ready: undefined,
+    async check() {
+      checks++;
+      this.ready = { version: '0.3.0' };
+      return this.ready;
+    },
+  };
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
+    platform: 'darwin',
+    packaged: true,
+    initialState: 'fresh',
+    version: '0.2.0',
+    updateResume: { version: '0.2.0' },
+    installerRunning: async () => active,
+    prompt: () => ({ response: 1 }),
+  });
+  let checking;
+  try {
+    assert.equal(await f.detectInstaller(), false);
+    assert.equal(f.installerBusy(), true);
+    checking = f.checkUpdates(updater);
+    await new Promise(setImmediate);
+    assert.equal(checks, 0);
+    assert.equal(f.updateMenu.enabled, false);
+    active = false;
+    t.mock.timers.tick(5_000);
+    await checking;
+    assert.equal(checks, 1);
+    assert.equal(f.installerBusy(), false);
+    assert.equal(f.updateMenu.enabled, true);
+  } finally {
+    active = false;
+    t.mock.timers.tick(5_000);
+    await checking;
+    await f.close();
+  }
+});
+
+test('ShipIt waiting preserves manual requests, lookup failures and quit', async (t) => {
+  for (const mode of ['shared callers', 'lookup failure', 'quit'])
+    await t.test(mode, async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      let active = true;
+      let lookupFailure = mode === 'lookup failure';
+      let lookups = 0;
+      let checks = 0;
+      let prompts = 0;
+      let restarts = 0;
+      let quits = 0;
+      const updater = {
+        ready: undefined,
+        async check() {
+          checks++;
+          this.ready = { version: '0.3.0' };
+          return this.ready;
+        },
+        async restart() {
+          restarts++;
+        },
+        async dispose() {},
+      };
+      const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
+        platform: 'darwin',
+        packaged: true,
+        initialState: 'fresh',
+        version: '0.2.0',
+        updateResume: { version: '0.2.0' },
+        installerRunning: async () => {
+          lookups++;
+          if (lookups > 1 && lookupFailure)
+            throw Object.assign(new Error('Synthetic installer lookup failed.'), {
+              code: 'EACCES',
+            });
+          return active;
+        },
+        prompt: () => {
+          prompts++;
+          return { response: 1 };
+        },
+      });
+      const pending = [];
+      try {
+        assert.equal(await f.detectInstaller(), false);
+        assert.equal(f.installerBusy(), true);
+        pending.push(f.checkUpdates(updater, false), f.checkUpdates(updater));
+        await new Promise(setImmediate);
+        assert.equal(checks, 0);
+        assert.equal(prompts, 0);
+        assert.equal(f.updateMenu.enabled, false);
+        assert.equal(f.restartMenu.enabled, false);
+        if (lookupFailure) {
+          t.mock.timers.tick(5_000);
+          await new Promise(setImmediate);
+          assert.equal(checks, 0);
+          assert.equal(f.installerBusy(), true);
+          lookupFailure = false;
+        }
+        if (mode === 'quit') await f.quit(async () => quits++);
+        active = false;
+        t.mock.timers.tick(5_000);
+        await Promise.all(pending);
+        assert.equal(checks, mode === 'quit' ? 0 : 1);
+        assert.equal(prompts, mode === 'quit' ? 0 : 1);
+        assert.equal(quits, mode === 'quit' ? 1 : 0);
+        assert.equal(restarts, 0);
+      } finally {
+        active = false;
+        lookupFailure = false;
+        t.mock.timers.tick(5_000);
+        await Promise.all(pending);
+        await f.close();
+      }
+    });
+});
+
+test('ShipIt waiting refuses installation before the current installer exits', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let active = false;
+  let installs = 0;
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
+    platform: 'darwin',
+    packaged: true,
+    initialState: 'fresh',
+    version: '0.2.0',
+    updateResume: { version: '0.2.0' },
+    installerRunning: async () => active,
+    quitAndInstall: () => installs++,
+  });
+  const candidate = { version: '0.3.0' };
+  await f.checkUpdates(
+    { ready: candidate, check: async () => candidate, dispose: async () => {} },
+    false,
+  );
+  active = true;
+  assert.equal(await f.detectInstaller(), false);
+  let restarting;
+  try {
+    restarting = f.restartForUpdate();
+    await new Promise(setImmediate);
+    assert.equal(installs, 0);
+    active = false;
+    t.mock.timers.tick(5_000);
+    await restarting;
+    assert.equal(installs, 1);
+  } finally {
+    active = false;
+    t.mock.timers.tick(5_000);
+    await restarting;
+    await f.close();
+  }
+});
+
+test('ShipIt startup monitors one shared wait beyond fifteen minutes', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let active = true;
+  let lookups = 0;
+  let checks = 0;
+  const updater = {
+    ready: undefined,
+    async check() {
+      checks++;
+      this.ready = { version: '0.3.0' };
+      return this.ready;
+    },
+  };
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
+    platform: 'darwin',
+    packaged: true,
+    initialState: 'fresh',
+    singleInstance: true,
+    version: '0.2.0',
+    updateResume: { version: '0.2.0' },
+    installerRunning: async () => {
+      lookups++;
+      return active;
+    },
+  });
+  let waiting;
+  let checking;
+  try {
+    await new Promise(setImmediate);
+    assert.equal(lookups, 2);
+    waiting = f.monitorMacInstaller();
+    assert.equal(f.monitorMacInstaller(), waiting);
+    checking = f.checkUpdates(updater, false);
+    await new Promise(setImmediate);
+    assert.equal(lookups, 2);
+    for (let index = 0; index < 181; index++) {
+      t.mock.timers.tick(5_000);
+      await new Promise(setImmediate);
+    }
+    assert.equal(lookups, 183);
+    assert.equal(checks, 0);
+    assert.equal(f.installerBusy(), true);
+    assert.equal(f.updateMenu.enabled, false);
+    assert.equal(f.restartMenu.enabled, false);
+    active = false;
+    t.mock.timers.tick(5_000);
+    await Promise.all([waiting, checking]);
+    assert.equal(checks, 1);
+    assert.equal(f.installerBusy(), false);
+  } finally {
+    active = false;
+    t.mock.timers.tick(5_000);
+    await Promise.all([waiting, checking]);
+    await f.close();
+  }
+});
+
+test('ShipIt waiting promotes a confirmed request and checks current work after the wait', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let active = true;
+  let checks = 0;
+  let restarts = 0;
+  let installs = 0;
+  const events = [];
+  const f = await runningDesktop(
+    t,
+    (url) => {
+      assert.equal(new URL(url).pathname, '/api/desktop/status');
+      events.push('work read');
+      return Response.json({ running: [{ visible: true }] });
+    },
+    {
+      platform: 'darwin',
+      packaged: true,
+      version: '0.2.0',
+      updateResume: { version: '0.2.0' },
+      installerRunning: async () => active,
+      quitAndInstall: () => installs++,
+      prompt: (options) => {
+        assert.equal(options.message, 'Nod is still working.');
+        events.push('work question');
+        return { response: 1 };
+      },
+    },
+  );
+  const updater = {
+    ready: undefined,
+    async check() {
+      checks++;
+      this.ready = { version: '0.3.0' };
+      return this.ready;
+    },
+    async restart() {
+      restarts++;
+      return f.restartForUpdate();
+    },
+  };
+  const pending = [];
+  try {
+    f.showEngine();
+    await new Promise(setImmediate);
+    const window = f.windows.at(-1);
+    const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+    assert.equal(await f.detectInstaller(), false);
+    pending.push(f.checkUpdates(updater, false));
+    pending.push(f.handlers.get('nod:updates:restart')(event));
+    await new Promise(setImmediate);
+    assert.equal(checks, 0);
+    assert.equal(restarts, 0);
+    assert.deepEqual(events, []);
+    active = false;
+    t.mock.timers.tick(5_000);
+    await Promise.all(pending);
+    assert.equal(checks, 1);
+    assert.equal(restarts, 1);
+    assert.deepEqual(events, ['work read', 'work question']);
+    assert.equal(installs, 0);
+  } finally {
+    active = false;
+    t.mock.timers.tick(5_000);
+    await Promise.all(pending);
+    f.crash();
+    await f.close();
+  }
+});
+
+test('ShipIt waiting restarts a staged update without another source check', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let active = true;
+  let online = true;
+  let lookups = 0;
+  let downloads = 0;
+  const restarts = [];
+  const prompts = [];
+  const candidate = { version: '0.3.0', feedUrl: 'https://updates.example.invalid/0.3.0' };
+  const native = new EventEmitter();
+  native.setFeedURL = ({ url }) => assert.equal(url, candidate.feedUrl);
+  native.checkForUpdates = () => {
+    downloads++;
+    queueMicrotask(() => native.emit('update-downloaded', {}, '', 'Nod 0.3.0'));
+  };
+  const updater = createDesktopUpdater({
+    currentVersion: '0.2.0',
+    source: {
+      latest: async () => {
+        lookups++;
+        if (!online) throw new Error('Synthetic update source is offline.');
+        return candidate;
+      },
+    },
+    native,
+    prepareRuntime: async () => {},
+    restart: async (ready) => restarts.push(ready.version),
+  });
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
+    platform: 'darwin',
+    packaged: true,
+    version: '0.2.0',
+    updateResume: { version: '0.2.0' },
+    installerRunning: async () => active,
+    prompt: (options) => {
+      prompts.push(options.message);
+      return { response: 2 };
+    },
+  });
+  const pending = [];
+  try {
+    assert.equal(await updater.check(), candidate);
+    assert.equal(updater.ready, candidate);
+    assert.equal(downloads, 1);
+    online = false;
+    f.showEngine();
+    await new Promise(setImmediate);
+    const window = f.windows.at(-1);
+    const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+    assert.equal(await f.detectInstaller(), false);
+    pending.push(f.checkUpdates(updater, false));
+    pending.push(f.handlers.get('nod:updates:restart')(event));
+    await new Promise(setImmediate);
+    assert.equal(lookups, 1);
+    assert.deepEqual(restarts, []);
+    active = false;
+    t.mock.timers.tick(5_000);
+    await Promise.all(pending);
+    assert.equal(lookups, 1);
+    assert.equal(downloads, 1);
+    assert.deepEqual(restarts, ['0.3.0']);
+    assert.deepEqual(prompts, []);
+  } finally {
+    active = false;
+    t.mock.timers.tick(5_000);
+    await Promise.all(pending);
+    await updater.dispose();
+    f.crash();
+    await f.close();
+  }
+});
+
+test('ShipIt waiting preserves staged restart intent through later state changes', async (t) => {
+  for (const mode of ['concurrent restart', 'quit', 'current work', 'candidate unavailable'])
+    await t.test(mode, async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      let active = true;
+      let ready = { version: '0.3.0' };
+      let checks = 0;
+      let restarts = 0;
+      let installs = 0;
+      let quits = 0;
+      const events = [];
+      const f = await runningDesktop(
+        t,
+        (url) => {
+          assert.equal(new URL(url).pathname, '/api/desktop/status');
+          events.push('work read');
+          return Response.json({ running: [{ visible: true }] });
+        },
+        {
+          platform: 'darwin',
+          packaged: true,
+          version: '0.2.0',
+          updateResume: { version: '0.2.0' },
+          installerRunning: async () => active,
+          quitAndInstall: () => installs++,
+          prompt: (options) => {
+            assert.equal(options.message, 'Nod is still working.');
+            events.push('work question');
+            return { response: 1 };
+          },
+        },
+      );
+      const updater = {
+        get ready() {
+          return ready;
+        },
+        async check() {
+          checks++;
+          ready = { version: '0.4.0' };
+          return ready;
+        },
+        async restart() {
+          restarts++;
+          if (mode === 'current work') await f.restartForUpdate();
+          else await new Promise(setImmediate);
+        },
+        async dispose() {},
+      };
+      const pending = [];
+      try {
+        f.showEngine();
+        await new Promise(setImmediate);
+        const window = f.windows.at(-1);
+        const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+        assert.equal(await f.detectInstaller(), false);
+        pending.push(f.checkUpdates(updater, false));
+        const restart = f.handlers.get('nod:updates:restart');
+        pending.push(restart(event));
+        if (mode === 'concurrent restart') pending.push(restart(event), f.checkUpdates(updater));
+        await new Promise(setImmediate);
+        assert.equal(checks, 0);
+        assert.equal(restarts, 0);
+        assert.deepEqual(events, []);
+        if (mode === 'candidate unavailable') ready = undefined;
+        if (mode === 'quit') {
+          f.crash();
+          await f.quit(async () => quits++);
+        }
+        active = false;
+        t.mock.timers.tick(5_000);
+        await Promise.all(pending);
+        assert.equal(checks, mode === 'candidate unavailable' ? 1 : 0);
+        assert.equal(restarts, mode === 'quit' ? 0 : 1);
+        assert.equal(quits, mode === 'quit' ? 1 : 0);
+        assert.equal(installs, 0);
+        assert.deepEqual(events, mode === 'current work' ? ['work read', 'work question'] : []);
+        if (mode === 'candidate unavailable') assert.equal(ready.version, '0.4.0');
+      } finally {
+        active = false;
+        t.mock.timers.tick(5_000);
+        await Promise.all(pending);
+        f.crash();
+        await f.close();
+      }
+    });
 });
 
 test('automatic update checks retry failures sooner and return to the normal interval', async (t) => {
