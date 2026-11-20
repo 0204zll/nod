@@ -4695,6 +4695,7 @@ test(
         aligned = false;
         const expiring = await begin(expiredRequestText);
         turnIds.push(expiring.turnId);
+        await captureFixtureSources(expiring, expiredRequestText);
         const expiredId = await propose(expiring, 'GMAIL_SEND_EMAIL', expiredArgs);
         const expiredConfirmationId = (await stored(expiredId)).confirmation_message_id as string;
         await finish(expiring.turnId, 'waiting');
