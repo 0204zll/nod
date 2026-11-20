@@ -31,6 +31,7 @@ import {
   ToolFailureError,
   type RuntimeContext,
   type RuntimeResult,
+  type AgentSessionOptions,
 } from '../src/ports/agent.ts';
 import type { ConnectedApp } from '../src/ports/integrations.ts';
 import type { MemoryCurator } from '../src/ports/memory-curator.ts';
@@ -2459,9 +2460,33 @@ test(
                     );
                   }
                   releaseSelection();
-                  await waitFor(() => captured);
-                  assert.equal(child!.signal.aborted, false);
-                  assert.equal(await turnStatus(child!.turnId), 'running');
+                  const inputAborted = cancelled && kind !== 'previous evidence';
+                  await waitFor(
+                    async () =>
+                      captured ||
+                      (inputAborted &&
+                        (
+                          await db.pool.query('SELECT status,error FROM turns WHERE id=$1', [
+                            child!.turnId,
+                          ])
+                        ).rows.some(
+                          ({ status, error }) =>
+                            status === 'failed' &&
+                            error ===
+                              'A message used for this work was withdrawn, changed or is no longer available. This work did not continue.',
+                        )),
+                  );
+                  assert.equal(child!.signal.aborted, inputAborted);
+                  if (inputAborted)
+                    await waitFor(() =>
+                      turnStatus(child!.turnId).then((status) => status === 'failed'),
+                    );
+                  else assert.equal(await turnStatus(child!.turnId), 'running');
+                  assert.equal(
+                    (await db.pool.query('SELECT state FROM tasks WHERE id=$1', [task!.id])).rows[0]
+                      .state,
+                    'open',
+                  );
                   assert.equal(requests.length, cancelled ? 0 : kind === 'capture' ? 1 : 2);
                   if (mode === 'before registration') assert.equal(selectedSignal, undefined);
                   else assert.equal(selectedSignal?.aborted, cancelled);
@@ -2494,7 +2519,11 @@ test(
                     ...source,
                     state: cancelled && kind === 'capture' ? 'pending' : 'clear',
                   });
-                  await trust.captureInstructions(child!, child!.signal, () => true);
+                  await trust
+                    .captureInstructions(child!, child!.signal, () => true)
+                    .catch((error) => {
+                      if (!inputAborted) throw error;
+                    });
                   assert.equal(requests.length, cancelled ? 0 : kind === 'capture' ? 1 : 2);
                   assert.deepEqual(
                     (
@@ -2590,6 +2619,547 @@ test(
                     );
                 }
               });
+          for (const mode of [
+            'before prompt',
+            'live source',
+            'during prompt',
+            'during failed save',
+          ] as const)
+            await t.test(`main input: ${mode}`, async () => {
+              const prompt = `Read the synthetic owner source ${randomUUID()}.`;
+              const title = `Synthetic guarded task ${randomUUID()}`;
+              const replacement = `Read only the new synthetic source ${randomUUID()}.`;
+              const priorRules =
+                (await db.pool.query('SELECT rules FROM preferences WHERE owner_id=$1', [ownerId]))
+                  .rows[0]?.rules ?? '';
+              const priorFields = (
+                await db.pool.query(
+                  'SELECT kind,versions FROM draft_owner_field_versions WHERE owner_id=$1',
+                  [ownerId],
+                )
+              ).rows;
+              await db.pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+                ownerId,
+                `Use a short synthetic report ${randomUUID()}.`,
+              ]);
+              let releaseCreator!: () => void;
+              let releaseSelection!: () => void;
+              let releaseResponse!: () => void;
+              const creatorHeld = new Promise<void>((resolve) => (releaseCreator = resolve));
+              const selectionHeld = new Promise<void>((resolve) => (releaseSelection = resolve));
+              const responseHeld = new Promise<void>((resolve) => (releaseResponse = resolve));
+              let task: Task | undefined;
+              let child: RuntimeContext | undefined;
+              let stage: 'parent' | 'child' | 'replacement' = 'parent';
+              let selecting = false;
+              let prepared = 0;
+              let opened: AgentSessionOptions | undefined;
+              let aborts = 0;
+              let runtimeSettled = false;
+              let responseReleased = false;
+              let wordingCalls = 0;
+              let blocker: pg.PoolClient | undefined;
+              let lockSettled = false;
+              let lockFailed = false;
+              let lockWrites = 0;
+              let blockedWrite: Promise<void> | undefined;
+              let sourceRunFinished = false;
+              const constraintName = `source_failure_${randomUUID().replaceAll('-', '')}`;
+              let constraintActive = false;
+              const prompts: string[] = [];
+              const review: ModelReview = Object.assign(
+                async (_instructions: string, input: object) =>
+                  Object(input).purpose === 'message_condition_capture'
+                    ? { messageCondition: 'clear', probability: 1 }
+                    : { review: 'clear' },
+                {
+                  select: async () => {
+                    if (stage === 'child' && mode === 'before prompt') {
+                      selecting = true;
+                      await selectionHeld;
+                    }
+                    return review;
+                  },
+                },
+              );
+              const trust = createTrust({
+                pool: db.pool,
+                ownerId,
+                sourceInputBytes: 64_000,
+                review,
+              });
+              const runtime = createAgentRuntime({
+                agent: {
+                  open: async (input) => {
+                    opened = input;
+                    return {
+                      resumed: false,
+                      abort() {
+                        aborts++;
+                      },
+                      dispose() {},
+                      async prompt(text) {
+                        prompts.push(text);
+                        await responseHeld;
+                        input.onEvent({ type: 'final', text: 'The synthetic source is checked.' });
+                      },
+                    };
+                  },
+                  dispose() {},
+                },
+                prepareMemory: async () => {
+                  prepared++;
+                  return undefined;
+                },
+                computer: fakeComputer(),
+                workspace: fakeWorkspace(),
+              });
+              const previousObserver = inspectObserver;
+              const previousPresent = presentInterruption;
+              const previousTurnObserver = dependencies.observeTurn;
+              if (mode === 'during failed save')
+                dependencies.observeTurn = (id, operation, sessionId) =>
+                  previousTurnObserver!(id, operation, sessionId).finally(() => {
+                    if (id === child?.turnId) sourceRunFinished = true;
+                  });
+              presentInterruption = async (...args) => {
+                wordingCalls++;
+                return previousPresent(...args);
+              };
+              inspectObserver = async (context) => {
+                if (context.prompt === replacement && !context.taskContext)
+                  return runtime.runTurn(context);
+                if (context.taskContext?.title === title) {
+                  child ??= context;
+                  stage = context.prompt === replacement ? 'replacement' : 'child';
+                  await trust.pendingInstructions(context);
+                  return runtime
+                    .runTurn({
+                      ...context,
+                      captureInstructions: (signal, canContinue) =>
+                        trust.captureInstructions(context, signal, canContinue),
+                    })
+                    .finally(() => {
+                      runtimeSettled = true;
+                    });
+                }
+                if (context.prompt === prompt) {
+                  await trust.pendingInstructions(context);
+                  await trust.captureInstructions(context, context.signal, () => true);
+                  task = (await context.task!({
+                    action: 'start',
+                    title,
+                    message: 'Checking the synthetic source.',
+                    doneWhen: 'The synthetic source is checked.',
+                    now: 'Read the synthetic source.',
+                  })) as Task;
+                  await creatorHeld;
+                  if (mode !== 'live source')
+                    throw new ModelRequestError('Synthetic owner source failure.');
+                  return { status: 'succeeded' };
+                }
+              };
+              const creator = await thread.submitUserMessage(prompt);
+              try {
+                await waitFor(
+                  () =>
+                    Boolean(child && task) &&
+                    (mode === 'before prompt' ? selecting : prompts.length === 1),
+                );
+                assert.equal(child!.signal.aborted, false);
+                assert.equal(prepared, mode === 'before prompt' ? 0 : 1);
+                const source = (
+                  await db.pool.query(
+                    "SELECT key,state,attempted,attempt_turn_id,source_revision FROM draft_authority_instructions WHERE owner_id=$1 AND task_id=$2 AND kind='rules'",
+                    [ownerId, task!.id],
+                  )
+                ).rows[0];
+                assert.ok(source);
+                if (mode === 'during failed save') {
+                  assert.match(child!.turnId, /^[0-9a-f-]{36}$/);
+                  await db.pool.query(
+                    `ALTER TABLE turns ADD CONSTRAINT ${constraintName} CHECK (id<>'${child!.turnId}'::uuid OR status<>'failed') NOT VALID`,
+                  );
+                  constraintActive = true;
+                }
+                if (mode === 'during prompt') {
+                  blocker = await db.pool.connect();
+                  await blocker.query('BEGIN');
+                  await blocker.query('SELECT id FROM turns WHERE id=$1 FOR UPDATE', [
+                    child!.turnId,
+                  ]);
+                  blockedWrite = thread
+                    .withTurnLock(child!.turnId, async () => {
+                      lockWrites++;
+                    })
+                    .catch(() => {
+                      lockFailed = true;
+                    })
+                    .finally(() => {
+                      lockSettled = true;
+                    });
+                }
+                releaseCreator();
+                await waitFor(settled(creator.turnId));
+                assert.equal(
+                  await turnStatus(creator.turnId),
+                  mode === 'live source' ? 'succeeded' : 'failed',
+                );
+                if (mode === 'live source') {
+                  assert.equal(child!.signal.aborted, false);
+                  assert.equal(await turnStatus(child!.turnId), 'running');
+                  responseReleased = true;
+                  releaseResponse();
+                  await waitFor(settled(child!.turnId));
+                  assert.equal(await turnStatus(child!.turnId), 'succeeded');
+                  assert.equal(prompts.length, 1);
+                  assert.ok(prompts[0]!.includes(prompt));
+                  assert.equal(wordingCalls, 0);
+                } else {
+                  releaseSelection();
+                  await waitFor(() => child!.signal.aborted || prompts.length > 0);
+                  assert.equal(prompts.length, mode === 'before prompt' ? 0 : 1);
+                  assert.equal(child!.signal.aborted, true);
+                  if (mode === 'during failed save') {
+                    await waitFor(() => sourceRunFinished);
+                    assert.equal(await turnStatus(child!.turnId), 'running');
+                    assert.equal(
+                      (await db.pool.query('SELECT state FROM tasks WHERE id=$1', [task!.id]))
+                        .rows[0].state,
+                      'open',
+                    );
+                    await assert.rejects(
+                      thread.withTurnLock(child!.turnId, async (client) => {
+                        lockWrites++;
+                        await client.query('UPDATE tasks SET now_text=$2 WHERE id=$1', [
+                          task!.id,
+                          'Synthetic late failed-save write.',
+                        ]);
+                      }),
+                    );
+                    assert.equal(lockWrites, 0);
+                    assert.notEqual(
+                      (await db.pool.query('SELECT now_text FROM tasks WHERE id=$1', [task!.id]))
+                        .rows[0].now_text,
+                      'Synthetic late failed-save write.',
+                    );
+                    responseReleased = true;
+                    releaseResponse();
+                    await waitFor(() => runtimeSettled);
+                    const unrelated = await thread.submitUserMessage(replacement);
+                    await waitFor(settled(unrelated.turnId));
+                    assert.equal(await turnStatus(unrelated.turnId), 'succeeded');
+                    assert.equal(prompts.length, 2);
+                    assert.ok(prompts.at(-1)!.includes(replacement));
+                    assert.equal(prompts.at(-1)!.includes(prompt), false);
+                    return;
+                  }
+                  if (blocker) {
+                    await waitFor(() => lockSettled, 1500);
+                    assert.equal(lockFailed, true);
+                    assert.equal(lockWrites, 0);
+                    assert.equal(await turnStatus(child!.turnId), 'running');
+                    await blocker.query('ROLLBACK');
+                    blocker.release();
+                    blocker = undefined;
+                  }
+                  await waitFor(settled(child!.turnId));
+                  assert.equal(responseReleased, false);
+                  assert.equal(child!.signal.aborted, true);
+                  assert.equal(await turnStatus(child!.turnId), 'failed');
+                  if (mode === 'during prompt') {
+                    assert.equal(runtimeSettled, false);
+                    assert.ok(aborts > 0);
+                  }
+                  assert.equal(prompts.length, mode === 'before prompt' ? 0 : 1);
+                  assert.equal(wordingCalls, 0);
+                  const failed = (
+                    await db.pool.query('SELECT error,withdrawn FROM turns WHERE id=$1', [
+                      child!.turnId,
+                    ])
+                  ).rows[0];
+                  assert.match(
+                    failed.error,
+                    /message.*withdrawn, changed or is no longer available/,
+                  );
+                  assert.equal(failed.withdrawn, false);
+                  await waitFor(async () =>
+                    (
+                      await db.pool.query(
+                        "SELECT text FROM messages WHERE turn_id=$1 AND role='assistant'",
+                        [child!.turnId],
+                      )
+                    ).rows.some(({ text }) =>
+                      text.includes('withdrawn, changed or is no longer available'),
+                    ),
+                  );
+                  const messages = (
+                    await db.pool.query(
+                      "SELECT text,presentation FROM messages WHERE turn_id=$1 AND role='assistant'",
+                      [child!.turnId],
+                    )
+                  ).rows;
+                  assert.ok(
+                    messages.some(({ text }) =>
+                      text.includes('withdrawn, changed or is no longer available'),
+                    ),
+                  );
+                  assert.ok(
+                    messages.every(({ presentation }) => presentation?.type !== 'bug-report'),
+                  );
+                  assert.equal(
+                    (await db.pool.query('SELECT state FROM tasks WHERE id=$1', [task!.id])).rows[0]
+                      .state,
+                    'open',
+                  );
+                  releaseSelection();
+                  responseReleased = true;
+                  releaseResponse();
+                  await waitFor(() => runtimeSettled);
+                  if (mode === 'before prompt') {
+                    assert.equal(prepared, 0);
+                    assert.equal(opened, undefined);
+                  }
+                  const readsBeforeLateTool = integrationReads.length;
+                  await assert.rejects(child!.reply('Synthetic late reply.'));
+                  await assert.rejects(
+                    child!.task!({
+                      action: 'update',
+                      id: task!.id,
+                      now: 'Synthetic late task change.',
+                    }),
+                  );
+                  if (opened)
+                    await assert.rejects(
+                      opened.tools
+                        .find(({ name }) => name === 'apps')!
+                        .execute({
+                          action: 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID',
+                          args: { message_id: 'synthetic-late-source' },
+                        }),
+                    );
+                  assert.equal(integrationReads.length, readsBeforeLateTool);
+                  assert.equal(
+                    (
+                      await db.pool.query(
+                        "SELECT count(*)::int AS n FROM messages WHERE turn_id=$1 AND text='Synthetic late reply.'",
+                        [child!.turnId],
+                      )
+                    ).rows[0].n,
+                    0,
+                  );
+                  assert.notEqual(
+                    (await db.pool.query('SELECT now_text FROM tasks WHERE id=$1', [task!.id]))
+                      .rows[0].now_text,
+                    'Synthetic late task change.',
+                  );
+                  assert.deepEqual(
+                    (
+                      await db.pool.query(
+                        'SELECT key,state,attempted,attempt_turn_id,source_revision FROM draft_authority_instructions WHERE key=$1',
+                        [source.key],
+                      )
+                    ).rows[0],
+                    source,
+                  );
+                  await db.pool.query(
+                    "UPDATE tasks SET next_check=now()-interval '1 minute' WHERE id=$1",
+                    [task!.id],
+                  );
+                  await tasks.resumeDue(sourceThread.id);
+                  const checks = async () =>
+                    (
+                      await db.pool.query(
+                        "SELECT id,status FROM turns WHERE session_id=$1 AND source='resume'",
+                        [task!.id],
+                      )
+                    ).rows;
+                  await waitFor(async () => (await checks()).length === 1);
+                  await waitFor(settled((await checks())[0].id));
+                  assert.equal((await checks())[0].status, 'failed');
+                  assert.equal(
+                    (await db.pool.query('SELECT next_check FROM tasks WHERE id=$1', [task!.id]))
+                      .rows[0].next_check,
+                    null,
+                  );
+                  await tasks.resumeDue(sourceThread.id);
+                  assert.equal((await checks()).length, 1);
+                  assert.equal(prompts.length, mode === 'before prompt' ? 0 : 1);
+                  const fresh = await userMessages.submit(replacement, [], {
+                    replyToMessageId: task!.messageId!,
+                  });
+                  await waitFor(settled(fresh.turnId));
+                  assert.equal(await turnStatus(fresh.turnId), 'succeeded');
+                  assert.equal(prompts.length, mode === 'before prompt' ? 1 : 2);
+                  assert.ok(prompts.at(-1)!.includes(replacement));
+                  assert.equal(prompts.at(-1)!.includes(prompt), false);
+                }
+              } finally {
+                if (mode === 'during failed save')
+                  t.diagnostic(`Failed state save: late writes ${lockWrites}.`);
+                if (constraintActive)
+                  await db.pool.query(`ALTER TABLE turns DROP CONSTRAINT ${constraintName}`);
+                if (mode === 'during failed save' && child)
+                  await db.pool.query(
+                    "UPDATE turns SET status='failed',error='Synthetic failure-save repair.',finished_at=now() WHERE id=$1 AND status='running'",
+                    [child.turnId],
+                  );
+                if (blocker) {
+                  await blocker.query('ROLLBACK');
+                  blocker.release();
+                }
+                await blockedWrite;
+                releaseCreator();
+                releaseSelection();
+                releaseResponse();
+                await waitFor(settledThread);
+                await runtime.dispose();
+                inspectObserver = previousObserver;
+                presentInterruption = previousPresent;
+                dependencies.observeTurn = previousTurnObserver;
+                const ids = (
+                  await db.pool.query('SELECT id FROM turns WHERE owner_id=$1 AND thread_id=$2', [
+                    ownerId,
+                    sourceThread.id,
+                  ])
+                ).rows.map(({ id }) => id);
+                await db.pool.query(
+                  'DELETE FROM draft_authority_turns WHERE owner_id=$1 AND turn_id=ANY($2::uuid[])',
+                  [ownerId, ids],
+                );
+                await db.pool.query(
+                  'DELETE FROM draft_authority_instructions WHERE owner_id=$1 AND (task_id=$2 OR (thread_id=$3 AND NOT EXISTS (SELECT 1 FROM draft_authority_turns p WHERE p.owner_id=$1 AND p.source_key=key)))',
+                  [ownerId, task?.id ?? null, sourceThread.id],
+                );
+                await db.pool.query(
+                  'DELETE FROM chat_draft_instructions WHERE owner_id=$1 AND turn_id=ANY($2::uuid[])',
+                  [ownerId, ids],
+                );
+                if (task) {
+                  await db.pool.query(
+                    'UPDATE turns SET task_id=NULL WHERE owner_id=$1 AND task_id=$2',
+                    [ownerId, task.id],
+                  );
+                  await db.pool.query('DELETE FROM tasks WHERE owner_id=$1 AND id=$2', [
+                    ownerId,
+                    task.id,
+                  ]);
+                }
+                await db.pool.query('DELETE FROM messages WHERE owner_id=$1 AND thread_id=$2', [
+                  ownerId,
+                  sourceThread.id,
+                ]);
+                await db.pool.query('DELETE FROM turn_events WHERE turn_id=ANY($1::uuid[])', [ids]);
+                await db.pool.query('DELETE FROM turns WHERE owner_id=$1 AND id=ANY($2::uuid[])', [
+                  ownerId,
+                  ids,
+                ]);
+                for (let index = runs.length - 1; index >= 0; index--)
+                  if (ids.includes(runs[index]!.turnId)) runs.splice(index, 1);
+                for (const id of ids) analyticsRuns.delete(id);
+                await db.pool.query('UPDATE preferences SET rules=$2 WHERE owner_id=$1', [
+                  ownerId,
+                  priorRules,
+                ]);
+                const priorField = priorFields.find(({ kind }) => kind === 'rules');
+                if (priorField)
+                  await db.pool.query(
+                    "UPDATE draft_owner_field_versions SET versions=$2 WHERE owner_id=$1 AND kind='rules'",
+                    [ownerId, JSON.stringify(priorField.versions)],
+                  );
+              }
+            });
+          for (const kind of ['source', 'history', 'recall', 'live source'] as const)
+            await t.test(`cached main input: ${kind}`, async () => {
+              const prompt = `Read the synthetic cached source ${randomUUID()}.`;
+              const historyId = randomUUID();
+              const text = 'The synthetic cached history is unchanged.';
+              const createdAt = new Date(Date.now() - 2 * 365 * 24 * 60 * 60_000);
+              await db.pool.query(
+                'INSERT INTO messages(id,owner_id,thread_id,role,text,created_at) VALUES($1,$2,$3,$4,$5,$6)',
+                [
+                  historyId,
+                  ownerId,
+                  sourceThread.id,
+                  kind === 'recall' ? 'user' : 'assistant',
+                  text,
+                  createdAt,
+                ],
+              );
+              if (kind === 'recall')
+                await db.pool.query(
+                  "INSERT INTO messages(id,owner_id,thread_id,role,text,created_at) SELECT id,$2,$3,'assistant','Synthetic recent history.',now()-interval '1 hour' FROM unnest($1::uuid[]) id",
+                  [Array.from({ length: 31 }, () => randomUUID()), ownerId, sourceThread.id],
+                );
+              let reading = false;
+              let release!: () => void;
+              const held = new Promise<void>((resolve) => (release = resolve));
+              const previousRecall = dependencies.recall;
+              const previousObserver = inspectObserver;
+              dependencies.recall = async (input, ...args) => {
+                if (input !== prompt) return (await previousRecall?.(input, ...args)) ?? [];
+                reading = true;
+                await held;
+                return kind === 'recall'
+                  ? [{ id: historyId, role: 'user', text, createdAt, shortened: false }]
+                  : [];
+              };
+              inspectObserver = async (context) =>
+                context.prompt === prompt ? { status: 'succeeded' } : undefined;
+              const submitted = await thread.submitUserMessage(prompt);
+              try {
+                await waitFor(() => reading);
+                if (kind !== 'live source')
+                  await db.pool.query('UPDATE messages SET text=$2 WHERE id=$1', [
+                    kind === 'source' ? submitted.messageId : historyId,
+                    'The synthetic cached source changed.',
+                  ]);
+                release();
+                await waitFor(settled(submitted.turnId));
+                if (kind === 'live source') {
+                  assert.equal(await turnStatus(submitted.turnId), 'succeeded');
+                  assert.ok(ran(submitted.turnId));
+                } else {
+                  assert.equal(ran(submitted.turnId), undefined);
+                  assert.deepEqual(
+                    (
+                      await db.pool.query('SELECT status,error,withdrawn FROM turns WHERE id=$1', [
+                        submitted.turnId,
+                      ])
+                    ).rows[0],
+                    {
+                      status: 'failed',
+                      error:
+                        'A message used for this work was withdrawn, changed or is no longer available. This work did not continue.',
+                      withdrawn: false,
+                    },
+                  );
+                }
+              } finally {
+                release();
+                await waitFor(settledThread);
+                dependencies.recall = previousRecall;
+                inspectObserver = previousObserver;
+                const ids = (
+                  await db.pool.query('SELECT id FROM turns WHERE thread_id=$1 AND owner_id=$2', [
+                    sourceThread.id,
+                    ownerId,
+                  ])
+                ).rows.map(({ id }) => id);
+                await db.pool.query('DELETE FROM messages WHERE owner_id=$1 AND thread_id=$2', [
+                  ownerId,
+                  sourceThread.id,
+                ]);
+                await db.pool.query('DELETE FROM turn_events WHERE turn_id=ANY($1::uuid[])', [ids]);
+                await db.pool.query('DELETE FROM turns WHERE owner_id=$1 AND id=ANY($2::uuid[])', [
+                  ownerId,
+                  ids,
+                ]);
+                for (let index = runs.length - 1; index >= 0; index--)
+                  if (ids.includes(runs[index]!.turnId)) runs.splice(index, 1);
+                for (const id of ids) analyticsRuns.delete(id);
+              }
+            });
         } finally {
           await transaction(async (client) => {
             await thread.lockThread(client);
@@ -3163,15 +3733,29 @@ test(
             assert.equal(check.parent_turn_id, turnId);
             assert.equal(check.prompt.includes(prompt), !withdrawn && !copied);
             await waitFor(settled(check.id));
-            const context = ran(check.id)!;
-            assert.equal(context.sessionId, id);
-            assert.equal(context.prompt.includes(prompt), !withdrawn && !copied);
-            assert.equal(
-              context.history.some(({ text }) => text === prompt),
-              !withdrawn && !copied,
-            );
-            if (withdrawn)
-              assert.equal(context.withdrawnRequest, status === 'failed' ? 'failed' : 'stopped');
+            const context = ran(check.id);
+            if (withdrawn) {
+              assert.equal(context, undefined);
+              const failed = (
+                await db.pool.query('SELECT status,error,withdrawn FROM turns WHERE id=$1', [
+                  check.id,
+                ])
+              ).rows[0];
+              assert.deepEqual(failed, {
+                status: 'failed',
+                error:
+                  'A message used for this work was withdrawn, changed or is no longer available. This work did not continue.',
+                withdrawn: false,
+              });
+            } else {
+              assert.ok(context);
+              assert.equal(context.sessionId, id);
+              assert.equal(context.prompt.includes(prompt), !copied);
+              assert.equal(
+                context.history.some(({ text }) => text === prompt),
+                !copied,
+              );
+            }
             const saved = (
               await db.pool.query('SELECT next_check,state FROM tasks WHERE id=$1', [id])
             ).rows[0];

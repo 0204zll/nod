@@ -15,8 +15,13 @@ import {
   type QuestionAnswer,
 } from '../shared/answer-choices.ts';
 import { logFailure } from './failure-log.ts';
-import { cancelTurnOperations } from './turn-cancellation.ts';
-import { pendingChatDraftInstructions, draftSourceTurnIds } from './chat-draft-instructions.ts';
+import { cancelTurnOperations, withTurnCancellation } from './turn-cancellation.ts';
+import {
+  pendingChatDraftInstructions,
+  draftSourceTurnIds,
+  draftSourceRevision,
+} from './chat-draft-instructions.ts';
+import { instructionSourceMessageIds, type OwnerInstructions } from './owner-instructions.ts';
 import { modelFailureReason, modelQuotaFailure } from '../shared/model-quota.ts';
 import { appPages } from '../shared/app-links.ts';
 import { pendingAnswerChoicesSql } from './answer-choices.ts';
@@ -96,6 +101,7 @@ export const boss = new PgBoss({
   max: 10,
 });
 const running = new Map<string, AbortController>();
+const operationSignals = new Map<string, AbortSignal>();
 const inflight = new Set<Promise<void>>();
 let stopping = false;
 let nextStop = new AbortController();
@@ -320,6 +326,15 @@ function httpError(message: string, statusCode = 409) {
 }
 
 const turnStopped = () => httpError('This turn is no longer active.');
+class InputUnavailableError extends Error {
+  readonly notRun = true;
+  constructor() {
+    super(
+      'A message used for this work was withdrawn, changed or is no longer available. This work did not continue.',
+    );
+    this.name = 'InputUnavailableError';
+  }
+}
 const messageIdInUse = () =>
   httpError('This message ID is already in use. Send this as a new message.');
 
@@ -329,7 +344,10 @@ export async function withTurnLock<T>(
   database?: PoolClient,
 ) {
   const turnId = typeof turn === 'string' ? turn : turn.turnId;
-  const signal = typeof turn === 'string' ? running.get(turn)?.signal : turn.signal;
+  const signal =
+    typeof turn === 'string'
+      ? (operationSignals.get(turn) ?? running.get(turn)?.signal)
+      : turn.signal;
   const execute = async (client: PoolClient) => {
     signal?.throwIfAborted();
     const { rows } = await client.query(
@@ -350,7 +368,7 @@ export function withDraftLock<T>(
   operation: (client: PoolClient) => Promise<T>,
   database: Pool = pool,
 ) {
-  signal ??= running.get(turn.turnId)?.signal;
+  signal ??= operationSignals.get(turn.turnId) ?? running.get(turn.turnId)?.signal;
   return transaction(
     async (client) => {
       if ((await lockThread(client)).id !== turn.threadId)
@@ -985,7 +1003,7 @@ async function withdraw(client: PoolClient, turnIds: string[], wholeRequest: boo
     [turnIds, ownerId, wholeRequest],
   );
   const ids = withdrawn.rows.map(({ id }) => id);
-  cancelTurnOperations(ids);
+  cancelTurnOperations([...ids, ...ids.map((id) => `input:${id}`)]);
   const messages = await client.query<{ id: string }>(
     'SELECT id FROM messages WHERE owner_id=$1 AND (turn_id=ANY($2::uuid[]) OR id=ANY($3::uuid[]))',
     [ownerId, ids, withdrawn.rows.flatMap(({ message_id }) => (message_id ? [message_id] : []))],
@@ -1000,8 +1018,9 @@ async function withdraw(client: PoolClient, turnIds: string[], wholeRequest: boo
       )),
     ]),
   ];
-  cancelTurnOperations(sources);
-  afterCommit(client, () => cancelTurnOperations(sources));
+  const operations = [...sources, ...sources.map((id) => `input:${id}`)];
+  cancelTurnOperations(operations);
+  afterCommit(client, () => cancelTurnOperations(operations));
 }
 
 export async function cancelTurns(
@@ -1618,6 +1637,7 @@ async function failTurn(
       : undefined;
     return { ...turn, taskMessageId: task?.message_id as string | undefined };
   }, pool);
+  operationSignals.delete(turnId);
   if (!turn) return false;
   if (!turn.owner_started && !turn.work) return true;
   const work = turn.owner_started ? undefined : turn.work!;
@@ -1833,11 +1853,31 @@ async function drainNext(threadId: string) {
 
 type StoredAttachment = Partial<Pick<Artifact, 'id' | 'name' | 'mimeType' | 'source'>>;
 
+function messageInputSql(alias: string) {
+  return `jsonb_build_object(${[
+    'id',
+    'role',
+    'text',
+    'created_at',
+    'hidden_at',
+    'attachments',
+    'presentation',
+    'answer_choices',
+    'audio_caption',
+    'reply_to_message_id',
+    'reply_quote',
+    'reaction',
+  ]
+    .map((key) => `'${key}',${alias}.${key}`)
+    .join(',')})`;
+}
+
 async function loadMessage(messageId: string | null) {
   const message = messageId
     ? (
         await pool.query(
-          `SELECT s.attachments,s.audio_caption,r.audio_caption AS reply_audio_caption,r.id,r.role,COALESCE(s.reply_quote,r.text) AS text,r.attachments AS reply_attachments,r.presentation,r.answer_choices,
+          `SELECT ${messageInputSql('s')} AS source_input,CASE WHEN r.id IS NOT NULL THEN ${messageInputSql('r')} END AS reply_input,
+           s.attachments,s.audio_caption,r.audio_caption AS reply_audio_caption,r.id,r.role,COALESCE(s.reply_quote,r.text) AS text,r.attachments AS reply_attachments,r.presentation,r.answer_choices,
            s.role='user' AND NOT EXISTS (
              SELECT 1 FROM messages earlier WHERE earlier.owner_id=s.owner_id AND earlier.thread_id=s.thread_id
                AND earlier.role='user' AND (earlier.created_at,earlier.id)<(s.created_at,s.id)
@@ -1862,6 +1902,7 @@ async function loadMessage(messageId: string | null) {
       }
     : undefined;
   return {
+    inputs: [message?.source_input, message?.reply_input].filter(Boolean),
     ...(typeof message?.audio_caption === 'string'
       ? { audioCaption: message.audio_caption as string }
       : {}),
@@ -1878,7 +1919,28 @@ async function loadMessage(messageId: string | null) {
   };
 }
 
-async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
+async function inputSnapshot(database: Pick<Pool, 'query'>, ids: string[]) {
+  const selected = [...new Set(ids)].sort();
+  const rows = selected.length
+    ? (
+        await database.query(
+          `SELECT ${messageInputSql('m')} AS input,
+       m.role='user' AND ${withdrawnSql('m')} AS withdrawn FROM messages m WHERE m.owner_id=$1 AND m.id=ANY($2::uuid[]) ORDER BY m.id`,
+          [ownerId, selected],
+        )
+      ).rows
+    : [];
+  return {
+    ids: selected,
+    inputs: rows.map(({ input }) => input),
+    complete:
+      rows.length === selected.length &&
+      rows.every((row) => row.input.hidden_at === null && !row.withdrawn),
+    revision: draftSourceRevision(rows),
+  };
+}
+
+async function loadTurnContext(turn: any, dependencies: ThreadDependencies, taskId?: string) {
   const threadId = turn.thread_id as string;
   const sourceMessageId: string | null = turn.message_id ?? null;
   const [
@@ -1899,8 +1961,8 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       `WITH seen AS (SELECT max(started_at) AS at FROM turns
          WHERE owner_id=$1 AND thread_id=$2 AND session_id=$6 AND id<>$4),
        boundary AS (SELECT created_at AS at FROM turns WHERE owner_id=$1 AND thread_id=$2 AND id=$4)
-       SELECT role,text,audio_caption AS "audioCaption",created_at AS "createdAt",reaction,attachments,presentation,answer_choices AS "answerChoices",unseen,turn_id AS "turnId" FROM (
-       SELECT m.role,m.text,m.audio_caption,m.created_at,m.id,m.reaction,m.attachments,m.presentation,m.answer_choices,m.turn_id,
+       SELECT input,id,role,text,audio_caption AS "audioCaption",created_at AS "createdAt",reaction,attachments,presentation,answer_choices AS "answerChoices",unseen,turn_id AS "turnId" FROM (
+       SELECT ${messageInputSql('m')} AS input,m.role,m.text,m.audio_caption,m.created_at,m.id,m.reaction,m.attachments,m.presentation,m.answer_choices,m.turn_id,
        COALESCE(u.background AND m.created_at > COALESCE(seen.at,'-infinity'),false) AS unseen
        FROM messages m JOIN threads th ON th.id=m.thread_id CROSS JOIN seen CROSS JOIN boundary
        LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
@@ -1955,10 +2017,71 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
     dependencies.credentialRequestStatuses?.(threadId, turn.session_id, historyTurnIds) ?? [],
   ]);
   const timeZone: string | undefined = preference?.time_zone || undefined;
+  const lineage = (
+    await pool.query<{ id: string; source: string; session_id: string; message_id: string | null }>(
+      `${turnChainSql()} SELECT u.id,u.source,u.session_id,u.message_id FROM chain c JOIN turns u ON u.id=c.id ORDER BY u.created_at DESC,u.id DESC`,
+      [turn.id, ownerId, threadId],
+    )
+  ).rows;
+  const latestTaskInput = taskId
+    ? lineage.find(
+        (row) => row.session_id === turn.session_id && row.source === 'user' && row.message_id,
+      )
+    : undefined;
+  const taskSource =
+    taskId && !latestTaskInput
+      ? (
+          await pool.query<{ source_message_id: string | null }>(
+            'SELECT source_message_id FROM tasks WHERE id=$1 AND owner_id=$2',
+            [taskId, ownerId],
+          )
+        ).rows[0]?.source_message_id
+      : undefined;
+  const scheduleSources: string[] = [];
+  for (const row of lineage.filter((row) => row.source === 'schedule')) {
+    const saved = (
+      await pool.query<{ authority: OwnerInstructions | null }>(
+        "SELECT to_jsonb(r)->'authority' AS authority FROM schedule_runs r WHERE r.owner_id=$1 AND r.turn_id=$2",
+        [ownerId, row.id],
+      )
+    ).rows[0]?.authority;
+    if (saved) scheduleSources.push(...instructionSourceMessageIds(saved));
+  }
+  const snapshot = await inputSnapshot(pool, [
+    ...(sourceMessageId ? [sourceMessageId] : []),
+    ...(source.replyTo?.id ? [source.replyTo.id] : []),
+    ...history.rows.map(({ id }) => id as string),
+    ...related.flatMap(({ id }) => (id ? [id] : [])),
+    ...(latestTaskInput?.message_id ? [latestTaskInput.message_id] : []),
+    ...(taskSource ? [taskSource] : []),
+    ...scheduleSources,
+  ]);
+  const cached = [...source.inputs, ...history.rows.map(({ input }) => input)];
+  snapshot.complete &&=
+    cached.every((input) =>
+      snapshot.inputs.some(
+        (current) =>
+          current.id === input.id && draftSourceRevision(current) === draftSourceRevision(input),
+      ),
+    ) &&
+    related.every(
+      (message) =>
+        !message.id ||
+        message.shortened ||
+        snapshot.inputs.some(
+          (current) =>
+            current.id === message.id &&
+            current.role === message.role &&
+            current.text === message.text &&
+            (!message.createdAt ||
+              new Date(current.created_at).getTime() === new Date(message.createdAt).getTime()),
+        ),
+    );
   return {
+    snapshot,
     sourceMessageId,
     ...source,
-    history: history.rows,
+    history: history.rows.map(({ id, input, ...message }) => message),
     context: {
       ...(restarted?.rows[0]?.at ? { contextRestart: restarted.rows[0].at.toISOString() } : {}),
       firstConversationTurn: source.firstConversationTurn,
@@ -2075,7 +2198,11 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
   const ref: TurnRef = { threadId, turnId, browserId: turn.session_id };
   const artifacts = dependencies.artifacts ?? localArtifacts;
   const controller = new AbortController();
-  const { signal } = controller;
+  const ownSignal = controller.signal;
+  let signal = ownSignal;
+  let inputSignal: AbortSignal | undefined;
+  let releaseInputs: (() => void) | undefined;
+  let inputScope: Promise<void> | undefined;
   running.set(turnId, controller);
   if (stopping) controller.abort();
   const current = async <T>(operation: (client: PoolClient) => Promise<T>) => {
@@ -2087,6 +2214,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     <A extends unknown[], R>(call: (...args: A) => Promise<R>) =>
     async (...args: A) => {
       await ensureCurrent();
+      signal.throwIfAborted();
       return call(...args);
     };
   const replies: Array<{ id: string; text: string; source: string }> = [];
@@ -2238,7 +2366,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     const confirmed = await dependencies.executeConfirmation?.(turnId, signal);
     if (confirmed) turn.prompt = confirmed.prompt;
     await ensureCurrent();
-    const loaded = await loadTurnContext(turn, dependencies);
+    const loaded = await loadTurnContext(turn, dependencies, taskContext?.id);
     const proactivity = await dependencies.proactivity?.(ref, signal);
     sourceMessageId = loaded.sourceMessageId;
     let voice = loaded.voice;
@@ -2389,7 +2517,30 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
         logFailure('schedule_cache_policy_failed', error, { threadId, turnId });
       }
     if (routeError) throw routeError;
-    const result = await dependencies.runTurn({
+    inputScope = withTurnCancellation(
+      [
+        turnId,
+        ...(await draftSourceTurnIds(pool, ownerId, loaded.snapshot.ids)).map(
+          (id) => `input:${id}`,
+        ),
+      ],
+      async (sources) => {
+        inputSignal = sources;
+        signal = AbortSignal.any([ownSignal, sources]);
+        operationSignals.set(turnId, signal);
+        await new Promise<void>((resolve) => (releaseInputs = resolve));
+      },
+    );
+    await withDraftLock(ref, signal, async (client) => {
+      const latest = await inputSnapshot(client, loaded.snapshot.ids);
+      if (
+        !loaded.snapshot.complete ||
+        !latest.complete ||
+        latest.revision !== loaded.snapshot.revision
+      )
+        throw new InputUnavailableError();
+    });
+    const work = dependencies.runTurn({
       threadId,
       turnId,
       captureInstructions:
@@ -2641,6 +2792,13 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       },
       publishBrowserFile: attachFile,
     });
+    work.catch(() => {});
+    const result = await new Promise<RuntimeResult>((resolve, reject) => {
+      const abort = () => reject(ownSignal.aborted ? signal.reason : new InputUnavailableError());
+      if (signal.aborted) return abort();
+      signal.addEventListener('abort', abort, { once: true });
+      work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+    });
     if (!['succeeded', 'waiting_credentials', 'waiting_user'].includes(result.status))
       throw new Error('Invalid turn result.');
     if (taskContext && result.status === 'succeeded' && result.result)
@@ -2756,9 +2914,9 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
           await dependencies.bindVerificationQuestion?.(turnId, messageId, client);
       }
     }).catch((error) => {
-      if (!signal.aborted) throw error;
+      if (!ownSignal.aborted) throw error;
     });
-    outcome = signal.aborted ? 'cancelled' : result.status;
+    outcome = ownSignal.aborted ? 'cancelled' : result.status;
     if (outcome === 'waiting_credentials') waitingReason = 'credentials';
     else if (outcome === 'waiting_user') waitingReason = result.waitingFor ?? 'question';
   } catch (error) {
@@ -2767,7 +2925,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       return;
     }
     if (shared.length) await post('', shared.splice(0)).catch(() => {});
-    if (signal.aborted) {
+    if (ownSignal.aborted) {
       outcome = 'cancelled';
       return;
     }
@@ -2776,15 +2934,27 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       const limit = await dependencies.spendingLimit?.().catch(() => null);
       await failAtLimit(turnId, limit?.monthlyUsd);
     } else {
-      const offline = offlineFailure(error, selectedModel?.provider);
-      failure = offline ? 'offline' : error instanceof ModelRequestError ? 'model' : 'unknown';
-      const text = offline ? `${offline.reason} (${offline.code}).` : failureText(error);
+      const inputUnavailable =
+        error instanceof InputUnavailableError || Boolean(inputSignal?.aborted);
+      const offline = inputUnavailable ? undefined : offlineFailure(error, selectedModel?.provider);
+      failure = inputUnavailable
+        ? 'unknown'
+        : offline
+          ? 'offline'
+          : error instanceof ModelRequestError
+            ? 'model'
+            : 'unknown';
+      const text = inputUnavailable
+        ? new InputUnavailableError().message
+        : offline
+          ? `${offline.reason} (${offline.code}).`
+          : failureText(error);
       const alternative = failure === 'model' ? dependencies.modelAlternative?.() : undefined;
       const server = Boolean(offline && dependencies.desktopRuntime);
       if (
-        await failTurn(turnId, dependencies.present, text, {
+        await failTurn(turnId, inputUnavailable ? undefined : dependencies.present, text, {
           failure,
-          expected: error instanceof ToolFailureError,
+          expected: inputUnavailable || error instanceof ToolFailureError,
           next: alternative ?? (server ? offlineHint : undefined),
           contextExhausted: error instanceof ContextLimitError,
           cause: offline
@@ -2794,10 +2964,13 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
               : undefined,
         })
       )
-        logFailure('turn_failed', error, { threadId, turnId, sessionId: turn.session_id });
+        if (!inputUnavailable)
+          logFailure('turn_failed', error, { threadId, turnId, sessionId: turn.session_id });
     }
   } finally {
-    if (signal.aborted && !stopping)
+    releaseInputs?.();
+    await inputScope;
+    if (ownSignal.aborted && !stopping)
       await cancellationTransaction((client) =>
         client.query(
           "UPDATE turns SET status='cancelled',finished_at=now() WHERE id=$1 AND owner_id=$2 AND status='running'",
@@ -2805,6 +2978,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
         ),
       )
         .then(({ rowCount }) => {
+          operationSignals.delete(turnId);
           if (rowCount) refresh();
         })
         .catch((error: unknown) => logFailure('turn_cancellation_failed', error));
@@ -2838,6 +3012,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
         },
       });
     running.delete(turnId);
+    if (!inputSignal?.aborted) operationSignals.delete(turnId);
   }
 }
 
