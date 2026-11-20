@@ -160,18 +160,15 @@ export async function latestChatMessages(
 }
 
 export async function chatOnlyPlacement(client: Queryable, ownerId: string, turnId: string) {
-  const turn = (
-    await client.query<{ task_id: string | null; channel: string }>(
-      "SELECT to_jsonb(u)->>'task_id' AS task_id,u.channel FROM turns u WHERE u.id=$1 AND u.owner_id=$2",
-      [turnId, ownerId],
-    )
-  ).rows[0];
-  if (!turn?.task_id || turn.channel !== 'web') return false;
-  const { rowCount } = await client.query(
-    'SELECT 1 FROM tasks WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL',
-    [turn.task_id, ownerId],
+  return (
+    (
+      await client.query<{ id: string }>(
+        `SELECT t.id FROM turns u JOIN tasks t ON t.id=(to_jsonb(u)->>'task_id')::uuid AND t.owner_id=u.owner_id
+         WHERE u.id=$1 AND u.owner_id=$2 AND u.channel='web' AND t.name IS NOT NULL`,
+        [turnId, ownerId],
+      )
+    ).rows[0]?.id ?? null
   );
-  return Boolean(rowCount);
 }
 
 export async function reviveChat(

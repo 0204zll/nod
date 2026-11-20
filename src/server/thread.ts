@@ -28,6 +28,8 @@ import type { Pool, PoolClient } from 'pg';
 import { cancellationTransaction, pool } from './db.ts';
 import { afterCommit, afterRollback, transaction } from './transaction.ts';
 import {
+  inChatSql,
+  inMainSql,
   laterSupersedingTurnSql,
   turnChainSql,
   withdrawnSql,
@@ -476,6 +478,7 @@ export async function insertAssistantMessage(
       });
     attachments = [...attached.values()];
   }
+  const chat = await chatOnlyPlacement(client, ownerId, turn.turnId);
   replyToMessageId ??=
     turn.taskMessageId ??
     (
@@ -483,13 +486,14 @@ export async function insertAssistantMessage(
         `SELECT a.id FROM (SELECT id,created_at FROM messages WHERE owner_id=$1 AND thread_id=$2 AND turn_id=$3
            AND role='user' ORDER BY created_at DESC,id DESC LIMIT 1) a
          WHERE EXISTS (SELECT 1 FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2
-           AND (m.created_at,m.id)>(a.created_at,a.id) AND m.turn_id IS DISTINCT FROM $3)`,
-        [ownerId, turn.threadId, turn.turnId],
+           AND (m.created_at,m.id)>(a.created_at,a.id) AND m.turn_id IS DISTINCT FROM $3
+           AND CASE WHEN $4::uuid IS NULL THEN ${inMainSql('m')} ELSE ${inChatSql('m', '$4::uuid')} END)`,
+        [ownerId, turn.threadId, turn.turnId, chat],
       )
     ).rows[0]?.id;
   await assertReplyTarget(client, turn.threadId, replyToMessageId);
   const id = randomUUID();
-  const chatOnly = await chatOnlyPlacement(client, ownerId, turn.turnId);
+  const chatOnly = Boolean(chat);
   await client.query(
     'INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,attachments,stream_id,reply_to_message_id,presentation,answer_choices,chat_only) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)',
     [
