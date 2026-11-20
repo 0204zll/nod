@@ -28,6 +28,7 @@ import {
 import {
   ContextLimitError,
   ModelRequestError,
+  OutputLimitError,
   ToolFailureError,
   type RuntimeContext,
   type RuntimeResult,
@@ -610,6 +611,8 @@ test(
         if (context.prompt === 'limit race fixture') throw new Error(spendingLimitReached);
         if (context.prompt === 'unexpected failure fixture')
           throw new Error('Synthetic runtime failure.');
+        if (context.prompt === 'output limit fixture')
+          throw new OutputLimitError('Synthetic output limit.');
         if (context.prompt === 'tool refusal fixture')
           throw new ToolFailureError('The bash tool failed five times. Trust refused the command.');
         if (context.prompt.startsWith('session-fixture')) {
@@ -3395,6 +3398,30 @@ test(
         assert.equal(draft.owner_id, ownerId);
         assert.equal(draft.summary, card.summary);
         assert.doesNotMatch(draft.summary, /Synthetic runtime failure/);
+      });
+
+      await t.test('a reply cut off at its output limit offers no bug report', async () => {
+        const failed = await thread.submitUserMessage('output limit fixture');
+        await waitFor(settled(failed.turnId));
+        const shown = async () =>
+          (
+            await db.pool.query(
+              "SELECT presentation FROM messages WHERE turn_id=$1 AND role='assistant' AND stream_id=$2",
+              [failed.turnId, `failure:${failed.turnId}`],
+            )
+          ).rows.map((row) => row.presentation);
+        await waitFor(async () => (await shown()).length === 1);
+        assert.equal((await shown())[0]?.type, undefined);
+        const turn = (
+          await db.pool.query('SELECT status,error,withdrawn FROM turns WHERE id=$1', [
+            failed.turnId,
+          ])
+        ).rows[0];
+        assert.deepEqual(turn, {
+          status: 'failed',
+          error: 'Synthetic output limit.',
+          withdrawn: false,
+        });
       });
 
       await t.test('an exhausted tool refusal reports the cause without a bug report', async () => {

@@ -407,4 +407,5 @@ export interface Agent {
 }
 export class ModelRequestError extends Error {}
 export class ContextLimitError extends ModelRequestError {}
+export class OutputLimitError extends Error {}
 export class ToolFailureError extends Error {}

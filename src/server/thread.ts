@@ -56,6 +56,7 @@ import {
   appConfirmation,
   ContextLimitError,
   ModelRequestError,
+  OutputLimitError,
   ToolFailureError,
 } from '../ports/agent.ts';
 import { isMessageReaction, reactionEmoji } from '../shared/emoji.ts';
@@ -2688,7 +2689,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
       if (
         await failTurn(turnId, dependencies.present, text, {
           failure,
-          expected: error instanceof ToolFailureError,
+          expected: error instanceof ToolFailureError || error instanceof OutputLimitError,
           next: alternative ?? (server ? offlineHint : undefined),
           contextExhausted: error instanceof ContextLimitError,
           cause: offline
