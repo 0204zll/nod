@@ -8887,7 +8887,8 @@ test('native provider discovery uses owned keys, bounded Google pagination and t
   await assert.rejects(
     backend.catalog('google', 'api_key', { type: 'api_key', key: 'fixture-rejected-key' }),
     (error: Error) =>
-      /didn’t accept/.test(error.message) && !error.message.includes('fixture-rejected-key'),
+      /Google Gemini model discovery failed.*HTTP 400/.test(error.message) &&
+      !/didn’t accept|fixture-rejected-key/.test(error.message),
   );
   assert.equal(new URL(calls[1]).searchParams.get('private'), null);
   const before = calls.length;
@@ -8909,6 +8910,63 @@ test('native provider discovery uses owned keys, bounded Google pagination and t
     repeating.catalog('google', 'api_key', { type: 'api_key', key: 'fixture-google-key' }),
   );
   assert.equal(pages, 2);
+});
+
+test('model discovery names why it failed instead of a generic retry message', async () => {
+  const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
+  const refused = () =>
+    Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8080'), {
+        code: 'ECONNREFUSED',
+      }),
+    });
+  const native = (fetch: typeof globalThis.fetch) =>
+    createPiModelBackend({ fetch }).catalog('xai', 'api_key', {
+      type: 'api_key',
+      key: 'fixture-xai-key',
+    });
+  await assert.rejects(
+    native(async () => {
+      throw new DOMException('The operation timed out.', 'TimeoutError');
+    }),
+    /xAI couldn’t load its models: the request timed out\./,
+  );
+  await assert.rejects(
+    native(async () => {
+      throw refused();
+    }),
+    /xAI couldn’t load its models: the connection failed \(ECONNREFUSED\)\./,
+  );
+  await assert.rejects(
+    native(async () => {
+      throw new TypeError('fetch failed', {
+        cause: new Error('Synthetic name lookup failed. fixture-xai-key'),
+      });
+    }),
+    (error: Error) =>
+      /Synthetic name lookup failed/.test(error.message) &&
+      !error.message.includes('fixture-xai-key'),
+  );
+  await assert.rejects(
+    native(async () => new Response('<html>challenge</html>', { status: 200 })),
+    /xAI couldn’t load its models: it returned an invalid model list\./,
+  );
+  await assert.rejects(
+    native(async () => Response.json({ models: [] })),
+    /xAI couldn’t load its models: it returned an invalid model list\./,
+  );
+  await assert.rejects(
+    native(async () =>
+      Response.json(
+        { error: { message: 'Access is restricted to a private network. fixture-xai-key' } },
+        { status: 403 },
+      ),
+    ),
+    (error: Error) =>
+      /xAI model discovery failed.*HTTP 403.*Access is restricted to a private network/s.test(
+        error.message,
+      ) && !/didn’t accept|fixture-xai-key/.test(error.message),
+  );
 });
 
 test('native account catalogs never send a provider key to a different service or accept a failed listing', async () => {
@@ -11621,7 +11679,9 @@ test('Anthropic workspace discovery offers named choices and separates retryable
     ...[400, 401, 403, 404].map((status) => ({
       name: `discovery status ${status}`,
       manual: true,
-      response: () => Response.json({ error: { message: key } }, { status }),
+      status,
+      response: () =>
+        Response.json({ error: { message: `Synthetic workspace denial ${key}` } }, { status }),
     })),
     ...[429, 500, 503].map((status) => ({
       name: `discovery status ${status}`,
@@ -11665,11 +11725,12 @@ test('Anthropic workspace discovery offers named choices and separates retryable
             assert.ok(!(error instanceof ModelWorkspaceSelectionError));
           } else {
             assert.ok(!(error instanceof ModelAuthError));
-            assert.ok(error.cause instanceof Error);
-            if (scenario.status) {
-              assert.ok(error.cause.message.includes(String(scenario.status)));
-              assert.ok(!error.message.includes(String(scenario.status)));
-            }
+            if (scenario.status) assert.ok(error.message.includes(`HTTP ${scenario.status}`));
+            else assert.ok(error.cause instanceof Error);
+          }
+          if (scenario.status) {
+            assert.ok(error.message.includes(`HTTP ${scenario.status}`));
+            if (scenario.manual) assert.match(error.message, /Synthetic workspace denial/);
           }
           assert.ok(!error.message.includes(key));
           assert.ok(!JSON.stringify(error).includes(key));
