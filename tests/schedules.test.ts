@@ -1431,6 +1431,34 @@ test(
           await expectRunCost(0.15);
         },
       );
+      await t.test('run history returns the finished reply and the shared files', async () => {
+        const before = clock;
+        const schedule = await create({ cron: '*/15 * * * *' });
+        const job = await jobFor(schedule.id);
+        clock = new Date(job.data.scheduledFor);
+        await deliver([job]);
+        const [run] = await runs(schedule.id);
+        await db.pool.query("UPDATE turns SET status='succeeded' WHERE id=$1", [run!.turnId]);
+        const [reportId, fileId] = [randomUUID(), randomUUID()];
+        const file = { id: randomUUID(), name: 'fixture.csv', mimeType: 'text/csv', size: 13 };
+        for (const [id, text, seconds, attachments] of [
+          [randomUUID(), 'Checking the synthetic report.', 0, []],
+          [reportId, 'The synthetic report is complete.', 1, []],
+          [fileId, '', 2, [{ ...file, url: `/api/artifacts/${file.id}` }]],
+        ] as const)
+          await db.pool.query(
+            `INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,created_at,attachments)
+             SELECT $1,owner_id,thread_id,id,'assistant',$3,now()+$4 * interval '1 second',$5::jsonb
+             FROM turns WHERE id=$2`,
+            [id, run!.turnId, text, seconds, JSON.stringify(attachments)],
+          );
+        const [result] = await runs(schedule.id);
+        assert.equal(result!.messageId, reportId);
+        assert.equal(result!.messageText, 'The synthetic report is complete.');
+        assert.equal(result!.attachmentMessageId, fileId);
+        await request('DELETE', `/api/schedules/${schedule.id}`);
+        clock = before;
+      });
       await t.test(
         'a recurring schedule starts no run while its last run is busy or waiting on the owner',
         async () => {
@@ -2776,6 +2804,7 @@ test('waiting scheduled runs open their pending question without starting anothe
     messageId: randomUUID(),
     messagePreview: 'Synthetic report ready.',
     messageText: 'Synthetic report ready.',
+    attachmentMessageId: null,
   };
   const queued: ScheduleRun = {
     ...completed,
