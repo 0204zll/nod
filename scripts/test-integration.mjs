@@ -54,7 +54,7 @@ if (process.argv.includes('--run')) {
     throw new Error('The integration test selection must name existing test files.');
   const tests = run({
     files,
-    concurrency: 12,
+    concurrency: 16,
     execArgv: ['--import', 'tsx'],
   });
   const timings = {};
