@@ -152,6 +152,10 @@ jobs:
           NOD_TEST_BROWSER_EXECUTABLE: /usr/bin/chromium
           NOD_DESKTOP_RELEASE_ACCEPTANCE: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
         run: |
+          database="$(docker ps -q --filter ancestor=postgres:17-alpine | head -1)"
+          address="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$database")"
+          echo "PROBE database address $address"
+          export TEST_DATABASE_URL="postgresql://nod:nod-ci@${address}:5432/nod_ci"
           pids=()
           (node --test .github/scripts/ci-scope.test.mjs && node .github/scripts/ci-scope.mjs --format) &
           pids+=("$!")
