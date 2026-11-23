@@ -1562,6 +1562,21 @@ test(
           clock = before;
         },
       );
+      await t.test('changing a watched schedule to one-time drops its watch', async () => {
+        const account = randomUUID();
+        watched.set(account, 'constant');
+        const schedule = await create({ cron: '*/15 * * * *', watch: [account] });
+        const patch = async (body: Record<string, unknown>) => {
+          const response = await request('PATCH', `/api/schedules/${schedule.id}`, body);
+          assert.equal(response.statusCode, 200, response.body);
+        };
+        await patch({ title: 'Still watched' });
+        assert.deepEqual((await saved(schedule.id)).watch, [account]);
+        await patch({ kind: 'once', runAt: new Date(clock.getTime() + 60_000).toISOString() });
+        await patch({ kind: 'recurring', cron: '*/15 * * * *' });
+        assert.equal((await saved(schedule.id)).watch, null);
+        await request('DELETE', `/api/schedules/${schedule.id}`);
+      });
       await t.test('stale watched jobs do not poll accounts or start runs', async () => {
         const before = clock;
         const account = randomUUID();
@@ -1752,6 +1767,33 @@ test(
           clock = before;
         },
       );
+      await t.test('renaming a schedule keeps the skips recorded for its next run', async () => {
+        const before = clock;
+        const schedule = await create({ cron: '*/15 * * * *' });
+        modelPaused = true;
+        for (let i = 0; i < 2; i++) {
+          const job = await jobFor(schedule.id);
+          clock = new Date(job.data.scheduledFor);
+          await deliver([job]);
+        }
+        modelPaused = false;
+        const next = (await jobFor(schedule.id)).data.scheduledFor;
+        const renamed = await request('PATCH', `/api/schedules/${schedule.id}`, {
+          title: 'Renamed schedule',
+        });
+        assert.equal(renamed.statusCode, 200, renamed.body);
+        const job = await jobFor(schedule.id);
+        assert.equal(job.data.scheduledFor, next);
+        clock = new Date(next);
+        await deliver([job]);
+        const [run] = await runs(schedule.id);
+        const { skipped } = (
+          await db.pool.query('SELECT skipped FROM schedule_runs WHERE turn_id=$1', [run!.turnId])
+        ).rows[0];
+        assert.equal(skipped.length, 2);
+        await request('DELETE', `/api/schedules/${schedule.id}`);
+        clock = before;
+      });
       await t.test(
         'a resumed scheduled run records its observation on the original run',
         async () => {
