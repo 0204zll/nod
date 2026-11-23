@@ -52,6 +52,7 @@ if (process.argv.includes('--run')) {
   const files = process.env.NOD_TEST_FILES ? JSON.parse(process.env.NOD_TEST_FILES) : available;
   if (!Array.isArray(files) || !files.length || files.some((file) => !available.includes(file)))
     throw new Error('The integration test selection must name existing test files.');
+  console.error(`PROBE availableParallelism=${availableParallelism()}`);
   const tests = run({
     files,
     concurrency: process.env.CI
