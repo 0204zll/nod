@@ -470,6 +470,7 @@ flowchart LR
 - Keys from `.env` stay in server memory and aren't copied into the database.
 - Each key goes only to its own service: Amazon Bedrock in the Region you entered, Google Vertex AI, the Azure OpenAI endpoint you entered, or the OpenAI-compatible server address you entered.
 - Your browser doesn't store the key, and Nod removes it from provider errors.
+- Requests to model, speech and decision services identify the app as `nod`. OpenRouter and Vercel AI Gateway show Nod's usage under that name.
 
 ## Related resources
 
