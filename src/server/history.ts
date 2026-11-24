@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { Pool } from 'pg';
-import { inChatSql, withdrawnSql } from './turn-chain.ts';
+import { inChatSql, reactionReplySql, withdrawnSql } from './turn-chain.ts';
 export function activeThreadSql(alias = 'm') {
   return `${alias}.thread_id=(SELECT th.id FROM threads th WHERE th.owner_id=${alias}.owner_id AND th.archived_at IS NULL)`;
 }
@@ -50,7 +50,7 @@ export function createHistorySearch({
         ? ''
         : alias === 'u'
           ? ` AND u.task_id='${chat}'::uuid`
-          : ` AND ${inChatSql(alias, `'${chat}'::uuid`)}`;
+          : ` AND ${inChatSql(alias, `'${chat}'::uuid`)} AND NOT ${reactionReplySql(alias)}`;
     if (around) {
       const { rows } = await pool.query<HistoryMessage>(
         `WITH target AS (

@@ -196,7 +196,7 @@ export async function reportChat(
           WHERE m.owner_id=u.owner_id AND m.turn_id=u.id AND m.role='assistant' AND m.text<>'' AND m.hidden_at IS NULL
           ORDER BY m.created_at DESC,m.id DESC LIMIT 1) p)) AS text) line
      WHERE u.id=$1 AND u.owner_id=$2 AND u.thread_id=$3
-       AND ($4::text IS NOT NULL OR t.state='done') AND line.text<>''
+       AND ($4::text IS NOT NULL OR (t.state='done' AND t.closed_at>=u.created_at)) AND line.text<>''
        AND NOT s.chat_only AND s.hidden_at IS NULL
        AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.owner_id=u.owner_id AND r.turn_id=u.id AND r.chat_report)`,
     [turn.turnId, ownerId, turn.threadId, failure ?? null],

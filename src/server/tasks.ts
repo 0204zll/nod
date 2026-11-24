@@ -429,10 +429,19 @@ export function createTasks(options: {
   function replyTarget(
     client: PoolClient,
     threadId: string,
-    row: { task_id: string; id: string; session_id: string; name: string | null; state: string },
+    row: {
+      task_id: string;
+      id: string;
+      session_id: string;
+      name: string | null;
+      state: string;
+      active: boolean;
+    },
     fromChat: boolean,
+    reaction: boolean,
   ) {
-    const restart = row.name !== null && row.state !== 'open';
+    const settled = row.name !== null && row.state !== 'open';
+    const restart = settled && !row.active && !reaction;
     let restarted = false;
     return {
       task_id: row.task_id,
@@ -443,7 +452,7 @@ export function createTasks(options: {
         if (restarted) await setChatRequestSource(client, ownerId, row.task_id, messageId);
       },
       record: async (turnId: string, text: string, live: boolean) => {
-        if (!live)
+        if (!live || (settled && reaction))
           await client.query('UPDATE turns SET task_id=$1 WHERE id=$2 AND owner_id=$3', [
             row.task_id,
             turnId,
@@ -472,11 +481,14 @@ export function createTasks(options: {
     threadId: string,
     messageId: string | undefined,
     chatId?: string,
+    reaction = false,
   ) {
+    const active = `EXISTS (SELECT 1 FROM turns a WHERE a.owner_id=t.owner_id AND a.session_id=t.session_id
+      AND a.status IN ('queued','running')) AS active`;
     const replied = messageId
       ? (
           await client.query(
-            `SELECT t.id AS task_id,t.turn_id AS id,t.session_id,t.name,t.state FROM tasks t
+            `SELECT t.id AS task_id,t.turn_id AS id,t.session_id,t.name,t.state,${active} FROM tasks t
        JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
        JOIN messages m ON m.owner_id=t.owner_id AND m.thread_id=u.thread_id
        LEFT JOIN turns mt ON mt.id=m.turn_id AND mt.owner_id=m.owner_id
@@ -488,10 +500,11 @@ export function createTasks(options: {
           )
         ).rows[0]
       : undefined;
-    if (!chatId) return replied ? replyTarget(client, threadId, replied, false) : undefined;
+    if (!chatId)
+      return replied ? replyTarget(client, threadId, replied, false, reaction) : undefined;
     const chat = (
       await client.query(
-        `SELECT t.id AS task_id,t.turn_id AS id,t.session_id,t.name,t.state FROM tasks t
+        `SELECT t.id AS task_id,t.turn_id AS id,t.session_id,t.name,t.state,${active} FROM tasks t
          JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
          WHERE t.owner_id=$1 AND u.thread_id=$2 AND t.id=$3 AND t.name IS NOT NULL AND t.session_id=t.id
          FOR NO KEY UPDATE OF t`,
@@ -509,7 +522,7 @@ export function createTasks(options: {
           code: 'chat_mismatch',
         });
     }
-    return replyTarget(client, threadId, chat, true);
+    return replyTarget(client, threadId, chat, true, reaction);
   }
 
   async function recordInput(client: PoolClient, id: string, turnId: string) {
@@ -741,8 +754,10 @@ export function createTasks(options: {
         await assertNewChat(client, ownerId, turn.threadId, name!, request.newBecause);
       const reused = request.chat
         ? (
-            await client.query<{ id: string; name: string; state: string }>(
-              `SELECT t.id,t.name,t.state FROM tasks t JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
+            await client.query<{ id: string; name: string; state: string; active: boolean }>(
+              `SELECT t.id,t.name,t.state,EXISTS (SELECT 1 FROM turns a WHERE a.owner_id=t.owner_id
+                 AND a.session_id=t.session_id AND a.status IN ('queued','running')) AS active
+               FROM tasks t JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
                WHERE t.id=$1 AND t.owner_id=$2 AND u.thread_id=$3 AND t.name IS NOT NULL AND t.session_id=t.id
                FOR NO KEY UPDATE OF t`,
               [request.chat, ownerId, turn.threadId],
@@ -750,7 +765,7 @@ export function createTasks(options: {
           ).rows[0]
         : undefined;
       if (request.chat && !reused) throw failure('Chat not found.', 404);
-      if (reused?.state === 'open')
+      if (reused && (reused.state === 'open' || reused.active))
         throw failure(
           `${reused.name} is still working. Use reply with its id to send it this message.`,
         );
@@ -907,7 +922,13 @@ export function createTasks(options: {
       if (
         !updated.rowCount &&
         request.action === 'finish' &&
-        request.result.length > chatResultLimit
+        request.result.length > chatResultLimit &&
+        (
+          await client.query(
+            "SELECT 1 FROM tasks WHERE id=$1 AND owner_id=$2 AND state='open' AND applied_revision=revision AND name IS NOT NULL",
+            [id, ownerId],
+          )
+        ).rowCount
       )
         throw failure(
           `A chat's result is one sentence of at most ${chatResultLimit} characters: the owner reads it in their main chat. Call finish again with that sentence, then give the full answer as your final text.`,
@@ -1078,9 +1099,9 @@ export function createTasks(options: {
       await pool.query<{ text: string; has_attachments: boolean }>(
         `SELECT DISTINCT m.id,m.created_at,m.text,jsonb_array_length(m.attachments)>0 AS has_attachments
          FROM messages m JOIN tasks t ON t.id=$1 AND t.owner_id=m.owner_id
-         WHERE m.owner_id=$2 AND m.role='user' AND NOT ${withdrawnSql('m')} AND (m.id=t.source_message_id OR m.id IN
-           (SELECT u.message_id FROM turns u WHERE u.task_id=t.id AND u.owner_id=t.owner_id) OR m.turn_id IN
-           (SELECT u.id FROM turns u WHERE u.task_id=t.id AND u.owner_id=t.owner_id))
+         WHERE m.owner_id=$2 AND m.role='user' AND NOT ${withdrawnSql('m')} AND (m.id=t.source_message_id OR EXISTS
+           (SELECT 1 FROM turns u WHERE u.task_id=t.id AND u.owner_id=t.owner_id AND (u.message_id=m.id OR u.id=m.turn_id)
+             AND u.created_at>=COALESCE(t.request_started_at,'-infinity')))
          ORDER BY m.created_at,m.id`,
         [id, ownerId],
       )

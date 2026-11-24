@@ -328,8 +328,8 @@ test(
     await accounts.initialize();
     const userMessages = thread.createUserMessageService({
       confirmAction: approvals.chat,
-      taskReply: (client, threadId, messageId, chatId) =>
-        tasks.resolveReply(client, threadId, messageId, chatId),
+      taskReply: (client, threadId, messageId, chatId, reaction) =>
+        tasks.resolveReply(client, threadId, messageId, chatId, reaction),
       accepted: () => {
         const capture = snapshotAnalytics(captureAnalytics);
         return (channel) => {
@@ -2376,6 +2376,15 @@ test(
           const prompt = 'Find a synthetic designer for the named chat fixture.';
           const next = 'Now find a synthetic copywriter for the named chat fixture.';
           const failing = 'Synthetic failing request for the named chat fixture.';
+          const slow = 'Synthetic slow request for the named chat fixture.';
+          let slowFinished!: () => void;
+          const finishedSlow = new Promise<void>((resolve) => {
+            slowFinished = resolve;
+          });
+          let releaseSlow!: () => void;
+          const slowHeld = new Promise<void>((resolve) => {
+            releaseSlow = resolve;
+          });
           let chat: Task | undefined;
           let reuse: Promise<unknown> | undefined;
           let writing: string | undefined;
@@ -2420,6 +2429,18 @@ test(
               await reuse;
               return { status: 'succeeded' };
             }
+            if (context.prompt === slow && !context.background) {
+              await context.task!({
+                action: 'start',
+                chat: chat!.id,
+                title: 'Finish synthetically',
+                message: 'On it.',
+                doneWhen: 'A synthetic slow result exists',
+                now: 'Working',
+              });
+              return { status: 'succeeded' };
+            }
+            if (context.prompt === '👍') return { status: 'succeeded' };
             if (context.prompt === failing) {
               if (context.taskContext) throw new ModelRequestError('Synthetic chat failure');
               await context.task!({
@@ -2444,6 +2465,18 @@ test(
             if (context.taskContext?.id !== chat?.id || !chat) return;
             if (context.prompt === 'Synthetic question in the chat')
               return { status: 'waiting_user', message: 'Synthetic chat question?' };
+            if (context.prompt === slow) {
+              await context.task!({
+                action: 'finish',
+                id: chat.id,
+                status: 'done',
+                result: 'Synthetic slow result',
+              });
+              slowFinished();
+              await slowHeld;
+              await context.reply('Synthetic slow answer');
+              return { status: 'succeeded' };
+            }
             await context.task!({
               action: 'finish',
               id: chat.id,
@@ -2495,6 +2528,29 @@ test(
           assert.equal(writing, 'working');
           assert.equal(listed?.status, 'done');
           assert.equal(listed?.lastReply, `Synthetic chat answer: ${prompt}`);
+
+          const beforeReaction = await row();
+          const report = (
+            await db.pool.query(
+              'SELECT id FROM messages WHERE chat_report AND reply_to_message_id=$1',
+              [request.messageId],
+            )
+          ).rows[0].id as string;
+          await thread.reactToAssistantMessage(report, '👍', true, userMessages);
+          const reactionTurn = async () =>
+            (
+              await db.pool.query<{ id: string }>('SELECT id FROM turns WHERE source_id LIKE $1', [
+                `reaction-reply:${report}:%`,
+              ])
+            ).rows[0]?.id;
+          await waitFor(async () => Boolean(await reactionTurn()));
+          await waitFor(settled((await reactionTurn())!));
+          assert.deepEqual(await row(), beforeReaction);
+          assert.equal(
+            (await tasks.read()).find(({ id }) => id === chat!.id)?.result,
+            'Synthetic chat result',
+          );
+          assert.equal((await replies()).filter(({ chat_report }) => chat_report).length, 1);
 
           await db.pool.query("UPDATE tasks SET next_check=now()+interval '1 day' WHERE id=$1", [
             chat!.id,
@@ -2757,6 +2813,25 @@ test(
               })
             ).statusCode,
             404,
+          );
+
+          const slowRequest = await userMessages.submit(slow);
+          await finishedSlow;
+          const during = await userMessages.submit(
+            'Synthetic follow-up while the chat writes',
+            [],
+            {
+              chatId: chat!.id,
+            },
+          );
+          assert.equal((await row()).source_message_id, slowRequest.messageId);
+          releaseSlow();
+          await waitFor(settled(during.turnId));
+          await waitFor(async () =>
+            (await replies()).some(
+              ({ chat_report, reply_to_message_id }) =>
+                chat_report && reply_to_message_id === slowRequest.messageId,
+            ),
           );
 
           const failed = await userMessages.submit(failing);

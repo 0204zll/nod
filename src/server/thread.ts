@@ -768,6 +768,7 @@ type TaskReply = (
   threadId: string,
   messageId: string | undefined,
   chatId?: string,
+  reaction?: boolean,
 ) => Promise<
   | {
       id: string | null;
@@ -932,7 +933,13 @@ export async function submitUserMessage(
     const turnId = randomUUID();
     const taskTarget =
       options.chatId || (live && options.replyToMessageId)
-        ? await taskReply?.(client, thread.id, options.replyToMessageId, options.chatId)
+        ? await taskReply?.(
+            client,
+            thread.id,
+            options.replyToMessageId,
+            options.chatId,
+            options.sourceId?.startsWith('reaction-reply:'),
+          )
         : undefined;
     const question = live
       ? taskTarget ||

@@ -254,11 +254,12 @@ export function AccountSettings({
     if (!open) return;
     const key = `${openRequest}:${section}`;
     if (recorded.current === key) return;
+    if (!recorded.current?.startsWith(`${openRequest}:`) && section !== selected.id) return;
     recorded.current = key;
     captureAnalytics('settings_viewed', {
       tab: section as AnalyticsProperties<'settings_viewed'>['tab'],
     });
-  }, [open, openRequest, section]);
+  }, [open, openRequest, section, selected.id]);
   function trackScroll() {
     const scroller = content.current;
     if (!scroller) return;
