@@ -148,6 +148,14 @@ test('a scripted greeting reply answers only the opening question', async () => 
   assert.equal((await finished.check(run)).pass, false);
   interactions.pop();
   assert.equal((await finished.check(run)).pass, true);
+  run.turns = [
+    { background: false, status: 'succeeded' },
+    { background: true, source: 'user', status: 'failed' },
+    { background: true, source: 'task', status: 'succeeded' },
+  ] as Run['turns'];
+  assert.equal((await finished.check(run)).pass, false);
+  run.turns[1]!.status = 'succeeded';
+  assert.equal((await finished.check(run)).pass, true);
 });
 
 test('discovery checks reject work started before the owner selects an offer', async () => {

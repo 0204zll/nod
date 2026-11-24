@@ -26,7 +26,7 @@ export const inspectableNudges = check('notifications-open-the-saved-results', a
 export const finished = check(
   'finished',
   (run) => {
-    const last = run.turns.filter((turn) => !turn.background).at(-1);
+    const last = run.turns.filter((turn) => !turn.background || turn.source === 'user').at(-1);
     const stuck = run.interactions.filter(
       (item) => item.kind === 'unanswered' || item.kind === 'stalled',
     );
