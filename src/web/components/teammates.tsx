@@ -951,7 +951,7 @@ export function TeammatePanel({
         <div className="panel-identity">
           {teammate ? <AvatarPicker teammate={teammate} /> : <NodAvatar size="lg" />}
           <div className="panel-identity-text">
-            <h2>
+            <div className="panel-name">
               {teammate ? (
                 <InlineName
                   value={teammate.name}
@@ -963,7 +963,7 @@ export function TeammatePanel({
               ) : (
                 'Nod'
               )}
-            </h2>
+            </div>
             <p>{teammate ? teammate.teammate.job || 'Setting up' : 'Your main assistant'}</p>
           </div>
         </div>

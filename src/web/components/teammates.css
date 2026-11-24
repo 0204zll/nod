@@ -539,8 +539,7 @@ button.message-chat-label {
   flex: 1;
   min-width: 0;
 }
-.panel-identity-text h2 {
-  margin: 0;
+.panel-name {
   font-size: 18px;
   font-weight: 550;
   line-height: 1.35;
@@ -556,6 +555,9 @@ button.message-chat-label {
 .panel-identity-text .inline-name-form {
   font-size: var(--text-control);
   font-weight: 400;
+}
+.panel-identity-text .inline-name-form .input {
+  flex-basis: 100%;
 }
 .avatar-button {
   flex: none;
