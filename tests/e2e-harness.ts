@@ -58,7 +58,7 @@ function scriptedReply(messages: Entry[]) {
     (entry) => entry.role === 'assistant' && entry.stopReason === 'stop',
   );
   const current = messages.slice(finished + 1);
-  let task: { id: string } | undefined;
+  let task: { id: string; teammate?: { setup?: boolean } } | undefined;
   let teammates: Array<{ id: string; name: string }> = [];
   let background = false;
   const pending: OwnerRequest[] = [];
@@ -67,7 +67,7 @@ function scriptedReply(messages: Entry[]) {
     const data = requestData(textOf(entry));
     const text = data?.currentInstruction;
     const id = data?.messageId ?? data?.currentMessageId;
-    if (data?.task && typeof data.task === 'object') task = data.task as { id: string };
+    if (data?.task && typeof data.task === 'object') task = data.task as typeof task;
     if (data?.mode === 'background') background = true;
     if (Array.isArray(data?.teammates)) teammates = data.teammates as typeof teammates;
     if (typeof text === 'string') pending.push({ id: typeof id === 'string' ? id : '', text });
@@ -83,6 +83,27 @@ function scriptedReply(messages: Entry[]) {
     name: 'codemode',
     arguments: { code: `await tools.${name}(${JSON.stringify(args)});` },
   });
+  if (task?.teammate?.setup || (task && calls.some((call) => call.includes('teammate_update')))) {
+    if (!calls.some((call) => call.includes('ask_user')))
+      return {
+        call: tool('ask_user', {
+          question: 'What should I do for you?',
+          choices: [{ label: 'Track bills and receipts' }],
+        }),
+      };
+    if (!calls.some((call) => call.includes('teammate_update')))
+      return {
+        call: tool('nod', {
+          action: 'teammate_update',
+          args: { id: task.id, job: pending.at(-1)!.text },
+        }),
+      };
+    if (!calls.some((call) => call.includes('\\"finish\\"')))
+      return {
+        call: tool('task', { action: 'finish', id: task.id, status: 'done', result: 'Ready' }),
+      };
+    return { text: 'Ready.' };
+  }
   if (task) {
     const instruction = pending.map((request) => request.text).join(' / ');
     if (instruction.includes('approve:') && !calls.some((call) => call.includes('limits_update')))
@@ -246,6 +267,15 @@ async function serve() {
       };
       if (request.task !== 'review' || !input.action) return undefined;
       const said = input.userMessages ?? [];
+      const job = (input.action as { arguments?: { job?: string } }).arguments?.job;
+      if (input.action.name === 'NOD_teammate_update') {
+        const index = said.findLastIndex(
+          (message) => message.canAuthorize !== false && message.text === job,
+        );
+        return index >= 0
+          ? { run: true, source: `message:${index}`, because: said[index]!.text, terms: [] }
+          : { run: false };
+      }
       const index = said.findLastIndex(
         (message) => message.canAuthorize !== false && /^pause my synthetic/i.test(message.text),
       );

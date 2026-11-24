@@ -781,8 +781,6 @@ export function createTasks(options: {
       const independent = current.proactive || current.session_id === turn.threadId;
       if (request.teammate && (current.proactive || !independent || !sourceMessageId))
         throw failure('Only the main chat can hand an owner request to a teammate.');
-      if (request.teammate && (request.model || request.key))
-        throw failure('Use teammate alone to hand an owner request to a teammate.');
       const reused = request.teammate
         ? (
             await client.query<{ id: string; name: string; state: string; active: boolean }>(

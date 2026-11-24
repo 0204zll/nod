@@ -2562,8 +2562,9 @@ async function initializeApplication(
       taskLedger: tasks.ledger,
       chatStart: tasks.chatStart,
       task: async (turn, raw, sourceMessageId, priorMessageId, priorHandoff) => {
-        const request = raw as { action?: unknown; model?: unknown } | undefined;
-        if (request?.action === 'start' && request.model) {
+        const request = raw as
+          { action?: unknown; model?: unknown; teammate?: unknown } | undefined;
+        if (request?.action === 'start' && request.model && !request.teammate) {
           const current = (
             await pool.query<{ proactive: boolean; chat: boolean }>(
               'SELECT proactive,session_id=thread_id AS chat FROM turns WHERE id=$1 AND owner_id=$2',
@@ -2800,6 +2801,13 @@ async function initializeApplication(
             },
           });
         }
+        if (action === 'teammate_update') {
+          const { mark: _mark, hue: _hue, ...behaviour } = args;
+          if (Object.keys(behaviour).every((key) => key === 'id' || key === 'teammate'))
+            return withTurnLock({ turnId: turn.turnId, signal }, (client) =>
+              tasks.applyTeammateUpdate(client, args),
+            );
+        }
         if (
           [
             'notification_preferences_update',
@@ -2840,11 +2848,12 @@ async function initializeApplication(
                     ...(input.model as ModelSelection),
                   })
                 : undefined;
+          const { mark: _mark, hue: _hue, ...behaviour } = input;
           const verdict = await trust.check(
             turn,
             `NOD_${action}`,
             {
-              ...input,
+              ...(action === 'teammate_update' ? behaviour : input),
               ...(targetModel ? { targetModel } : {}),
               ...(current ? { currentSchedule: current } : {}),
               ...(rule === undefined ? {} : { currentNotificationRule: rule }),

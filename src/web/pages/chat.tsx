@@ -2842,7 +2842,7 @@ export function Chat({
               placeholder={
                 chat
                   ? `Message ${chat.name}`
-                  : teammates.length
+                  : teammates.length && !window.matchMedia('(max-width: 640px)').matches
                     ? 'Message Nod, or type @ to bring in a teammate'
                     : undefined
               }

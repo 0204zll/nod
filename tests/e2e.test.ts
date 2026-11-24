@@ -53,6 +53,7 @@ test(
     await t.test('a request for a teammate runs in its chat and reports back once', async () => {
       const created = await nod.api<{ id: string }>('POST', '/api/teammates', {});
       await nod.settle();
+      await nod.stopTask(created.id);
       await nod.api('PATCH', `/api/teammates/${created.id}`, { name: 'Penny', job: 'Bills' });
       const sent = await nod.send('@Penny file the March bill');
       await nod.settle();
@@ -68,17 +69,19 @@ test(
         messages.filter((message) => message.handoff).map((message) => message.handoff),
         [{ teammate: created.id, title: 'file the March bill' }],
       );
-      assert.deepEqual(
-        messages.filter((message) => message.chatReport).map((message) => message.text),
-        ['Done: @Penny file the March bill'],
-      );
+      const reports = messages.filter((message) => message.chatReport);
+      assert.equal(reports.length, 1);
+      assert.match(reports[0]!.text, /@Penny file the March bill$/);
       const own = await nod.api<{ messages: NodMessage[] }>(
         'GET',
         `/api/teammates/${created.id}/messages`,
       );
       assert.ok(
         own.messages.some(
-          (message) => message.text === 'Done: @Penny file the March bill' && !message.chatReport,
+          (message) =>
+            message.role === 'assistant' &&
+            message.text === reports[0]!.text &&
+            !message.chatReport,
         ),
       );
       assert.deepEqual(await nod.violations(), []);
@@ -374,6 +377,39 @@ test(
     assert.deepEqual(await nod.query('SELECT action,status FROM approvals'), [
       { action: 'NOD_schedule_pause', status: 'completed' },
     ]);
+    assert.deepEqual(await nod.violations(), []);
+  },
+);
+
+test(
+  'end to end, a new teammate saves the job the owner picks in its setup chat',
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 120_000 },
+  async (t) => {
+    const nod = await startNod({ checker: true });
+    t.after(() => nod.close());
+    const created = await nod.api<{ id: string }>('POST', '/api/teammates', {});
+    await nod.settle();
+    const { messages } = await nod.api<{
+      messages: Array<
+        NodMessage & { answerChoices?: { options: Array<{ id: string; label: string }> } }
+      >;
+    }>('GET', `/api/teammates/${created.id}/messages`);
+    const question = messages.findLast((message) => message.role === 'assistant')!;
+    const option = question.answerChoices!.options[0]!;
+    const { threadId } = await nod.state();
+    await nod.api('POST', '/api/messages', {
+      text: option.label,
+      threadId,
+      chatId: created.id,
+      clientMessageId: crypto.randomUUID(),
+      replyToMessageId: question.id,
+      questionAnswer: { choiceIds: [option.id] },
+    });
+    await nod.settle();
+    assert.deepEqual(await nod.query('SELECT job FROM tasks WHERE id=$1', [created.id]), [
+      { job: 'Track bills and receipts' },
+    ]);
+    assert.deepEqual(await nod.query('SELECT action,status FROM approvals'), []);
     assert.deepEqual(await nod.violations(), []);
   },
 );

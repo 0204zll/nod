@@ -318,7 +318,8 @@ export function createAgentRuntime(dependencies: {
     let reported = false;
     let finalDelivered = false;
     let requestRevision = 0;
-    let taskStart: { revision: number; message: string; previousReply: string } | undefined;
+    let taskStart:
+      { revision: number; message: string; previousReply: string; handoff: boolean } | undefined;
     const activeToolCalls = new Set<Promise<unknown>>();
     const observe = (event: RuntimeObservation) => {
       if (signal.aborted && !(event.type === 'tool_end' && event.status === 'cancelled')) return;
@@ -611,6 +612,7 @@ export function createAgentRuntime(dependencies: {
               revision,
               message: String((params as { message?: unknown }).message ?? ''),
               previousReply: lastReply,
+              handoff: Boolean((params as { teammate?: unknown }).teammate),
             };
           const { commandOutput: fullOutput, ...toolResult } = isToolResult(output)
             ? output
@@ -1305,9 +1307,10 @@ export function createAgentRuntime(dependencies: {
             if (
               taskStart?.revision === requestRevision &&
               !replyOwed &&
-              [taskStart.message, taskStart.previousReply].some((message) =>
-                repeatsTaskStart(event.text, message),
-              )
+              (taskStart.handoff ||
+                [taskStart.message, taskStart.previousReply].some((message) =>
+                  repeatsTaskStart(event.text, message),
+                ))
             )
               streamSubmitted = true;
             else queueStreamReply(event.text, streamId ?? randomUUID());
