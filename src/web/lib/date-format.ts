@@ -4,6 +4,7 @@ import {
   clockOptions,
   formattingLocale,
   localeRegion,
+  scanTimeZoneRegions,
   timeZoneRegion,
 } from '../../shared/date-locale';
 
@@ -90,10 +91,12 @@ function browserTimeZone() {
   return validTimeZone(Intl.DateTimeFormat().resolvedOptions().timeZone) ?? current.timeZone;
 }
 
-export function resolveBrowserRegion() {
+export function resolveBrowserRegion(more: () => boolean) {
+  if (!scanTimeZoneRegions(more)) return false;
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   if (!browserRegions.has(timeZone)) browserRegions.set(timeZone, timeZoneRegion(timeZone));
   for (const listener of listeners) listener();
+  return true;
 }
 
 export function dateFormatFrom(

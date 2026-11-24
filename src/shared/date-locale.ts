@@ -7,7 +7,27 @@ export function localeRegion(value: string | null | undefined) {
   }
 }
 
-let timeZoneRegions: Map<string, string> | undefined;
+const timeZoneRegions = new Map<string, string>();
+let scannedRegions = 0;
+
+export function scanTimeZoneRegions(more: () => boolean = () => true) {
+  while (scannedRegions < 26 * 26) {
+    if (!more()) return false;
+    const code = String.fromCharCode(
+      65 + Math.floor(scannedRegions / 26),
+      65 + (scannedRegions % 26),
+    );
+    scannedRegions++;
+    const locale = new Intl.Locale(`und-${code}`) as Intl.Locale & {
+      getTimeZones?: () => string[] | undefined;
+      timeZones?: string[];
+    };
+    if (!locale.getTimeZones && !('timeZones' in locale)) scannedRegions = 26 * 26;
+    const zones = locale.getTimeZones ? locale.getTimeZones() : locale.timeZones;
+    for (const zone of zones ?? []) timeZoneRegions.set(zone, locale.region!);
+  }
+  return true;
+}
 
 export function timeZoneRegion(value: string) {
   try {
@@ -15,22 +35,7 @@ export function timeZoneRegion(value: string) {
   } catch {
     return null;
   }
-  if (!timeZoneRegions) {
-    timeZoneRegions = new Map();
-    for (let first = 65; first <= 90; first++) {
-      for (let second = 65; second <= 90; second++) {
-        const locale = new Intl.Locale(
-          `und-${String.fromCharCode(first, second)}`,
-        ) as Intl.Locale & {
-          getTimeZones?: () => string[] | undefined;
-          timeZones?: string[];
-        };
-        if (!locale.getTimeZones && !('timeZones' in locale)) return null;
-        const zones = locale.getTimeZones ? locale.getTimeZones() : locale.timeZones;
-        for (const zone of zones ?? []) timeZoneRegions.set(zone, locale.region!);
-      }
-    }
-  }
+  scanTimeZoneRegions();
   return timeZoneRegions.get(value) ?? null;
 }
 
@@ -42,19 +47,27 @@ export function formattingLocale(region: string | null) {
   return 'en-GB';
 }
 
+const clocks = new Map<string, Intl.DateTimeFormatOptions>();
+
 export function clockOptions(
   locale: string,
   hourCycle: 'auto' | 'h12' | 'h23',
 ): Intl.DateTimeFormatOptions {
-  const cycle =
-    hourCycle === 'auto'
-      ? new Intl.DateTimeFormat(locale, { hour: 'numeric' }).resolvedOptions().hourCycle
-      : hourCycle;
-  return {
-    hour: cycle === 'h11' || cycle === 'h12' ? 'numeric' : '2-digit',
-    minute: '2-digit',
-    ...(hourCycle === 'auto' ? {} : { hourCycle }),
-  };
+  const key = `${locale}|${hourCycle}`;
+  let options = clocks.get(key);
+  if (!options) {
+    const cycle =
+      hourCycle === 'auto'
+        ? new Intl.DateTimeFormat(locale, { hour: 'numeric' }).resolvedOptions().hourCycle
+        : hourCycle;
+    options = {
+      hour: cycle === 'h11' || cycle === 'h12' ? 'numeric' : '2-digit',
+      minute: '2-digit',
+      ...(hourCycle === 'auto' ? {} : { hourCycle }),
+    };
+    clocks.set(key, options);
+  }
+  return options;
 }
 
 export function localTimestamp(timeZone: string, at: Date) {

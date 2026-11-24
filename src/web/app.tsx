@@ -77,17 +77,25 @@ function useSavedDateFormat() {
     const update = () => {
       cancel();
       setDateFormat(data);
-      const resolve = () => {
-        resolveBrowserRegion();
+      const resolve = (more: () => boolean) => {
+        if (!resolveBrowserRegion(more)) return schedule();
         setDateFormat(data);
       };
-      if (typeof window.requestIdleCallback === 'function') {
-        const handle = window.requestIdleCallback(resolve, { timeout: 1000 });
-        cancel = () => window.cancelIdleCallback(handle);
-      } else {
-        const handle = window.setTimeout(resolve, 0);
-        cancel = () => window.clearTimeout(handle);
-      }
+      const schedule = () => {
+        if (typeof window.requestIdleCallback === 'function') {
+          const handle = window.requestIdleCallback((idle) =>
+            resolve(() => idle.timeRemaining() > 1),
+          );
+          cancel = () => window.cancelIdleCallback(handle);
+        } else {
+          const handle = window.setTimeout(() => {
+            const until = performance.now() + 8;
+            resolve(() => performance.now() < until);
+          }, 0);
+          cancel = () => window.clearTimeout(handle);
+        }
+      };
+      schedule();
     };
     update();
     window.addEventListener('focus', update);
