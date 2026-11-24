@@ -577,11 +577,11 @@ function generatedAvatar(name: string, description: string, fallback: Avatar['hu
   context.fillStyle = gradient;
   context.fillRect(0, 0, 256, 256);
   for (let index = 0; index < 3; index++) {
-    const x = ((seed >> (index * 5)) % 200) + 28;
-    const y = ((seed >> (index * 7 + 3)) % 200) + 28;
+    const x = ((seed >>> (index * 5)) % 200) + 28;
+    const y = ((seed >>> (index * 7 + 3)) % 200) + 28;
     context.fillStyle = `rgba(255,255,255,${0.08 + index * 0.04})`;
     context.beginPath();
-    context.arc(x, y, 40 + ((seed >> index) % 50), 0, Math.PI * 2);
+    context.arc(x, y, 40 + ((seed >>> index) % 50), 0, Math.PI * 2);
     context.fill();
   }
   context.fillStyle = 'rgba(255,255,255,0.94)';
