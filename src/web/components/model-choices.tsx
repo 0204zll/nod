@@ -11,6 +11,7 @@ import {
   type WorkUsage,
   type WorkUsageResponse,
 } from '../../shared/models';
+import { defaultEffort } from '../../shared/model-defaults';
 import { useModels } from '../hooks/use-models';
 import { usePageData } from '../hooks/use-page-data';
 import { api, errorMessage } from '../lib/api';
@@ -404,41 +405,64 @@ export function ScheduleModel({ schedule }: { schedule: Schedule }) {
   );
 }
 
-export function TeammateModel({ teammate }: { teammate: Task & { name: string } }) {
+export function TeammateModel({
+  teammate,
+  onError,
+}: {
+  teammate: Task & { name: string };
+  onError(message: string): void;
+}) {
   const models = useModels();
-  const usage = usePageData<WorkUsageResponse>(workUsagePath);
   const data = models.data;
-  if (!data) return <span className="teammate-setting-text">…</span>;
+  if (!data)
+    return (
+      <select className="inp selr" disabled aria-label="Model">
+        <option>…</option>
+      </select>
+    );
   const own = kept(data, teammate.model);
   const chat = modelOf(data, data.selection);
+  const choices = data.connections
+    .filter((connection) => connection.status === 'connected')
+    .flatMap((connection) =>
+      connection.models.map((model) => ({
+        key: `${connection.id}/${model.id}`,
+        label: model.name,
+        model: {
+          connectionId: connection.id,
+          modelId: model.id,
+          effort: defaultEffort(connection.provider, model),
+        } satisfies ModelSelection,
+      })),
+    );
+  const value = own ? `${own.connectionId}/${own.modelId}` : '';
   return (
-    <ModelPicker
-      appearance="quiet"
-      manageConnections={false}
-      label={
-        own
-          ? (modelOf(data, own)?.name ?? unavailableLabel)
-          : `Same as Nod${chat ? ` (${chat.name})` : ''}`
-      }
-      target={{
-        title: `Model for ${teammate.name}`,
-        value: own,
-        defaults: [{ value: null, label: 'Same as Nod', model: data.selection ?? null }],
-        usage: usage.data?.tasks[teammate.id],
-        save: (model) =>
-          saved<Task>(`/api/tasks/${encodeURIComponent(teammate.id)}/model`, { model }, () =>
-            window.dispatchEvent(new Event('nod:teammates-changed')),
-          ),
+    <select
+      className="inp selr"
+      aria-label="Model"
+      value={value}
+      onChange={(event) => {
+        const model = choices.find((choice) => choice.key === event.target.value)?.model ?? null;
+        void saved<Task>(`/api/tasks/${encodeURIComponent(teammate.id)}/model`, { model }, () =>
+          window.dispatchEvent(new Event('nod:teammates-changed')),
+        ).then((result) => result !== true && onError(result));
       }}
-    />
+    >
+      <option value="">Default ({chat?.name ?? 'Nod’s model'})</option>
+      {own && !choices.some((choice) => choice.key === value) && (
+        <option value={value}>{modelOf(data, own)?.name ?? unavailableLabel}</option>
+      )}
+      {choices.map((choice) => (
+        <option key={choice.key} value={choice.key}>
+          {choice.label}
+        </option>
+      ))}
+    </select>
   );
 }
 
-export function NodModel() {
+export function NodModelName() {
   const models = useModels();
   const data = models.data;
-  const chat = data && modelOf(data, data.selection);
-  return (
-    <ModelPicker appearance="quiet" manageConnections={false} label={chat?.name ?? 'Choose'} />
-  );
+  return <>{(data && modelOf(data, data.selection)?.name) ?? '…'}</>;
 }

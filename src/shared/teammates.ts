@@ -1,23 +1,7 @@
 import { z } from 'zod';
 
 export const teammateHues = ['pink', 'lilac', 'green', 'amber', 'sky', 'gray'] as const;
-export const teammateMarks = [
-  '',
-  '🧾',
-  '🔭',
-  '🍳',
-  '🗓️',
-  '✈️',
-  '🏡',
-  '🎓',
-  '💪',
-  '🧩',
-  '💼',
-  '📈',
-  '✍️',
-  '🎨',
-  '🛒',
-] as const;
+export const teammateMarks = ['', '🧾', '🔭', '🍳', '🗓️', '✈️', '🏡', '🎓', '💪', '🧩'] as const;
 export const memoryModes = ['shared', 'read', 'own'] as const;
 export const teammateChannels = ['telegram', 'whatsapp'] as const;
 export const teammateNameLimit = 24;

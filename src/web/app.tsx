@@ -394,19 +394,14 @@ function Workspace({
             )}
           </main>
         </div>
-        <Toasts />
       </div>
       {showPanel && (
         <TeammatePanel
           teammate={path === '/' ? undefined : openTeammate}
-          teammates={teammates}
           onClose={() => setPanelOpen(false)}
-          onRemoved={() => {
-            setPanelOpen(false);
-            navigate('/');
-          }}
         />
       )}
+      <Toasts />
     </div>
   );
 }

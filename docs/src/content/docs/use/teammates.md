@@ -27,9 +27,9 @@ Select the name at the top of a teammate's chat to open its settings. Select the
 
 | Setting      | What it does                                                                                                                                                                                                                                                         |
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Avatar       | Select the picture to pick a shape and color, make a gradient from a few words about its colors, or upload an image.                                                                                                                                                 |
+| Avatar       | Select the picture to pick a shape and color, generate a gradient avatar from a short description, or upload an image.                                                                                                                                               |
 | Name         | Select the name to rename it. Each teammate needs its own name.                                                                                                                                                                                                      |
-| Model        | **Same as Nod**, or a model of its own. Its costs show in [Usage](/use/spending/).                                                                                                                                                                                   |
+| Model        | **Default**, which follows Nod's model, or a model of its own. Its costs show in [Usage](/use/spending/).                                                                                                                                                            |
 | Memory       | **Shares Nod's memory**: reads and adds to Nod's notes. **Reads Nod's memory, keeps its own notes**: knows what Nod knows, and what it learns in its chat stays with it. **Own memory only**: never sees Nod's notes or your chat with Nod, and keeps its own notes. |
 | Instructions | What it should always or never do. Instructions guide its work. They never approve an action.                                                                                                                                                                        |
 | Channels     | Send your [Telegram or WhatsApp](/use/channels/) messages to this teammate instead of Nod. It answers there with its name in front. A channel belongs to one teammate or to Nod.                                                                                     |
@@ -40,7 +40,7 @@ You can also ask a teammate, or Nod, to rename it or change its job, avatar or i
 
 ## Remove a teammate
 
-Open its settings and select **Remove**, or right-click it in the sidebar. Removing stops its work. Its chat and its own notes go with it, and its channels go back to Nod.
+Right-click it in the sidebar and select **Remove**. Removing stops its work. Its chat and its own notes go with it, and its channels go back to Nod.
 
 ## What stays with Nod
 

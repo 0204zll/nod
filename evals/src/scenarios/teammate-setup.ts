@@ -65,7 +65,7 @@ export default scenario({
     const state = world.state;
     state.id = (await session.api('POST', '/api/teammates', {})).body.id;
     await session.settle();
-    for (const wanted of [/bill|receipt/i, /short/i, /./, /same as nod/i])
+    for (const wanted of [/bill|receipt/i, /short/i, /./, /^default|same as nod/i])
       if (!(await answer(session, state, wanted))) break;
     state.messages = await messages(session, state.id);
     state.profile = (await session.api('GET', '/api/tasks')).body.find(
