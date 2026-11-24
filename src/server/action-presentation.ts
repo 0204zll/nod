@@ -37,6 +37,7 @@ const nodActions: Array<[string, string]> = [
   ['NOD_limits_update', 'Change spending limits'],
   ['NOD_bug_report_send', 'Send a bug report to the Nod team'],
   ['NOD_model_select', 'Change the model'],
+  ['NOD_teammate_update', 'Change a teammate'],
   ['NOD_notification_preferences_update', 'Change Nod settings'],
   ['NOD_schedule_pause', 'Pause a schedule'],
   ['NOD_schedule_cancel', 'Pause a schedule'],
@@ -542,6 +543,7 @@ export function actionTarget(
         ? `${model} for ${work}`
         : model;
     }
+    if (action === 'NOD_teammate_update') return words(args.teammate)[0];
     if (action === 'NOD_limits_update')
       return [
         'monthlyUsd' in args && dollarsOrNone(args.monthlyUsd, 'monthly limit'),

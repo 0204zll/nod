@@ -29,20 +29,27 @@ import { snapshotAnalytics, type CaptureAnalytics } from './analytics.ts';
 import { createPreferencesStore, deliveryTime, isQuietTime } from './preferences.ts';
 import { personalSecret } from './memory-tree.ts';
 import {
-  assertChatNameFree,
-  assertNewChat,
-  chatColumnsSql,
-  chatName,
-  chatNameLimit,
-  chatResultLimit,
-  defaultChatName,
+  assertNameFree,
+  freeTeammateName,
   latestChatMessages,
-  nameAutoChat,
   ownerChatRequest,
   restartChatRequest,
-  reviveChat,
   setChatRequestSource,
-} from './chats.ts';
+  teammateColumnsSql,
+  teammateResultLimit,
+  validName,
+} from './teammates.ts';
+import {
+  memoryModes,
+  teammateAvatarSchema,
+  teammateChannels,
+  teammateHues,
+  teammateInstructionsLimit,
+  teammateJobLimit,
+  teammateMarks,
+  type TeammateAvatar,
+  type TeammateChannel,
+} from '../shared/teammates.ts';
 import { texts as codeTexts } from './chat-verification.ts';
 import {
   reactionReplySql,
@@ -64,8 +71,7 @@ const nextCheck = z.iso.datetime({ offset: true });
 const credentialUrl = /(?<![\w/])(?:[a-z][a-z\d+.-]*:)?\/\/[^/\s?#<>]*@/iu;
 const input = z.discriminatedUnion('action', [
   z.object({ action: z.literal('list') }).strict(),
-  z.object({ action: z.literal('read'), chat: z.string().trim().min(1).max(60) }).strict(),
-  z.object({ action: z.literal('name'), id: z.uuid(), name: z.string() }).strict(),
+  z.object({ action: z.literal('read'), id: z.string().trim().min(1).max(60) }).strict(),
   z
     .object({
       action: z.literal('reply'),
@@ -87,10 +93,7 @@ const input = z.discriminatedUnion('action', [
       waitingFor: waits.optional(),
       nextCheck: nextCheck.optional(),
       model: modelSelectionInput.optional(),
-      name: z.string().trim().min(1).max(chatNameLimit).optional(),
-      chat: z.uuid().optional(),
-      newBecause: z.string().trim().min(1).max(300).optional(),
-      pinned: z.boolean().optional(),
+      teammate: z.uuid().optional(),
     })
     .strict(),
   z
@@ -113,6 +116,22 @@ const input = z.discriminatedUnion('action', [
     })
     .strict(),
 ]);
+const teammateChange = z
+  .object({
+    name: z.string().optional(),
+    avatar: teammateAvatarSchema.optional(),
+    job: z.string().trim().max(teammateJobLimit).optional(),
+    instructions: z.string().trim().max(teammateInstructionsLimit).optional(),
+    memory: z.enum(memoryModes).optional(),
+    channels: z
+      .array(z.enum(teammateChannels))
+      .max(teammateChannels.length)
+      .refine((value) => new Set(value).size === value.length)
+      .optional(),
+  })
+  .strict();
+export const teammateSetupPrompt =
+  'The owner just created you as a new teammate. Greet them and start your setup.';
 type Row = {
   id: string;
   message_id: string | null;
@@ -139,14 +158,18 @@ type Row = {
   work: WorkKind | null;
   schedule_model: ModelSelection | null;
   name: string | null;
-  pinned: boolean;
-  name_auto: boolean;
+  avatar: TeammateAvatar | null;
+  job: string;
+  instructions: string;
+  memory: (typeof memoryModes)[number];
+  channels: string[];
   last_reply: string | null;
+  last_role: string | null;
+  last_text: string | null;
   archived_at: Date | null;
   chat_only_count: number | null;
   chat_only_latest: Date | null;
   chat_only_latest_id: string | null;
-  continued_from: string | null;
   request_message_id: string | null;
 };
 
@@ -167,15 +190,13 @@ function status(row: Row): TaskStatus {
 }
 
 const idleStatuses = new Set<TaskStatus>(['done', 'cancelled']);
-const startLine = (name: string | undefined, message: string) =>
-  name && !message.toLowerCase().includes(name.toLowerCase()) ? `${name}: ${message}` : message;
 const shown = (task: Task): Task =>
-  task.name && task.result.length > chatResultLimit ? { ...task, result: '' } : task;
+  task.name && task.result.length > teammateResultLimit ? { ...task, result: '' } : task;
 
 function taskFacts(task: Task, detail: boolean) {
   const index = task.stepIndex ?? 0;
   return {
-    ...(task.name ? { chat: task.name } : {}),
+    ...(task.name ? { teammate: task.name } : {}),
     title: task.title,
     status: task.status,
     now: task.now,
@@ -202,6 +223,7 @@ export function createTasks(options: {
   refresh?: () => void;
   clearBrowser?: (id: string) => Promise<void>;
   validateModel?: (choice: ModelSelection) => ModelSelection;
+  removeTeammateMemory?: (id: string) => Promise<void>;
 }) {
   const { pool, ownerId } = options;
   const refresh = options.refresh ?? (() => {});
@@ -220,8 +242,9 @@ export function createTasks(options: {
         `WITH ranked AS (
            SELECT t.*,row_number() OVER (ORDER BY t.state='open' DESC,COALESCE(t.closed_at,t.updated_at) DESC,t.id) AS position
            FROM tasks t LEFT JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
-           WHERE t.owner_id=$1 AND ($2::uuid IS NULL OR t.id=$2) AND ($3 OR t.state='open')
-             AND ($4::uuid IS NULL OR u.thread_id=$4)
+           WHERE t.owner_id=$1 AND ($2::uuid IS NULL OR t.id=$2)
+             AND (t.name IS NOT NULL AND t.archived_at IS NULL
+               OR ($3 OR t.state='open') AND ($4::uuid IS NULL OR u.thread_id=$4))
          )
          SELECT t.id,CASE WHEN t.name IS NOT NULL AND EXISTS(SELECT 1 FROM turns w WHERE w.owner_id=t.owner_id
              AND w.message_id=t.source_message_id AND w.withdrawn) THEN t.name ELSE t.title END AS title,t.done_when,t.now_text,t.result,t.state,t.waiting_for,t.next_check,
@@ -233,8 +256,8 @@ export function createTasks(options: {
            COALESCE(q.text,CASE WHEN u.status='cancelled' THEN continuation.text END) AS question,
            COALESCE(q.id,CASE WHEN u.status='cancelled' THEN continuation.id END) AS question_message_id,
            t.model,CASE WHEN t.session_id=t.id THEN ${workKindSql('t', 'NULL')} END AS work,
-           work_schedule.model AS schedule_model,t.name,t.pinned,t.name_auto,t.archived_at,t.continued_from,t.source_message_id AS request_message_id,last_reply.text AS last_reply,chat_only.count AS chat_only_count,
-           chat_only.latest AS chat_only_latest,chat_only.latest_id AS chat_only_latest_id
+           work_schedule.model AS schedule_model,t.name,t.archived_at,t.avatar,t.job,t.instructions,t.memory,t.channels,t.source_message_id AS request_message_id,last_reply.text AS last_reply,chat_only.count AS chat_only_count,
+           chat_only.latest AS chat_only_latest,chat_only.latest_id AS chat_only_latest_id,last_message.role AS last_role,last_message.text AS last_text
          FROM ranked t LEFT JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
          ${workOriginSql('t')}
          LEFT JOIN LATERAL (SELECT count(*) OVER ()::int AS count,cm.created_at AS latest,cm.id AS latest_id FROM messages cm
@@ -247,13 +270,18 @@ export function createTasks(options: {
            WHERE t.name IS NOT NULL AND lm.owner_id=t.owner_id AND lu.task_id=t.id AND lm.role='assistant'
              AND lm.text<>'' AND lm.hidden_at IS NULL AND NOT lm.chat_report
            ORDER BY lm.created_at DESC,lm.id DESC LIMIT 1) last_reply ON true
+         LEFT JOIN LATERAL (SELECT am.role,left(regexp_replace(split_part(btrim(am.text),E'\\n\\n',1),'[[:space:]]+',' ','g'),160) AS text
+           FROM messages am JOIN turns au ON au.owner_id=am.owner_id AND (au.id=am.turn_id OR au.message_id=am.id)
+           WHERE t.name IS NOT NULL AND am.owner_id=t.owner_id AND au.task_id=t.id AND am.text<>''
+             AND am.hidden_at IS NULL AND NOT am.chat_report
+           ORDER BY am.created_at DESC,am.id DESC LIMIT 1) last_message ON true
          LEFT JOIN LATERAL (SELECT m.id,m.text FROM messages m
            WHERE u.status='waiting' AND m.owner_id=u.owner_id AND m.turn_id=u.id AND m.role='assistant' AND m.text<>'' AND m.hidden_at IS NULL
            ORDER BY m.created_at DESC,m.id DESC LIMIT 1) q ON true
          LEFT JOIN messages continuation ON continuation.id=t.continuation_message_id
            AND continuation.owner_id=t.owner_id AND continuation.thread_id=u.thread_id
            AND continuation.turn_id=u.id AND continuation.role='assistant' AND continuation.hidden_at IS NULL
-         WHERE t.position<=100 OR t.source_message_id IN (
+         WHERE t.position<=100 OR t.name IS NOT NULL OR t.source_message_id IN (
            SELECT requested.id FROM messages offer
            CROSS JOIN LATERAL jsonb_array_elements(offer.suggestions->'tasks') idea
            CROSS JOIN LATERAL (
@@ -296,12 +324,20 @@ export function createTasks(options: {
         ...(row.name
           ? {
               name: row.name,
-              pinned: row.pinned,
-              ...(row.name_auto ? { nameAuto: true } : {}),
               lastReply: row.last_reply,
+              lastMessage: row.last_text
+                ? { from: row.last_role === 'user' ? 'owner' : 'teammate', text: row.last_text }
+                : null,
               archivedAt: row.archived_at?.toISOString() ?? null,
-              ...(row.continued_from ? { continuedFrom: row.continued_from } : {}),
               ...(row.request_message_id ? { requestMessageId: row.request_message_id } : {}),
+              model: row.model,
+              teammate: {
+                avatar: row.avatar ?? { hue: 'pink' },
+                job: row.job,
+                instructions: row.instructions,
+                memory: row.memory,
+                channels: row.channels as TeammateChannel[],
+              },
               chatOnly: {
                 count: row.chat_only_count ?? 0,
                 latestAt: row.chat_only_latest?.toISOString() ?? null,
@@ -322,17 +358,19 @@ export function createTasks(options: {
     });
   }
 
-  async function chatRecord(client: Pick<PoolClient, 'query'>, threadId: string, ref: string) {
+  async function teammateRecord(client: Pick<PoolClient, 'query'>, threadId: string, ref: string) {
     const wanted = ref.toLowerCase();
     const task = (await read(client, { closed: true, thread: threadId })).find(
       (item) => !item.archivedAt && (item.id === wanted || item.name?.toLowerCase() === wanted),
     );
     if (!task)
-      throw failure(`No chat matches "${ref}". Pass the id or name of a chat from taskLedger.`);
+      throw failure(
+        `No teammate or task matches "${ref}". Pass the id of a task or the id or name of a teammate from teammates.`,
+      );
     return {
-      chat: {
+      record: {
         id: task.id,
-        name: task.name ?? null,
+        ...(task.name ? { teammate: task.name, job: task.teammate?.job ?? '' } : {}),
         goal: task.title,
         doneWhen: task.doneWhen,
         status: task.status,
@@ -343,7 +381,7 @@ export function createTasks(options: {
         nextCheck: task.nextCheck,
         updatedAt: task.updatedAt,
       },
-      ...(await latestChatMessages(client, ownerId, threadId, task.id)),
+      ...(task.name ? await latestChatMessages(client, ownerId, task.id) : {}),
     };
   }
 
@@ -371,7 +409,7 @@ export function createTasks(options: {
   async function modelTask(id: string) {
     const task = (
       await pool.query<{ title: string }>(
-        'SELECT title FROM tasks WHERE id=$1 AND owner_id=$2 AND session_id=id',
+        'SELECT COALESCE(name,title) AS title FROM tasks WHERE id=$1 AND owner_id=$2 AND session_id=id',
         [z.uuid().parse(id), ownerId],
       )
     ).rows[0];
@@ -463,7 +501,6 @@ export function createTasks(options: {
             await restartChatRequest(
               client,
               ownerId,
-              threadId,
               row.task_id,
               ownerChatRequest(text, row.name!),
             );
@@ -505,20 +542,19 @@ export function createTasks(options: {
     const chat = (
       await client.query(
         `SELECT t.id AS task_id,t.turn_id AS id,t.session_id,t.name,t.state,${active} FROM tasks t
-         JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
-         WHERE t.owner_id=$1 AND u.thread_id=$2 AND t.id=$3 AND t.name IS NOT NULL AND t.session_id=t.id
+         WHERE t.owner_id=$1 AND t.id=$2 AND t.name IS NOT NULL AND t.archived_at IS NULL AND t.session_id=t.id
          FOR NO KEY UPDATE OF t`,
-        [ownerId, threadId, chatId],
+        [ownerId, chatId],
       )
     ).rows[0];
-    if (!chat) throw failure('This chat is unavailable in this conversation.', 404);
+    if (!chat) throw failure('This teammate was removed.', 404);
     if (messageId) {
       const inChat = await client.query(
         `SELECT 1 FROM messages m WHERE m.id=$1 AND m.owner_id=$2 AND ${inChatSql('m', '$3::uuid')}`,
         [messageId, ownerId, chatId],
       );
       if (!inChat.rowCount || (replied && replied.task_id !== chat.task_id))
-        throw Object.assign(failure('That message belongs to another chat.', 409), {
+        throw Object.assign(failure('That message belongs to another teammate’s chat.', 409), {
           code: 'chat_mismatch',
         });
     }
@@ -625,7 +661,6 @@ export function createTasks(options: {
       [sourceMessageId, turnId, ownerId],
     );
     if (!claimed.rowCount) return;
-    await reviveChat(client, ownerId, task.thread_id, taskId);
     await recordInput(client, taskId, turnId);
   }
 
@@ -639,7 +674,7 @@ export function createTasks(options: {
     const task = (
       await client.query(
         `SELECT t.session_id FROM tasks t JOIN turns u ON u.id=t.turn_id
-       WHERE t.id=$1 AND t.owner_id=$2 AND u.thread_id=$3 FOR NO KEY UPDATE OF t`,
+       WHERE t.id=$1 AND t.owner_id=$2 AND (u.thread_id=$3 OR t.name IS NOT NULL) FOR NO KEY UPDATE OF t`,
         [id, ownerId, threadId],
       )
     ).rows[0];
@@ -673,15 +708,10 @@ export function createTasks(options: {
   ) {
     const request = input.parse(raw);
     if (request.action === 'list') return { tasks: await read(client) };
-    if (request.action === 'read') return chatRecord(client, turn.threadId, request.chat);
+    if (request.action === 'read') return teammateRecord(client, turn.threadId, request.id);
     const current = (
       await client.query('SELECT * FROM turns WHERE id=$1 AND owner_id=$2', [turn.turnId, ownerId])
     ).rows[0];
-    if (request.action === 'name') {
-      if (current.task_id !== request.id) throw failure('Only a chat itself can set its name.');
-      await nameAutoChat(client, ownerId, turn.threadId, request.id, request.name);
-      return (await read(client, { id: request.id, closed: true }))[0];
-    }
     if (request.action === 'reply') {
       if (current.task_id || current.session_id !== turn.threadId || !sourceMessageId)
         throw failure('Only the main chat can send owner updates to tasks.');
@@ -738,36 +768,27 @@ export function createTasks(options: {
       }
       id = randomUUID();
       const independent = current.proactive || current.session_id === turn.threadId;
-      const named = request.name !== undefined || request.chat !== undefined || request.pinned;
-      if (named && (current.proactive || !independent || !sourceMessageId))
-        throw failure('Only the main chat can start a named chat or give one its next request.');
-      if (request.chat && (request.name || request.model || request.key))
-        throw failure('Use chat alone to give an existing chat its next request.');
-      const ownerStarted = independent && !current.proactive && Boolean(sourceMessageId);
-      const name =
-        request.name !== undefined
-          ? chatName(request.name)
-          : ownerStarted && !request.chat
-            ? await defaultChatName(client, ownerId, turn.threadId, request.title)
-            : null;
-      if (request.name !== undefined)
-        await assertNewChat(client, ownerId, turn.threadId, name!, request.newBecause);
-      const reused = request.chat
+      if (request.teammate && (current.proactive || !independent || !sourceMessageId))
+        throw failure('Only the main chat can hand an owner request to a teammate.');
+      if (request.teammate && (request.model || request.key))
+        throw failure('Use teammate alone to hand an owner request to a teammate.');
+      const reused = request.teammate
         ? (
             await client.query<{ id: string; name: string; state: string; active: boolean }>(
               `SELECT t.id,t.name,t.state,EXISTS (SELECT 1 FROM turns a WHERE a.owner_id=t.owner_id
-                 AND a.session_id=t.session_id AND a.status IN ('queued','running')) AS active
-               FROM tasks t JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
-               WHERE t.id=$1 AND t.owner_id=$2 AND u.thread_id=$3 AND t.name IS NOT NULL AND t.session_id=t.id
+                 AND a.session_id=t.session_id AND a.status IN ('queued','running','waiting')) AS active
+               FROM tasks t
+               WHERE t.id=$1 AND t.owner_id=$2 AND t.name IS NOT NULL AND t.archived_at IS NULL AND t.session_id=t.id
                FOR NO KEY UPDATE OF t`,
-              [request.chat, ownerId, turn.threadId],
+              [request.teammate, ownerId],
             )
           ).rows[0]
         : undefined;
-      if (request.chat && !reused) throw failure('Chat not found.', 404);
+      if (request.teammate && !reused)
+        throw failure('No teammate has this id. Pass the id of a teammate from teammates.', 404);
       if (reused && (reused.state === 'open' || reused.active))
         throw failure(
-          `${reused.name} is still working. Use reply with its id to send it this message.`,
+          `${reused.name} is still working on something. Use reply with its id to send it this message.`,
         );
       if (request.model && (current.proactive || !independent || !sourceMessageId))
         throw failure('Only a task you start from chat can have its own model.');
@@ -790,11 +811,7 @@ export function createTasks(options: {
         ? null
         : prior && resemblesTaskAcknowledgement(prior.text, request.message, priorHandoff)
           ? prior.id
-          : await insertAssistantMessage(
-              client,
-              turn,
-              startLine(request.name ?? reused?.name, request.message),
-            );
+          : await insertAssistantMessage(client, turn, request.message);
       const sessionId = independent ? id : current.session_id;
       if (reused) {
         id = reused.id;
@@ -805,7 +822,7 @@ export function createTasks(options: {
           )
         ).rows[0];
         if (!source) throw failure('Owner request not found.');
-        await restartChatRequest(client, ownerId, turn.threadId, id, {
+        await restartChatRequest(client, ownerId, id, {
           title: request.title,
           doneWhen: request.doneWhen,
           brief: request.brief ?? request.doneWhen,
@@ -813,15 +830,16 @@ export function createTasks(options: {
           steps: request.steps,
           waitingFor: request.waitingFor,
           nextCheck: request.nextCheck,
-          pinned: request.pinned,
         });
         await client.query(
-          `WITH earlier AS (SELECT message_id FROM tasks WHERE id=$1 AND owner_id=$2),
-             moved AS (UPDATE tasks SET source_message_id=$3,message_id=$4 WHERE id=$1 AND owner_id=$2)
-           UPDATE messages m SET hidden_at=now() FROM earlier
-           WHERE m.id=earlier.message_id AND m.owner_id=$2 AND m.id IS DISTINCT FROM $4::uuid AND m.hidden_at IS NULL`,
+          'UPDATE tasks SET source_message_id=$3,message_id=$4 WHERE id=$1 AND owner_id=$2',
           [id, ownerId, sourceMessageId, messageId],
         );
+        await client.query('UPDATE messages SET handoff=$3 WHERE id=$1 AND owner_id=$2', [
+          messageId,
+          ownerId,
+          JSON.stringify({ teammate: id, title: request.title }),
+        ]);
         const child = await enqueueTurn(source.text, {
           source: 'task',
           proactive: false,
@@ -840,8 +858,8 @@ export function createTasks(options: {
         await recordInput(client, id, child);
       } else {
         await client.query(
-          `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,message_id,title,done_when,brief,now_text,steps,waiting_for,next_check,applied_revision,activity_key,model,name,pinned,name_auto)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+          `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,message_id,title,done_when,brief,now_text,steps,waiting_for,next_check,applied_revision,activity_key,model)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
           [
             id,
             ownerId,
@@ -859,9 +877,6 @@ export function createTasks(options: {
             independent ? 0 : 1,
             current.proactive ? `${turn.threadId}:${request.key}` : null,
             model ? JSON.stringify(model) : null,
-            name,
-            request.pinned ?? false,
-            name !== null && request.name === undefined,
           ],
         );
         if (independent) {
@@ -916,13 +931,13 @@ export function createTasks(options: {
             )
           : await client.query(
               `UPDATE tasks SET state=$3,result=$4,closed_at=now(),updated_at=now() WHERE id=$1 AND owner_id=$2 AND state='open'
-           AND applied_revision=revision AND (name IS NULL OR length($4)<=${chatResultLimit})`,
+           AND applied_revision=revision AND (name IS NULL OR length($4)<=${teammateResultLimit})`,
               [id, ownerId, request.status, request.result],
             );
       if (
         !updated.rowCount &&
         request.action === 'finish' &&
-        request.result.length > chatResultLimit &&
+        request.result.length > teammateResultLimit &&
         (
           await client.query(
             "SELECT 1 FROM tasks WHERE id=$1 AND owner_id=$2 AND state='open' AND applied_revision=revision AND name IS NOT NULL",
@@ -931,7 +946,7 @@ export function createTasks(options: {
         ).rowCount
       )
         throw failure(
-          `A chat's result is one sentence of at most ${chatResultLimit} characters: the owner reads it in their main chat. Call finish again with that sentence, then give the full answer as your final text.`,
+          `A chat's result is one sentence of at most ${teammateResultLimit} characters: the owner reads it in their main chat. Call finish again with that sentence, then give the full answer as your final text.`,
         );
       if (!updated.rowCount)
         throw failure(
@@ -1049,7 +1064,17 @@ export function createTasks(options: {
       doneWhen: row.done_when,
       revision: row.revision,
       messageId: row.message_id,
-      ...(row.name ? { name: row.name, ...(row.name_auto ? { nameAuto: true } : {}) } : {}),
+      ...(row.name
+        ? {
+            teammate: {
+              name: row.name,
+              job: row.job,
+              instructions: row.instructions,
+              memory: row.memory,
+              setup: !row.job,
+            },
+          }
+        : {}),
     };
   }
 
@@ -1080,7 +1105,7 @@ export function createTasks(options: {
       CREATE INDEX IF NOT EXISTS tasks_owner ON tasks(owner_id,state,updated_at DESC);
       ALTER TABLE turns ADD COLUMN IF NOT EXISTS task_id uuid REFERENCES tasks(id);
       CREATE INDEX IF NOT EXISTS turns_task ON turns(task_id) WHERE task_id IS NOT NULL;
-      ${chatColumnsSql}
+      ${teammateColumnsSql}
       CREATE INDEX IF NOT EXISTS turns_task_message ON turns(message_id) WHERE task_id IS NOT NULL;
       CREATE INDEX IF NOT EXISTS tasks_message ON tasks(owner_id,message_id);
     `);
@@ -1124,6 +1149,101 @@ export function createTasks(options: {
     };
   }
 
+  async function updateTeammate(
+    client: PoolClient,
+    id: string,
+    change: z.infer<typeof teammateChange>,
+  ) {
+    const teammate = (
+      await client.query<{ name: string }>(
+        `SELECT name FROM tasks WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL AND archived_at IS NULL
+         FOR NO KEY UPDATE`,
+        [id, ownerId],
+      )
+    ).rows[0];
+    if (!teammate) throw failure('This teammate was removed.', 404);
+    const name = change.name === undefined ? null : validName(change.name);
+    if (name) await assertNameFree(client, ownerId, name, id);
+    if (change.channels?.length)
+      await client.query(
+        `UPDATE tasks SET channels=ARRAY(SELECT c FROM unnest(channels) c WHERE NOT c=ANY($3::text[])),updated_at=now()
+         WHERE owner_id=$1 AND id<>$2 AND name IS NOT NULL AND channels && $3::text[]`,
+        [ownerId, id, change.channels],
+      );
+    await client.query(
+      `UPDATE tasks SET name=COALESCE($3,name),avatar=COALESCE($4::jsonb,avatar),job=COALESCE($5,job),
+         instructions=COALESCE($6,instructions),memory=COALESCE($7,memory),channels=COALESCE($8::text[],channels),
+         updated_at=now()
+       WHERE id=$1 AND owner_id=$2`,
+      [
+        id,
+        ownerId,
+        name,
+        change.avatar ? JSON.stringify(change.avatar) : null,
+        change.job ?? null,
+        change.instructions ?? null,
+        change.memory ?? null,
+        change.channels ?? null,
+      ],
+    );
+  }
+
+  const agentTeammateChange = z
+    .object({
+      id: z.uuid(),
+      name: z.string().optional(),
+      job: z.string().trim().min(1).max(teammateJobLimit).optional(),
+      instructions: z.string().trim().max(teammateInstructionsLimit).optional(),
+      mark: z.enum(teammateMarks).optional(),
+      hue: z.enum(teammateHues).optional(),
+      teammate: z.string().optional(),
+    })
+    .strict();
+
+  async function validateTeammateUpdate(args: Record<string, unknown>) {
+    const { teammate: _shown, ...input } = agentTeammateChange.parse(args);
+    const { id, ...change } = input;
+    if (!Object.keys(change).length) throw failure('Choose a detail to update.');
+    const current = (
+      await pool.query<{ name: string; avatar: TeammateAvatar | null }>(
+        'SELECT name,avatar FROM tasks WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL AND archived_at IS NULL',
+        [id, ownerId],
+      )
+    ).rows[0];
+    if (!current)
+      throw failure('No teammate has this id. Pass the id of a teammate from teammates.', 404);
+    if (change.name !== undefined) await assertNameFree(pool, ownerId, validName(change.name), id);
+    return { ...input, teammate: current.name };
+  }
+
+  async function applyTeammateUpdate(client: PoolClient, args: Record<string, unknown>) {
+    const { id, mark, hue, teammate: _shown, ...change } = agentTeammateChange.parse(args);
+    const avatar =
+      mark === undefined && hue === undefined
+        ? undefined
+        : await client
+            .query<{ avatar: TeammateAvatar | null }>(
+              'SELECT avatar FROM tasks WHERE id=$1 AND owner_id=$2',
+              [id, ownerId],
+            )
+            .then(({ rows }) => {
+              const current = rows[0]?.avatar ?? { hue: 'pink' as const };
+              return {
+                hue: hue ?? current.hue,
+                ...(mark !== undefined
+                  ? { mark }
+                  : current.image
+                    ? { image: current.image }
+                    : current.mark !== undefined
+                      ? { mark: current.mark }
+                      : {}),
+              };
+            });
+    await updateTeammate(client, id, { ...change, ...(avatar ? { avatar } : {}) });
+    afterCommit(client, refresh);
+    return (await read(client, { id, closed: true }))[0];
+  }
+
   function registerRoutes(app: FastifyInstance) {
     app.get('/api/tasks', async () => (await read(pool, { closed: true })).map(shown));
     app.patch<{ Params: { id: string } }>('/api/tasks/:id', async (request) => {
@@ -1140,139 +1260,97 @@ export function createTasks(options: {
       refresh();
       return { ok: true };
     });
-    app.post('/api/chats', async (request) => {
-      const body = z
-        .object({
-          name: z.string().optional(),
-          brief: z.string().trim().max(2000).optional(),
-          from: z.uuid().optional(),
-        })
+    app.post('/api/teammates', async (request) => {
+      z.object({})
         .strict()
-        .refine((value) => !(value.from && (value.name || value.brief)), {
-          message: 'A chat continued from the main chat takes its name and brief from there.',
-        })
-        .parse(request.body);
-      let id: string = randomUUID();
+        .parse(request.body ?? {});
+      const id = randomUUID();
       await transaction(async (client) => {
-        const thread = await lockThread(client);
-        const origin = body.from
-          ? (
-              await client.query<{ request: string | null; chat: string | null }>(
-                `SELECT q.text AS request,
-                   (SELECT k.id FROM tasks k WHERE k.owner_id=m.owner_id AND k.continued_from=m.id
-                     ORDER BY k.created_at LIMIT 1) AS chat
-                 FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
-                 LEFT JOIN messages q ON q.id=u.message_id AND q.owner_id=m.owner_id AND q.role='user'
-                   AND q.hidden_at IS NULL AND NOT ${withdrawnSql('q')}
-                 WHERE m.id=$1 AND m.owner_id=$2 AND m.thread_id=$3 AND m.role='assistant'
-                   AND m.hidden_at IS NULL AND NOT m.chat_only AND m.text<>'' AND u.session_id=$3
-                   AND NOT ${withdrawnSql('m')}`,
-                [body.from, ownerId, thread.id],
-              )
-            ).rows[0]
-          : undefined;
-        if (body.from && !origin)
-          throw failure('This answer can’t be continued in a side chat.', 404);
-        if (origin?.chat) {
-          id = origin.chat;
-          await reviveChat(client, ownerId, thread.id, id);
-          return;
-        }
-        const request = origin?.request ? ownerChatRequest(origin.request, 'Side chat') : undefined;
-        const given = body.name !== undefined;
-        const name = given
-          ? chatName(body.name!)
-          : await defaultChatName(client, ownerId, thread.id, origin ? 'Side chat' : 'New chat');
-        if (given) await assertChatNameFree(client, ownerId, thread.id, name);
-        const turnId = randomUUID();
+        await lockThread(client);
+        const used = (
+          await client.query<{ avatar: TeammateAvatar | null }>(
+            'SELECT avatar FROM tasks WHERE owner_id=$1 AND name IS NOT NULL AND archived_at IS NULL',
+            [ownerId],
+          )
+        ).rows.map((row) => row.avatar);
+        const pick = <T>(values: readonly T[], taken: Array<T | undefined>) => {
+          const free = values.filter((value) => !taken.includes(value));
+          const pool = free.length ? free : values;
+          return pool[Math.floor(Math.random() * pool.length)]!;
+        };
+        const avatar: TeammateAvatar = {
+          hue: pick(
+            teammateHues.filter((hue) => hue !== 'gray' && hue !== 'pink'),
+            used.map((item) => item?.hue),
+          ),
+          mark: pick(
+            teammateMarks.filter(Boolean),
+            used.map((item) => item?.mark),
+          ),
+        };
+        const name = await freeTeammateName(client, ownerId, 'New teammate');
+        const turnId = await enqueueTurn(teammateSetupPrompt, {
+          source: 'task',
+          proactive: false,
+          sessionId: id,
+          channel: 'web',
+          background: true,
+          client,
+        });
         await client.query(
-          `INSERT INTO turns(id,owner_id,thread_id,session_id,source,prompt,status,background,finished_at)
-           VALUES($1,$2,$3,$4,'user',$5,'succeeded',true,now())`,
-          [turnId, ownerId, thread.id, id, `New chat: ${name}`],
-        );
-        await client.query(
-          `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,brief,now_text,state,closed_at,applied_revision,name,pinned,name_auto,continued_from)
-           VALUES($1,$2,$3,$1,$4,$5,$6,'','done',now(),1,$7,true,$8,$9)`,
+          `INSERT INTO tasks(id,owner_id,turn_id,session_id,title,done_when,brief,now_text,applied_revision,name,avatar,memory)
+           VALUES($1,$2,$3,$1,$4,$5,$6,'',0,$7,$8,'read')`,
           [
             id,
             ownerId,
             turnId,
-            request?.title ?? name,
-            'Each request in this chat is answered.',
-            body.brief ||
-              (origin
-                ? `The owner continued this chat from their main chat, where you answered their request. ${request ? `Their request there: ${request.title}` : 'Its first request here sets its subject.'}`
-                : given
-                  ? `The owner created this chat by hand. Its name, ${name}, is its subject.`
-                  : 'The owner created this chat by hand. Its first request sets its subject.'),
+            'Set up this teammate',
+            'The owner has given this teammate its job and it said it is ready.',
+            'The owner just created this teammate. Its setup chat gives it a job, instructions, a name and a model.',
             name,
-            !given,
-            body.from ?? null,
+            JSON.stringify(avatar),
           ],
         );
-        await client.query('UPDATE turns SET task_id=$1 WHERE id=$2 AND owner_id=$3', [
-          id,
-          turnId,
-          ownerId,
-        ]);
+        await client.query(
+          'UPDATE turns SET task_id=$1,task_revision=1 WHERE id=$2 AND owner_id=$3',
+          [id, turnId, ownerId],
+        );
       }, pool);
       refresh();
       return (await read(pool, { id, closed: true }))[0];
     });
-    app.patch<{ Params: { id: string } }>('/api/chats/:id', async (request) => {
+    app.patch<{ Params: { id: string } }>('/api/teammates/:id', async (request) => {
       const id = z.uuid().parse(request.params.id);
-      const change = z
-        .object({
-          name: z.string().optional(),
-          pinned: z.boolean().optional(),
-          archived: z.boolean().optional(),
-        })
-        .strict()
-        .parse(request.body);
+      const change = teammateChange.parse(request.body);
       await transaction(async (client) => {
-        const thread = await lockThread(client);
-        const chat = (
-          await client.query<{ name: string; state: string }>(
-            `SELECT t.name,t.state FROM tasks t JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
-             WHERE t.id=$1 AND t.owner_id=$2 AND u.thread_id=$3 AND t.name IS NOT NULL FOR NO KEY UPDATE OF t`,
-            [id, ownerId, thread.id],
-          )
-        ).rows[0];
-        if (!chat) throw failure('Chat not found.', 404);
-        const name = change.name === undefined ? chat.name : chatName(change.name);
-        if (change.name !== undefined || change.archived === false)
-          await assertChatNameFree(client, ownerId, thread.id, name, id);
-        if (
-          change.archived &&
-          (chat.state === 'open' ||
-            (
-              await client.query(
-                `SELECT 1 FROM turns u WHERE u.owner_id=$1 AND u.session_id=$2
-                   AND (u.status IN ('queued','running') OR (${waitingTurnSql('u')})) LIMIT 1`,
-                [ownerId, id],
-              )
-            ).rowCount)
-        )
-          throw Object.assign(
-            failure(`${chat.name} is still working. Stop it before you archive it.`, 409),
-            { code: 'chat_active' },
-          );
-        await client.query(
-          `UPDATE tasks SET name=$3,name_auto=name_auto AND $6,pinned=COALESCE($4,pinned),
-             archived_at=CASE WHEN $5::boolean IS NULL THEN archived_at WHEN $5 THEN now() END,updated_at=now()
-           WHERE id=$1 AND owner_id=$2`,
-          [
-            id,
-            ownerId,
-            name,
-            change.pinned ?? null,
-            change.archived ?? null,
-            change.name === undefined,
-          ],
-        );
+        await lockThread(client);
+        await updateTeammate(client, id, change);
       }, pool);
       refresh();
       return (await read(pool, { id, closed: true }))[0];
+    });
+    app.delete<{ Params: { id: string } }>('/api/teammates/:id', async (request) => {
+      const id = z.uuid().parse(request.params.id);
+      const capture = snapshotAnalytics(options.analytics);
+      await transaction(async (client) => {
+        const thread = await lockThread(client);
+        const teammate = (
+          await client.query<{ name: string }>(
+            `SELECT name FROM tasks WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL AND archived_at IS NULL
+             FOR NO KEY UPDATE`,
+            [id, ownerId],
+          )
+        ).rows[0];
+        if (!teammate) throw failure('This teammate was already removed.', 404);
+        await stop(client, id, thread.id, capture, 'owner');
+        await client.query(
+          `UPDATE tasks SET archived_at=now(),channels='{}',updated_at=now() WHERE id=$1 AND owner_id=$2`,
+          [id, ownerId],
+        );
+        await options.removeTeammateMemory?.(id);
+      }, pool);
+      refresh();
+      return { ok: true };
     });
     app.put<{ Params: { id: string } }>('/api/tasks/:id/model', async (request) => {
       const id = z.uuid().parse(request.params.id);
@@ -1404,9 +1482,7 @@ export function createTasks(options: {
             .filter(
               (task) =>
                 !idleStatuses.has(task.status) ||
-                (task.name &&
-                  !task.archivedAt &&
-                  (task.pinned || Date.parse(task.closedAt ?? '') > recent)),
+                (task.name && !task.archivedAt && Date.parse(task.closedAt ?? '') > recent),
             )
             .slice(0, 12)
             .map(shown)
@@ -1468,6 +1544,8 @@ export function createTasks(options: {
     context,
     resolveReply,
     chatCommand,
+    validateTeammateUpdate,
+    applyTeammateUpdate,
     read: async (thread?: string) => (await read(pool, { closed: true, thread })).map(shown),
     ledger: async (thread?: string) =>
       (await read(pool, { closed: true, thread })).filter((task) => !task.archivedAt).map(shown),

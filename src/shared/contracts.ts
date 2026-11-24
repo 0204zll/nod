@@ -3,6 +3,7 @@ import type { TaskSuggestions } from './onboarding';
 import type { TrustBecause } from './trust';
 import type { AnswerChoices } from './answer-choices';
 import type { ModelIssue, ModelSelection, WorkKind } from './models';
+import type { TeammateProfile } from './teammates';
 export type TurnStatus = 'queued' | 'running' | 'succeeded' | 'waiting' | 'failed' | 'cancelled';
 export interface Artifact {
   id: string;
@@ -44,6 +45,7 @@ export interface Message {
   chatId?: string | null;
   inMain?: boolean;
   chatReport?: boolean;
+  handoff?: { teammate: string; title: string } | null;
 }
 export type ApprovalState = 'pending' | 'working' | 'done' | 'declined' | 'expired' | 'uncertain';
 export interface MessageApproval {
@@ -329,13 +331,12 @@ export interface Task {
   work?: WorkKind;
   scheduleModel?: ModelSelection;
   name?: string;
-  pinned?: boolean;
-  nameAuto?: boolean;
   lastReply?: string | null;
+  lastMessage?: { from: 'owner' | 'teammate'; text: string } | null;
   archivedAt?: string | null;
   chatOnly?: { count: number; latestAt: string | null; latestId: string | null };
-  continuedFrom?: string;
   requestMessageId?: string;
+  teammate?: TeammateProfile;
 }
 export interface TaskDetail {
   task: Task;

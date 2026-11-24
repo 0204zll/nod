@@ -1,21 +1,18 @@
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { flushSync } from 'react-dom';
 import { ArrowLeft } from './components/icons';
 import { Chat } from './pages/chat';
-import { DraftChat, NamedChat, type FirstChatMessage } from './pages/named-chat';
-import { ChatHeader, ChatList } from './components/named-chats';
-import { movePanel } from './lib/panel-motion';
+import { TeammateChat } from './pages/teammate-chat';
+import { TeammatesPage } from './pages/teammates';
+import { ChatTop, TeammateNav, TeammatePanel, Toasts } from './components/teammates';
+import { SettingsNav, teammatesSettingsPath } from './components/settings-nav';
 import {
-  chatIdOf,
-  chatPath,
   chatUnread,
-  draftChatPath,
-  earlierChats,
-  isNamedChat,
   readChatCursors,
-  sidebarChats,
+  teammateIdOf,
+  teammatePath,
+  teammatesOf,
   writeChatCursor,
-} from './lib/named-chats';
+} from './lib/teammates';
 import { Usage } from './pages/usage';
 import { Vault } from './pages/vault';
 import { Apps } from './pages/apps';
@@ -36,7 +33,13 @@ import { PageHeader } from './components/page-title';
 import { DesktopUpdateToast } from './components/desktop-update-toast';
 import { FeedbackDialog } from './components/feedback';
 import { createFeedbackCapture } from './lib/feedback-capture';
-import { navigate, replaceNavigation, sidebarItems, subscribeNavigation } from './lib/navigation';
+import {
+  navigate,
+  replaceNavigation,
+  sidebarItems,
+  sidebarSection,
+  subscribeNavigation,
+} from './lib/navigation';
 import { appPagePath, preparedWorkId } from '../shared/app-links';
 import { BrowserWindow } from './pages/browser';
 import { readUiPreference, writeUiPreference } from './lib/ui-preferences';
@@ -142,18 +145,27 @@ function Workspace({
   } | null>();
   const [chatRequests, setChatRequests] = useState<Array<{ id: string; text: string }>>([]);
   const ownerId = session.user!.id;
-  const openChatId = chatIdOf(path);
-  const draftOpen = path === draftChatPath;
-  const [firstMessages, setFirstMessages] = useState<Record<string, FirstChatMessage>>({});
-  const [chatCursors, setChatCursors] = useState<Record<string, string>>({});
+  const openChatId = teammateIdOf(path);
+  const [chatCursors, setChatCursors] = useState<Record<string, string>>(() =>
+    readChatCursors(ownerId),
+  );
+  const [panelOpen, setPanelOpen] = useState(false);
+  const teammates = teammatesOf(state?.tasks);
+  const openTeammate = teammates.find((teammate) => teammate.id === openChatId);
+  const inSettings =
+    path === teammatesSettingsPath ||
+    sidebarSection(path) === 'settings' ||
+    sidebarSection(path) === 'scheduled';
   useEffect(() => {
-    if (state?.threadId) setChatCursors(readChatCursors(ownerId, state.threadId));
-  }, [ownerId, state?.threadId]);
-  const namedChats = sidebarChats(state?.tasks, chatCursors, openChatId);
-  const openChat = state?.tasks?.filter(isNamedChat).find((task) => task.id === openChatId);
+    const changed = () => void refresh();
+    window.addEventListener('nod:teammates-changed', changed);
+    return () => window.removeEventListener('nod:teammates-changed', changed);
+  }, [refresh]);
+  const lastSettings = useRef(teammatesSettingsPath);
+  if (inSettings) lastSettings.current = path;
   const chatTurns = new Set(
     (state?.activity ?? [])
-      .filter((item) => state?.tasks?.some((task) => task.id === item.taskId && task.name))
+      .filter((item) => teammates.some((teammate) => teammate.id === item.taskId))
       .map((item) => item.turnId),
   );
   const mainStreams = chatTurns.size
@@ -163,6 +175,16 @@ function Workspace({
         ),
       )
     : streams;
+  const lastMain = state?.messages.findLast((message) => message.text.trim());
+  const nodLine = lastMain
+    ? `${lastMain.role === 'user' ? 'You: ' : ''}${lastMain.text.replace(/\s+/g, ' ').trim()}`
+    : '';
+  const nodWorking = Boolean(
+    connected &&
+    state?.activity?.some(
+      (item) => !item.background && !teammates.some((teammate) => teammate.id === item.taskId),
+    ),
+  );
   const askInChat = (text: string) => {
     setChatRequests((current) => [...current, { id: crypto.randomUUID(), text }]);
     navigate('/');
@@ -173,7 +195,7 @@ function Workspace({
     setNotificationTarget(undefined);
     if (notificationTarget && notificationTarget.threadId !== state?.threadId) return;
     const chatId = notificationTarget?.chatId;
-    navigate(chatId ? chatPath(chatId) : '/');
+    navigate(chatId ? teammatePath(chatId) : '/');
     if (notificationTarget)
       window.setTimeout(
         () =>
@@ -222,79 +244,64 @@ function Workspace({
     writeUiPreference('nod.side-panel', panelHidden ? 'hidden' : 'shown');
   }, [panelHidden]);
   const shell = useRef<HTMLDivElement>(null);
-  function toggleSidebar(animate: boolean) {
-    movePanel(shell.current, () => flushSync(() => setPanelHidden((value) => !value)), animate);
+  function toggleSidebar() {
+    setPanelHidden((value) => !value);
   }
+  const showPanel = panelOpen && (path === '/' || Boolean(openTeammate));
+  const togglePanel = () => setPanelOpen((value) => !value);
   return (
     <div
       ref={shell}
-      className={`app-shell ${panelHidden ? 'panel-hidden' : ''} ${entering ? 'shell-entering' : ''} ${settingsPage(path) ? 'settings-open' : ''}`}
+      className={`app-shell${panelHidden ? ' panel-hidden' : ''}${entering ? ' shell-entering' : ''}${settingsPage(path) ? ' settings-open' : ''}${showPanel ? ' with-panel' : ''}`}
     >
       <a href="#workspace" className="skip-link">
         Skip to content
       </a>
       <Sidebar
-        path={path}
-        chats={
-          <ChatList
-            chats={namedChats}
+        nav={
+          <TeammateNav
+            teammates={teammates}
             activeId={openChatId}
             mainActive={path === '/'}
-            mainWorking={Boolean(
-              connected &&
-              state?.activity?.some(
-                (item) =>
-                  !item.background &&
-                  !state.tasks?.some((task) => task.id === item.taskId && task.name),
-              ),
-            )}
-            mainUnread={path !== '/' && (unread.count > 0 || unread.pending)}
-            draftActive={draftOpen}
-            unread={(chat) => chat.id !== openChatId && chatUnread(chat, chatCursors)}
-            earlier={earlierChats(state?.tasks, namedChats)}
+            nodLine={nodLine}
+            nodWorking={nodWorking}
+            nodUnread={path !== '/' && (unread.count > 0 || unread.pending)}
+            settingsActive={inSettings}
+            unread={(teammate) => chatUnread(teammate, chatCursors)}
             onNavigate={navigate}
-            onChanged={() => void refresh()}
+            onSettings={() => navigate(lastSettings.current)}
+            onOpenPanel={(id) => {
+              navigate(teammatePath(id));
+              setPanelOpen(true);
+            }}
           />
-        }
-        unreadCount={Math.max(
-          0,
-          unread.count -
-            (state && unread.cursor
-              ? state.messages.filter(
-                  (message) =>
-                    message.role === 'assistant' &&
-                    message.chatId &&
-                    message.createdAt > unread.cursor!.createdAt &&
-                    (chatCursors[message.chatId] ?? '') >= message.createdAt,
-                ).length
-              : 0),
-        )}
-        unreadPending={unread.pending}
-        presence={
-          !connected
-            ? undefined
-            : state?.turns[0]?.status === 'waiting' ||
-                state?.tasks?.some((task) => task.status === 'needs_you')
-              ? 'waiting'
-              : state?.activity?.some((item) => !item.background)
-                ? 'working'
-                : undefined
         }
         panelHidden={panelHidden}
         onToggle={toggleSidebar}
         onNavigate={navigate}
-        account={account}
       />
       <div className="workspace-frame">
         <div className="workspace-body">
-          <main id="workspace" className="main-workspace" tabIndex={-1}>
+          <main
+            id="workspace"
+            className={`main-workspace${inSettings ? ' main-settings' : ''}`}
+            tabIndex={-1}
+          >
+            {inSettings && <SettingsNav path={path} account={account} onNavigate={navigate} />}
             <PageHeader path={path} />
-            <div className="chat-route" hidden={path !== '/'}>
-              {state && <ChatHeader main toolsRef={setMainTools} />}
+            <div className="chat-route chat-surface" hidden={path !== '/'}>
+              {state && (
+                <ChatTop
+                  panelOpen={showPanel}
+                  onTogglePanel={togglePanel}
+                  toolsRef={setMainTools}
+                />
+              )}
               {state ? (
                 <Chat
-                  ownerId={session.user!.id}
+                  ownerId={ownerId}
                   state={state}
+                  teammates={teammates}
                   streams={mainStreams}
                   connected={connected}
                   refresh={refresh}
@@ -324,48 +331,42 @@ function Workspace({
                 <ChatSkeleton />
               )}
             </div>
-            {(path === '/usage' || path === '/vault') && (
-              <>
-                <Usage hidden={path !== '/usage'} />
-                <Vault hidden={path !== '/vault'} onAsk={askInChat} />
-              </>
-            )}
-            {openChatId && state && openChat && (
-              <NamedChat
-                key={openChat.id}
-                chat={openChat}
+            {openTeammate && state && (
+              <TeammateChat
+                key={openTeammate.id}
+                teammate={openTeammate}
+                teammates={teammates}
                 ownerId={ownerId}
                 state={state}
                 streams={streams}
                 connected={connected}
                 refresh={refresh}
                 visible
+                panelOpen={showPanel}
+                onTogglePanel={togglePanel}
                 onNavigate={navigate}
-                onRead={(chatId, at) =>
-                  setChatCursors(writeChatCursor(ownerId, state.threadId, chatId, at))
-                }
+                onRead={(chatId, at) => setChatCursors(writeChatCursor(ownerId, chatId, at))}
                 onFeedback={onFeedback}
-                firstMessage={firstMessages[openChat.id]}
-                onFirstMessageSent={() =>
-                  setFirstMessages(({ [openChat.id]: _sent, ...rest }) => rest)
-                }
               />
             )}
-            {draftOpen && state && (
-              <DraftChat
-                ownerId={ownerId}
-                threadId={state.threadId}
-                ready={state.configuration.llmReady && connected}
-                refresh={refresh}
+            {path === teammatesSettingsPath && (
+              <TeammatesPage
+                teammates={teammates}
                 onNavigate={navigate}
-                onCreated={(chat, first) => {
-                  setFirstMessages((current) => ({ ...current, [chat.id]: first }));
-                  navigate(chatPath(chat.id));
+                onOpenSettings={(id) => {
+                  navigate(id ? teammatePath(id) : '/');
+                  setPanelOpen(true);
                 }}
               />
             )}
+            {(path === '/usage' || path === '/vault') && (
+              <>
+                <Usage hidden={path !== '/usage'} />
+                <Vault hidden={path !== '/vault'} onAsk={askInChat} />
+              </>
+            )}
             {path === '/apps' && (
-              <Apps key={session.user!.id} configuration={state?.configuration} onAsk={askInChat} />
+              <Apps key={ownerId} configuration={state?.configuration} onAsk={askInChat} />
             )}
             {path === '/channels' && <Channels />}
             {path === '/tasks' && (
@@ -375,8 +376,8 @@ function Workspace({
             {settings}
             {!settingsPage(path) &&
               !preparedWorkId(path) &&
-              !(openChatId && (openChat || !state)) &&
-              !draftOpen &&
+              path !== teammatesSettingsPath &&
+              !(openChatId && (openTeammate || !state)) &&
               !sidebarItems.some((item) => item.path === path) && (
                 <div className="empty-state">
                   <h1>This page isn’t here.</h1>
@@ -394,6 +395,18 @@ function Workspace({
           </main>
         </div>
       </div>
+      {showPanel && (
+        <TeammatePanel
+          teammate={path === '/' ? undefined : openTeammate}
+          teammates={teammates}
+          onClose={() => setPanelOpen(false)}
+          onRemoved={() => {
+            setPanelOpen(false);
+            navigate('/');
+          }}
+        />
+      )}
+      <Toasts />
     </div>
   );
 }
@@ -782,6 +795,8 @@ function AccountApp({
           : (secure && (path !== '/browser' || session.capabilities.developer)) ||
               settingsPage(path) ||
               sidebarItems.some((item) => item.path === path) ||
+              path === teammatesSettingsPath ||
+              teammateIdOf(path) ||
               preparedWorkId(path)
             ? path
             : '/not-found',

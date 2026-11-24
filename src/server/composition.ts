@@ -1140,6 +1140,10 @@ async function initializeApplication(
     consumers,
     stopConsumer: (id) => boss.offWork('scheduled-task', { id, wait: true }),
     clearBrowser: (id) => adapters.computer.clear(id),
+    teammates: {
+      validate: (args) => tasks.validateTeammateUpdate(args),
+      apply: (client, args) => tasks.applyTeammateUpdate(client, args),
+    },
     taskModels: {
       list: () => tasks.ownModels(),
       title: (id) => tasks.modelTask(id),
@@ -1612,6 +1616,7 @@ async function initializeApplication(
       const lockedWrite =
         action === 'NOD_limits_update' ||
         action === 'NOD_model_select' ||
+        action === 'NOD_teammate_update' ||
         action.startsWith('NOD_memory_') ||
         action === 'NOD_notification_preferences_update';
       const result = await (action === 'NOD_browser'
@@ -2797,6 +2802,7 @@ async function initializeApplication(
           [
             'notification_preferences_update',
             'model_select',
+            'teammate_update',
             'schedule_create',
             'schedule_update',
             'schedule_pause',

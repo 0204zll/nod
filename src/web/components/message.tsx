@@ -50,7 +50,13 @@ import { TelegramChatLink, useTelegramChatUrl } from './telegram-chat-link';
 import { BrowserHandoff } from './browser-handoff';
 import { MessageAttachments } from './attachment-card';
 import { AudioPlayer } from './audio-player';
-import { AnswerChoices, ChoiceAnswer, type AnswerChoicesProps } from './answer-choices';
+import {
+  AnswerChoices,
+  ChoiceAnswer,
+  QuickChoices,
+  quickChoices,
+  type AnswerChoicesProps,
+} from './answer-choices';
 import { ApprovalCard, ApprovalChoiceCard, ApprovalFields, CodeRequestCard } from './action-card';
 import { MessageLinkTooltip } from './message-link-tooltip';
 import { Tooltip } from './tooltip';
@@ -60,6 +66,7 @@ import { BugReportCard } from './bug-report-card';
 import { ScheduleRunTrack } from './schedule-run';
 import { formatFullDateTime, formatTime, useDateFormat } from '../lib/date-format';
 import { copyContent, selectedText } from '../lib/clipboard';
+import { mentionParts } from '../lib/teammates';
 
 function CopyBlock({ children, table = false }: { children: React.ReactNode; table?: boolean }) {
   const content = useRef<HTMLDivElement>(null);
@@ -201,14 +208,44 @@ export function MessageQuote({
   );
 }
 
+function rehypeMentions(names: string[]) {
+  type Node = { type: string; tagName?: string; value?: string; children?: Node[] };
+  return () => (tree: Node) => {
+    const walk = (node: Node, skip: boolean) => {
+      if (!node.children) return;
+      node.children = node.children.flatMap((child) => {
+        if (child.type === 'text' && !skip && child.value) {
+          const parts = mentionParts(child.value, names);
+          if (parts.length === 1 && typeof parts[0] === 'string') return [child];
+          return parts.map((part) =>
+            typeof part === 'string'
+              ? { type: 'text', value: part }
+              : {
+                  type: 'element',
+                  tagName: 'span',
+                  properties: { className: ['mention'] },
+                  children: [{ type: 'text', value: `@${part.mention}` }],
+                },
+          );
+        }
+        walk(child, skip || ['code', 'pre', 'a'].includes(child.tagName ?? ''));
+        return [child];
+      });
+    };
+    walk(tree, false);
+  };
+}
+
 export const MessageText = memo(function MessageText({
   text,
   connectedAppIds,
   handoff,
   handoffPaused,
   handoffTurnId,
+  mentions,
 }: {
   text: string;
+  mentions?: string[];
   connectedAppIds?: ReadonlySet<string>;
   handoff?: boolean;
   handoffPaused?: boolean;
@@ -232,6 +269,7 @@ export const MessageText = memo(function MessageText({
             rehypeLocalLinks,
             [rehypeSanitize, messageSchema],
             rehypeDropBlankMessage,
+            ...(mentions?.length ? [rehypeMentions(mentions)] : []),
           ]}
           components={{
             table: ({ node, ...props }) => (
@@ -364,13 +402,21 @@ export function MessageBubble({
   work,
   task,
   chatLabel,
+  onOpenLabel,
   replyFrom,
+  avatar,
+  mentions,
+  speakerName = 'Nod',
 }: {
   message: Message;
   work?: MessageWork;
   task?: ReactNode;
   chatLabel?: string;
+  onOpenLabel?(): void;
   replyFrom?: string;
+  avatar?: ReactNode;
+  mentions?: string[];
+  speakerName?: string;
   pendingAudio?: ImagePreview;
   connectedAppIds?: ReadonlySet<string>;
   grouped?: boolean;
@@ -395,8 +441,13 @@ export function MessageBubble({
     (message.role === 'user' ? message.displayText : undefined) ??
     message.audioCaption ??
     message.text;
+  const quick =
+    message.role === 'assistant' &&
+    !streaming &&
+    !message.approval &&
+    quickChoices(message.answerChoices);
   const card =
-    message.role !== 'assistant' || streaming
+    message.role !== 'assistant' || streaming || quick
       ? null
       : message.approval && !message.approval.fields
         ? 'approval'
@@ -722,15 +773,26 @@ export function MessageBubble({
   return (
     <article
       ref={articleElement}
-      className={`message message-${message.role}${grouped ? ' message-grouped' : ''}${arriving ? ' message-arriving' : ''}${panel ? ' message-panel-open' : ''}`}
-      aria-label={streaming ? 'Nod is responding' : message.role === 'user' ? 'You' : 'Nod'}
+      className={`message message-${message.role}${grouped ? ' message-grouped' : ''}${arriving ? ' message-arriving' : ''}${panel ? ' message-panel-open' : ''}${avatar ? ' message-with-avatar' : ''}`}
+      aria-label={
+        streaming ? `${speakerName} is responding` : message.role === 'user' ? 'You' : speakerName
+      }
       data-message-id={streaming ? undefined : message.id}
       onMouseUp={selectQuote}
       onKeyUp={selectQuote}
       tabIndex={-1}
     >
+      {avatar && <span className="message-avatar">{avatar}</span>}
       <div className="message-content">
-        {chatLabel && !work && <span className="message-chat-label">{chatLabel}</span>}
+        {chatLabel &&
+          !work &&
+          (onOpenLabel ? (
+            <button type="button" className="message-chat-label" onClick={onOpenLabel}>
+              {chatLabel}
+            </button>
+          ) : (
+            <span className="message-chat-label">{chatLabel}</span>
+          ))}
         {work && <WorkLabel work={work} />}
         {run && <ScheduleRunTrack run={run} />}
         <div className="message-row" hidden={run?.outcome === 'failed'}>
@@ -830,6 +892,7 @@ export function MessageBubble({
                 shownText && (
                   <MessageText
                     text={shownText}
+                    mentions={mentions}
                     connectedAppIds={connectedAppIds}
                     handoff={!streaming && handoff}
                     handoffPaused={handoffPaused}
@@ -985,6 +1048,15 @@ export function MessageBubble({
             )}
           </div>
         </div>
+        {quick && (
+          <QuickChoices
+            key={message.id}
+            choices={message.answerChoices!}
+            answer={message.choiceAnswer}
+            disabled={answersDisabled}
+            onAnswer={message.answerChoicesPending ? onAnswer : undefined}
+          />
+        )}
         {task && <div className="message-task">{task}</div>}
         {message.role === 'assistant' && !streaming && message.presentation?.type === 'apps' && (
           <MessagePresentation value={message.presentation} messageId={message.id} />

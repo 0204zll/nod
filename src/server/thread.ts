@@ -39,7 +39,7 @@ import {
   workOriginSql,
   taskMessageSql,
 } from './turn-chain.ts';
-import { chatOnlyPlacement, reportChat } from './chats.ts';
+import { chatOnlyPlacement, reportChat } from './teammates.ts';
 import { dataRoot, databaseUrl, ownerId } from './config.ts';
 import { delta, refresh, working } from './events.ts';
 import {
@@ -2767,7 +2767,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     if (taskContext && result.status === 'succeeded' && result.result)
       await post(result.result, shared.splice(0));
     if (taskContext && result.completed) await dependencies.settleTask?.(ref, result.completed);
-    if (taskContext?.name && result.status === 'succeeded')
+    if (taskContext?.teammate && result.status === 'succeeded')
       await current((client) => reportChat(client, ownerId, ref));
     if (shared.length && (result.status === 'succeeded' || !result.message))
       await post('', shared.splice(0));

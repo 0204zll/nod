@@ -127,6 +127,7 @@ export async function initializeDatabase() {
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_quote text;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS chat_only boolean NOT NULL DEFAULT false;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS chat_report boolean NOT NULL DEFAULT false;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS handoff jsonb;
     CREATE TABLE IF NOT EXISTS feedback_drafts (
       id uuid PRIMARY KEY, owner_id text NOT NULL, thread_id uuid NOT NULL,
       summary text NOT NULL, created_at timestamptz NOT NULL DEFAULT now()

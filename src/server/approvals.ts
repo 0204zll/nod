@@ -18,7 +18,7 @@ import { untrustedBlock } from '../shared/untrusted.ts';
 import { localTimestamp } from '../shared/date-locale.ts';
 import { lockKey, locksTable } from './locks.ts';
 import { inChatSql, inMainSql, withdrawnSql } from './turn-chain.ts';
-import { chatOnlyPlacement } from './chats.ts';
+import { chatOnlyPlacement } from './teammates.ts';
 import { afterCommit, transaction } from './transaction.ts';
 import { computerRequestArgs, isComputerAction } from './computer-use.ts';
 import { createErrorRedactor } from './redaction.ts';
@@ -190,6 +190,13 @@ async function turnChain(client: PoolClient, turn: TurnRow) {
   return chain;
 }
 
+function requestOrigin(chain: TurnRow[]) {
+  const root = chain.at(-1);
+  return root?.source === 'task' && !root.message_id && !root.parent_turn_id
+    ? (chain.findLast((turn) => turn.source === 'user' && turn.message_id) ?? root)
+    : root;
+}
+
 async function scheduleAuthority(client: PoolClient, turnId: string) {
   if (
     !(await client.query("SELECT to_regclass('schedule_runs') AS table_name")).rows[0]?.table_name
@@ -252,7 +259,7 @@ export async function turnOrigin(turnId: string) {
   try {
     const current = await turnRow(client, turnId);
     const chain = current && (await turnChain(client, current));
-    const origin = chain?.at(-1);
+    const origin = chain && requestOrigin(chain);
     if (!chain || !origin) return undefined;
     const run =
       origin.source === 'schedule' ? await scheduleAuthority(client, origin.id) : undefined;
@@ -404,7 +411,7 @@ export async function createApprovals(
       if (!current || current.thread_id !== turn.threadId)
         throw conflict('This turn is no longer running.');
       const chain = await turnChain(client, current);
-      const origin = chain?.at(-1);
+      const origin = chain && requestOrigin(chain);
       if (!chain || !origin) throw new Error('This action needs a direct request from the user.');
       let steering: { id: string; text: string } | undefined;
       if (options.sourceMessageId && options.sourceMessageId !== current.message_id) {

@@ -189,8 +189,13 @@ export interface RuntimeContext {
     doneWhen: string;
     revision: number;
     messageId?: string | null;
-    name?: string;
-    nameAuto?: boolean;
+    teammate?: {
+      name: string;
+      job: string;
+      instructions: string;
+      memory: import('../shared/teammates.ts').MemoryMode;
+      setup: boolean;
+    };
   };
   tasks?: import('../shared/contracts.ts').Task[];
   workspacePath: string;

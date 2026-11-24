@@ -403,3 +403,42 @@ export function ScheduleModel({ schedule }: { schedule: Schedule }) {
     />
   );
 }
+
+export function TeammateModel({ teammate }: { teammate: Task & { name: string } }) {
+  const models = useModels();
+  const usage = usePageData<WorkUsageResponse>(workUsagePath);
+  const data = models.data;
+  if (!data) return <span className="teammate-row-value">…</span>;
+  const own = kept(data, teammate.model);
+  const chat = modelOf(data, data.selection);
+  return (
+    <ModelPicker
+      appearance="quiet"
+      manageConnections={false}
+      label={
+        own
+          ? (modelOf(data, own)?.name ?? unavailableLabel)
+          : `Same as Nod${chat ? ` (${chat.name})` : ''}`
+      }
+      target={{
+        title: `Model for ${teammate.name}`,
+        value: own,
+        defaults: [{ value: null, label: 'Same as Nod', model: data.selection ?? null }],
+        usage: usage.data?.tasks[teammate.id],
+        save: (model) =>
+          saved<Task>(`/api/tasks/${encodeURIComponent(teammate.id)}/model`, { model }, () =>
+            window.dispatchEvent(new Event('nod:teammates-changed')),
+          ),
+      }}
+    />
+  );
+}
+
+export function NodModel() {
+  const models = useModels();
+  const data = models.data;
+  const chat = data && modelOf(data, data.selection);
+  return (
+    <ModelPicker appearance="quiet" manageConnections={false} label={chat?.name ?? 'Choose'} />
+  );
+}

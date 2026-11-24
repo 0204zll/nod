@@ -6,7 +6,7 @@ import { classifyVerificationReply, securityCodeIn } from '../shared/verificatio
 import { lockThread } from './thread.ts';
 import { transaction } from './transaction.ts';
 import { supersededSql, waitingTurnSql } from './turn-chain.ts';
-import { chatOnlyPlacement } from './chats.ts';
+import { chatOnlyPlacement } from './teammates.ts';
 
 interface VerificationInput {
   clientMessageId: string;

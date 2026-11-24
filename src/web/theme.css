@@ -120,6 +120,19 @@
   --ease-enter: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-reveal: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-travel: cubic-bezier(0.65, 0, 0.35, 1);
+  --hue-pink: #ffd0d9;
+  --hue-pink-fg: #5a0026;
+  --hue-lilac: #e3dcf7;
+  --hue-lilac-fg: #3b2d6e;
+  --hue-green: #d6eedf;
+  --hue-green-fg: #1c4a33;
+  --hue-amber: #f6e3c2;
+  --hue-amber-fg: #5c3c12;
+  --hue-sky: #d5e7f3;
+  --hue-sky-fg: #1c3d55;
+  --hue-gray: #e0e0e0;
+  --hue-gray-fg: #353535;
+  --glass: color-mix(in srgb, var(--surface) 78%, transparent);
 }
 
 :root[data-theme='dark'] {
@@ -178,6 +191,18 @@
   --shadow-overlay: #00000059;
   --shadow-color: #00000026;
   --shadow-composer: 0 4px 16px var(--shadow-color), 0 1px 3px var(--shadow-color);
+  --hue-pink: #5a0026;
+  --hue-pink-fg: #ffd0d9;
+  --hue-lilac: #312b42;
+  --hue-lilac-fg: #d9cffa;
+  --hue-green: #23372d;
+  --hue-green-fg: #b5e3c7;
+  --hue-amber: #3a3023;
+  --hue-amber-fg: #f0d3a6;
+  --hue-sky: #1f3140;
+  --hue-sky-fg: #bcdcf2;
+  --hue-gray: #353535;
+  --hue-gray-fg: #e0e0e0;
 }
 
 :root[data-theme='dark'] .dialog-content {

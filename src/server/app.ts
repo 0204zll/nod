@@ -87,6 +87,7 @@ const messageFields = `m.id,m.role,m.text,CASE WHEN m.role='user' THEN m.display
    WHERE (w.id=m.turn_id OR w.message_id=m.id) AND w.owner_id=m.owner_id AND to_jsonb(k)->>'name' IS NOT NULL
    ORDER BY w.created_at DESC,w.id DESC LIMIT 1) AS "chatId",
  NOT m.chat_only AS "inMain",
+ m.handoff AS "handoff",
  m.chat_report AS "chatReport",
  CASE WHEN target.id IS NULL OR ${reactionReplySql('target')} THEN NULL ELSE COALESCE(
    CASE WHEN m.role='assistant' AND target.role='assistant' THEN (SELECT json_build_object('id',o.id,'role','user','text','','isQuote',false)
@@ -548,7 +549,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
       hasMore: rows.rows.length > 60,
     } satisfies MessageHistoryPage;
   });
-  app.get<{ Params: { id: string } }>('/api/chats/:id/messages', async (request) => {
+  app.get<{ Params: { id: string } }>('/api/teammates/:id/messages', async (request) => {
     const chatId = z.uuid().parse(request.params.id);
     const query = z
       .object({
@@ -556,23 +557,19 @@ export async function createApp(dependencies: AppDependencies = {}) {
         beforeId: z.uuid().optional(),
       })
       .parse(request.query);
-    const thread = await activeThread(pool);
-    const chat = await pool.query(
-      `SELECT 1 FROM tasks t JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
-       WHERE t.id=$1 AND t.owner_id=$2 AND u.thread_id=$3 AND t.name IS NOT NULL`,
-      [chatId, ownerId, thread.id],
+    const teammate = await pool.query(
+      'SELECT 1 FROM tasks t WHERE t.id=$1 AND t.owner_id=$2 AND t.name IS NOT NULL AND t.archived_at IS NULL',
+      [chatId, ownerId],
     );
-    if (!chat.rowCount)
-      throw Object.assign(new Error('This chat is unavailable in this conversation.'), {
-        statusCode: 404,
-      });
+    if (!teammate.rowCount)
+      throw Object.assign(new Error('This teammate was removed.'), { statusCode: 404 });
     const rows = await pool.query(
       `SELECT ${messageFields} FROM messages m
       LEFT JOIN messages target ON target.id=m.reply_to_message_id AND target.owner_id=m.owner_id AND target.hidden_at IS NULL
-      WHERE m.owner_id=$1 AND m.thread_id=$4 AND m.hidden_at IS NULL AND ${visibleMessageSql} AND ${inChatSql('m', '$5::uuid')}
+      WHERE m.owner_id=$1 AND m.hidden_at IS NULL AND ${visibleMessageSql} AND ${inChatSql('m', '$4::uuid')}
         AND ($2::timestamptz IS NULL OR date_trunc('milliseconds',m.created_at) < $2 OR (date_trunc('milliseconds',m.created_at) = $2 AND $3::uuid IS NOT NULL AND m.id < $3))
       ORDER BY date_trunc('milliseconds',m.created_at) DESC,m.id DESC LIMIT 61`,
-      [ownerId, query.before ?? null, query.beforeId ?? null, thread.id, chatId],
+      [ownerId, query.before ?? null, query.beforeId ?? null, chatId],
     );
     const page = rows.rows.slice(0, 60);
     return {
@@ -646,7 +643,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
           statusCode: 400,
         });
       if (input.chatId)
-        throw Object.assign(new Error('Only the chat with Nod can be cleared.'), {
+        throw Object.assign(new Error('Send /clear in your chat with Nod.'), {
           statusCode: 400,
         });
       return clearChatContext(input.threadId, clientMessageId);

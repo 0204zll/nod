@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  type ReactNode,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -74,8 +75,16 @@ export interface ComposerHandle {
 export type ComposerSendResult =
   { sent: true } | { sent: false; restoreText: boolean; restoreRecording?: boolean };
 
+export interface ComposerMention {
+  id: string;
+  name: string;
+  detail: string;
+  avatar: ReactNode;
+}
+
 interface ComposerProps {
   active?: boolean;
+  mentions?: ComposerMention[];
   name?: string;
   placeholder?: string;
   draftKey?: string;
@@ -102,6 +111,7 @@ interface ComposerProps {
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
   {
     active = true,
+    mentions,
     name = 'Nod',
     placeholder: emptyPlaceholder,
     ready,
@@ -186,6 +196,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     : (emptyPlaceholder ?? `Message ${name}…`);
   const currentPlaceholder = useRef(placeholder);
   currentPlaceholder.current = placeholder;
+  const [mention, setMention] = useState<{
+    from: number;
+    to: number;
+    options: ComposerMention[];
+    index: number;
+  } | null>(null);
+  const mentionState = useRef(mention);
+  mentionState.current = mention;
+  const mentionList = useRef(mentions);
+  mentionList.current = mentions;
   const extensions = useMemo(
     () =>
       createComposerExtensions({
@@ -201,9 +221,30 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     content: parseComposerMarkdown(text),
     immediatelyRender: false,
     editorProps: {
+      handleKeyDown: (_view, event) => {
+        const current = mentionState.current;
+        if (!current || event.isComposing) return false;
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          const step = event.key === 'ArrowDown' ? 1 : -1;
+          setMention({
+            ...current,
+            index: (current.index + step + current.options.length) % current.options.length,
+          });
+          return true;
+        }
+        if (event.key === 'Enter' || event.key === 'Tab') {
+          pickRef.current(current.options[current.index]!);
+          return true;
+        }
+        if (event.key === 'Escape') {
+          setMention(null);
+          return true;
+        }
+        return false;
+      },
       attributes: {
         role: 'textbox',
-        'aria-label': 'Message Nod',
+        'aria-label': `Message ${name}`,
         'aria-multiline': 'true',
         'aria-describedby': 'composer-keyboard-hint',
         class: 'composer-editor message-text',
@@ -213,8 +254,44 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       const value = composerMarkdown(current.state.doc);
       lastText.current = value;
       setText(value);
+      findMention(current);
     },
+    onSelectionUpdate: ({ editor: current }) => findMention(current),
+    onBlur: () => setMention(null),
   });
+  function findMention(current: NonNullable<typeof editor>) {
+    const list = mentionList.current;
+    const { selection } = current.state;
+    if (!list?.length || !selection.empty) return setMention(null);
+    const { $from } = selection;
+    const before = $from.parent.textBetween(0, $from.parentOffset, undefined, '\ufffc');
+    const match = /(?:^|\s)@([^\s@]{0,24})$/u.exec(before);
+    if (!match) return setMention(null);
+    const query = match[1]!.toLowerCase();
+    const options = list.filter((item) => item.name.toLowerCase().startsWith(query));
+    if (!options.length) return setMention(null);
+    setMention((previous) => ({
+      from: selection.from - match[1]!.length - 1,
+      to: selection.from,
+      options,
+      index:
+        previous && previous.options.length === options.length
+          ? Math.min(previous.index, options.length - 1)
+          : 0,
+    }));
+  }
+  const pickRef = useRef<(option: ComposerMention) => void>(() => {});
+  pickRef.current = pickMention;
+  function pickMention(option: ComposerMention) {
+    const current = mentionState.current;
+    if (!editor || editor.isDestroyed || !current) return;
+    editor
+      .chain()
+      .focus()
+      .insertContentAt({ from: current.from, to: current.to }, `@${option.name} `)
+      .run();
+    setMention(null);
+  }
   useEffect(() => {
     if (editor && !editor.isDestroyed) editor.view.dispatch(editor.state.tr);
   }, [editor, placeholder]);
@@ -942,6 +1019,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       <form
         ref={form}
         className={`composer${hasRecording ? ' has-recording' : ''}`}
+        data-mention-open={mention ? true : undefined}
         onSubmit={(event) => {
           event.preventDefault();
           void submit();
@@ -989,6 +1067,29 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           void upload(Array.from(event.dataTransfer.files), 'drop');
         }}
       >
+        {mention && (
+          <div className="mention-menu" role="listbox" aria-label="Teammates">
+            {mention.options.map((option, index) => (
+              <button
+                key={option.id}
+                type="button"
+                role="option"
+                aria-selected={index === mention.index}
+                onPointerDown={(event) => {
+                  event.preventDefault();
+                  pickMention(option);
+                }}
+                onPointerEnter={() => setMention({ ...mention, index })}
+              >
+                {option.avatar}
+                <span>
+                  <b>{option.name}</b>
+                  <small>{option.detail}</small>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
         {attachments.length > 0 && (
           <div
             className="pending-attachments composer-attachments"

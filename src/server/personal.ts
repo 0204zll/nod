@@ -28,6 +28,10 @@ type PersonalDependencies = ScheduleDependencies & {
     title(id: string): Promise<string>;
     set(client: PoolClient | undefined, id: string, model: ModelSelection | null): Promise<boolean>;
   };
+  teammates?: {
+    validate(args: Record<string, unknown>): Promise<Record<string, unknown>>;
+    apply(client: PoolClient, args: Record<string, unknown>): Promise<unknown>;
+  };
   modelProjection?(
     scope: ModelScope,
     id: string | undefined,
@@ -118,6 +122,10 @@ export function createPersonalService(dependencies: PersonalDependencies) {
       return input;
     }
     if (action === 'model_select') return validateModelChoice(args);
+    if (action === 'teammate_update') {
+      if (!dependencies.teammates) throw new Error('Teammates are unavailable.');
+      return dependencies.teammates.validate(args);
+    }
     if (action === 'schedule_create') return schedules.validateCreate(args);
     if (action === 'schedule_update') {
       const { id: rawId, ...raw } = args;
@@ -248,6 +256,11 @@ export function createPersonalService(dependencies: PersonalDependencies) {
         ...(projection ? { last30Days: projection } : {}),
         ...(schedule ? { monthlyUsd: schedule.monthlyUsd } : {}),
       };
+    }
+    if (action === 'teammate_update') {
+      if (!dependencies.teammates || !options?.client)
+        throw new Error('Teammates are unavailable.');
+      return dependencies.teammates.apply(options.client, args);
     }
     if (action === 'notification_preferences_update') {
       const result = await preferences.update(args, 'agent', options);

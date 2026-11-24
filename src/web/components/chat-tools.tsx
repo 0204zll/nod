@@ -13,7 +13,8 @@ import {
   shortcutLabel,
   sidebarItems,
 } from '../lib/navigation';
-import { draftChatPath } from '../lib/named-chats';
+import { teammatePath } from '../lib/teammates';
+import { createTeammate, toast } from './teammates';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
 import { useArtifactDrawer } from './artifact-context';
 import { ownedArtifactUrl, type ImagePreview } from './attachment-images';
@@ -165,9 +166,12 @@ export function ChatTools({
         ]
       : []),
     {
-      id: 'new-chat',
-      label: 'New chat',
-      action: () => navigate(draftChatPath),
+      id: 'new-teammate',
+      label: 'New teammate',
+      action: () =>
+        void createTeammate()
+          .then((teammate) => navigate(teammatePath(teammate.id)))
+          .catch((cause) => toast(errorMessage(cause))),
     },
     ...sidebarItems.map((item) => ({
       id: item.path,

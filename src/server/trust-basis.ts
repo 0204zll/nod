@@ -98,6 +98,7 @@ const ownSettings = new Set([
   'NOD_memory_forget',
   'NOD_memory_control',
   'NOD_model_select',
+  'NOD_teammate_update',
 ]);
 
 export function trustBasis(

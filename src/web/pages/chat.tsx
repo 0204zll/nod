@@ -31,8 +31,10 @@ import { classifyVerificationReply, securityCodeIn } from '../../shared/verifica
 import { ChatTools } from '../components/chat-tools';
 import { ServiceLogo } from '../components/service-logo';
 import { Composer, type ComposerHandle, type ComposerSendResult } from '../components/composer';
-import { ChatLink, ContinueLink, FromMainLink } from '../components/named-chats';
-import { chatPath, isNamedChat, type ChatMessage, type NamedChat } from '../lib/named-chats';
+import { HandoffNote } from '../components/teammates';
+import { quickChoices } from '../components/answer-choices';
+import { NodAvatar, TeammateAvatar } from '../components/teammate-avatar';
+import { isTeammate, teammatePath, type ChatMessage, type Teammate } from '../lib/teammates';
 import { MessageBubble, WorkLabel, type MessageWork } from '../components/message';
 import { conversationFiles } from '../components/attachment-card';
 import { ArtifactWorkspace } from '../components/artifact-drawer';
@@ -89,6 +91,13 @@ function verificationFailure(
     return 'The result could not be confirmed. Check the sign-in or payment before trying again.';
   return 'The verification code could not be confirmed. Check the sign-in request and try again.';
 }
+function quickAnswer(message: Message, messages: Message[]) {
+  const question = message.replyTo?.id
+    ? messages.find((item) => item.id === message.replyTo!.id)
+    : undefined;
+  return Boolean(question && !question.approval && quickChoices(question.answerChoices));
+}
+
 function scrollBehavior(): ScrollBehavior {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth';
 }
@@ -337,13 +346,13 @@ export function Chat({
   onReturnToMemory,
   chat,
   onOpenChat,
-  carried,
-  afterMessage,
+  teammates: teammateList,
+  empty,
 }: {
-  chat?: NamedChat;
+  chat?: Teammate;
+  teammates?: Teammate[];
   onOpenChat?(path: string): void;
-  carried?: ReactNode;
-  afterMessage?(message: Message): ReactNode;
+  empty?: ReactNode;
   ownerId: string;
   state: AppState;
   streams: Record<string, string>;
@@ -869,7 +878,7 @@ export function Chat({
       ...(task?.status === 'done' ? { done: true } : {}),
       live: item,
       ...(task?.name
-        ? { onOpen: () => onOpenChat?.(chatPath(task.id)) }
+        ? { onOpen: () => onOpenChat?.(teammatePath(task.id)) }
         : task?.messageId
           ? {
               onOpen: () => {
@@ -963,7 +972,7 @@ export function Chat({
     }),
   );
   const displayMessages: Message[] = [
-    ...allMessages.filter((message) => !message.cardAnswer),
+    ...allMessages.filter((message) => !message.cardAnswer || quickAnswer(message, allMessages)),
     ...streamEntries.map(([id, value]): Message => {
       if (!streamTimes.current.has(id)) streamTimes.current.set(id, new Date().toISOString());
       return {
@@ -992,30 +1001,15 @@ export function Chat({
     )
     .join(';');
   const files = useMemo(() => conversationFiles(visibleMessages), [fileKey]);
-  const sideChats = chat ? [] : (state.tasks ?? []).filter(isNamedChat);
-  const linkedChat = (message: Message) =>
-    sideChats.find((task) => task.messageId === message.id || task.continuedFrom === message.id);
-  const reportedChat = (message: Message) =>
-    message.chatReport ? sideChats.find((task) => task.id === message.chatId) : undefined;
-  const lastVisible = visibleMessages.at(-1);
-  const continuable =
-    !chat &&
-    !working &&
-    !sending &&
-    !welcoming &&
-    lastVisible?.role === 'assistant' &&
-    lastVisible.turnId &&
-    lastVisible.text.trim() &&
-    !lastVisible.chatId &&
-    !lastVisible.approval &&
-    !lastVisible.answerChoices &&
-    !lastVisible.suggestions &&
-    !lastVisible.streamId?.includes('failure') &&
-    !streamIds.has(lastVisible.streamId ?? '') &&
-    !linkedChat(lastVisible) &&
-    visibleMessages.some((message) => message.role === 'user')
-      ? lastVisible.id
-      : undefined;
+  const teammates = teammateList ?? (state.tasks ?? []).filter(isTeammate);
+  const teammateNames = teammates.map((teammate) => teammate.name);
+  const teammateOf = (id: string | null | undefined) =>
+    id ? teammates.find((teammate) => teammate.id === id) : undefined;
+  const speaker = (message: Message) => {
+    const reporter = !chat && message.chatReport ? teammateOf(message.chatId) : undefined;
+    const who = chat ?? reporter;
+    return who ? <TeammateAvatar name={who.name} avatar={who.teammate.avatar} /> : <NodAvatar />;
+  };
   const planning =
     state.planningTasks === true && !allMessages.some((message) => message.suggestions);
   const unseen = away
@@ -1355,7 +1349,7 @@ export function Chat({
   ): Promise<ComposerSendResult & { error?: string; questionUnavailable?: true }> {
     if (welcoming) return { sent: false, restoreText: true };
     if (chat && value.trim().toLowerCase() === '/clear') {
-      setError('Send /clear in the main chat. It starts the main chat fresh.');
+      setError('Send /clear in your chat with Nod. It starts that chat fresh.');
       return { sent: false, restoreText: true, restoreRecording: true };
     }
     if (value.trim().toLowerCase() === '/clear' && (attachments.length || recording)) {
@@ -2379,7 +2373,7 @@ export function Chat({
               !welcoming &&
               !working &&
               !sending &&
-              (state.configuration.llmReady ? chat ? null : <Welcome /> : modelSetup)}
+              (state.configuration.llmReady ? chat ? empty : <Welcome /> : modelSetup)}
             <div
               className="messages"
               role="log"
@@ -2387,7 +2381,6 @@ export function Chat({
               aria-live="polite"
               aria-relevant="additions"
             >
-              {carried}
               {visibleMessages.map((message, index) => (
                 <Fragment key={message.streamId ?? message.id}>
                   {(!index ||
@@ -2442,22 +2435,33 @@ export function Chat({
                   ) : (
                     <MessageBubble
                       message={
-                        (chat || message.chatReport) &&
-                        message.role === 'assistant' &&
-                        message.replyTo?.role === 'user' &&
-                        !message.replyTo.isQuote &&
-                        message.replyTo.id ===
-                          visibleMessages.slice(0, index).findLast((item) => item.role === 'user')
-                            ?.id
+                        message.cardAnswer && quickAnswer(message, visibleMessages)
                           ? { ...message, replyTo: undefined }
-                          : message
+                          : (chat || message.chatReport) &&
+                              message.role === 'assistant' &&
+                              message.replyTo?.role === 'user' &&
+                              !message.replyTo.isQuote &&
+                              message.replyTo.id ===
+                                visibleMessages
+                                  .slice(0, index)
+                                  .findLast((item) => item.role === 'user')?.id
+                            ? { ...message, replyTo: undefined }
+                            : message
                       }
+                      avatar={message.role === 'assistant' ? speaker(message) : undefined}
+                      speakerName={
+                        chat?.name ??
+                        (message.chatReport ? teammateOf(message.chatId)?.name : undefined)
+                      }
+                      mentions={message.role === 'user' ? teammateNames : undefined}
                       chatLabel={
-                        !chat &&
-                        message.role === 'assistant' &&
-                        message.chatId &&
-                        !message.chatReport
-                          ? state.tasks?.find((task) => task.id === message.chatId)?.name
+                        !chat && message.role === 'assistant' && message.chatId
+                          ? teammateOf(message.chatId)?.name
+                          : undefined
+                      }
+                      onOpenLabel={
+                        !chat && message.chatId && teammateOf(message.chatId)
+                          ? () => onOpenChat?.(teammatePath(message.chatId!))
                           : undefined
                       }
                       replyFrom={
@@ -2465,9 +2469,7 @@ export function Chat({
                           ? undefined
                           : chat
                             ? chat.name
-                            : message.chatId
-                              ? state.tasks?.find((task) => task.id === message.chatId)?.name
-                              : undefined
+                            : (teammateOf(message.chatId)?.name ?? undefined)
                       }
                       work={startedTask(message) ? undefined : workOf(message)}
                       task={chipOf(message)}
@@ -2481,7 +2483,7 @@ export function Chat({
                       }
                       taskStopped={approvalTask(message)?.status === 'cancelled'}
                       answersDisabled={sending || !state.configuration.llmReady || welcoming}
-                      onAnswer={async (value, answer) => {
+                      onAnswer={async (value, answer, displayText) => {
                         if (replyTo?.id === message.id && composer.current?.hasDraft()) {
                           composer.current.focus();
                           throw new Error(
@@ -2495,6 +2497,7 @@ export function Chat({
                           'answer_choice',
                           undefined,
                           answer,
+                          displayText,
                         );
                         if (result.questionUnavailable) return 'unavailable';
                         if (!result.sent && result.error) throw new Error(result.error);
@@ -2569,34 +2572,41 @@ export function Chat({
                     />
                   )}
                   {chat && message.role === 'user' && (message as ChatMessage).inMain && (
-                    <div className="chat-link-slot chat-link-slot-user">
-                      <FromMainLink messageId={message.id} onOpen={() => onOpenChat?.('/')} />
+                    <div className="from-nod">
+                      <a
+                        href="/"
+                        onClick={(event) => {
+                          if (event.metaKey || event.ctrlKey || event.shiftKey || event.button)
+                            return;
+                          event.preventDefault();
+                          onOpenChat?.('/');
+                          window.setTimeout(
+                            () =>
+                              window.dispatchEvent(
+                                new CustomEvent('nod:focus-message', {
+                                  detail: { messageId: message.id },
+                                }),
+                              ),
+                            120,
+                          );
+                        }}
+                      >
+                        From your chat with Nod
+                      </a>
                     </div>
                   )}
-                  {(() => {
-                    const linked = linkedChat(message);
-                    const reported = reportedChat(message);
-                    return linked ? (
-                      <div className="chat-link-slot">
-                        <ChatLink chat={linked} continued onOpen={(path) => onOpenChat?.(path)} />
-                      </div>
-                    ) : reported ? (
-                      <div className="chat-link-slot">
-                        <ChatLink chat={reported} onOpen={(path) => onOpenChat?.(path)} />
-                      </div>
-                    ) : message.id === continuable ? (
-                      <div className="chat-link-slot">
-                        <ContinueLink
-                          messageId={message.id}
-                          onOpen={(path) => {
-                            void refresh();
-                            onOpenChat?.(path);
-                          }}
+                  {!chat &&
+                    message.handoff &&
+                    (() => {
+                      const target = teammateOf(message.handoff.teammate);
+                      return target ? (
+                        <HandoffNote
+                          teammate={target}
+                          title={message.handoff.title}
+                          onOpen={(path) => onOpenChat?.(path)}
                         />
-                      </div>
-                    ) : null;
-                  })()}
-                  {afterMessage?.(message)}
+                      ) : null;
+                    })()}
                   {message.id === introduction.data?.messageId && (
                     <ChatNotifications ownerId={ownerId} messageId={message.id} />
                   )}
@@ -2623,11 +2633,11 @@ export function Chat({
               )}
               {connected && !chat && (
                 <TaskLine
-                  tasks={state.tasks ?? []}
+                  tasks={(state.tasks ?? []).filter((task) => !task.teammate)}
                   live={live}
                   onOpen={(task) => {
                     if (!task.name) return false;
-                    onOpenChat?.(chatPath(task.id));
+                    onOpenChat?.(teammatePath(task.id));
                     return true;
                   }}
                   card={(task, close, back) => {
@@ -2828,6 +2838,30 @@ export function Chat({
             <Composer
               key={`${ownerId}.${threadId}.${chat?.id ?? ''}`}
               active={visible}
+              name={chat?.name ?? 'Nod'}
+              placeholder={
+                chat
+                  ? `Message ${chat.name}`
+                  : teammates.length
+                    ? 'Message Nod, or type @ to bring in a teammate'
+                    : undefined
+              }
+              mentions={
+                chat
+                  ? undefined
+                  : teammates.map((teammate) => ({
+                      id: teammate.id,
+                      name: teammate.name,
+                      detail: teammate.teammate.job || 'Setting up',
+                      avatar: (
+                        <TeammateAvatar
+                          name={teammate.name}
+                          avatar={teammate.teammate.avatar}
+                          size="sm"
+                        />
+                      ),
+                    }))
+              }
               ref={composer}
               draftKey={`nod.chat-draft.${ownerId}.${threadId}${chat ? `.${chat.id}` : ''}`}
               privateReply={Boolean(state.verificationRequests?.length)}
