@@ -107,6 +107,10 @@ You can also tell Nod in chat, for example "forget my old address" or "stop reme
 
 Send `/memory` (or `/context`) for a short summary written by your selected model. That model call counts toward usage. Telegram and the WhatsApp QR connection also receive the full export as a document. With the WhatsApp Cloud API, open Nod to get it.
 
+## Teammates and memory
+
+Each [teammate](/use/teammates/) has a memory setting. **Shares Nod's memory** uses the same notes as Nod. **Reads Nod's memory, keeps its own notes** reads Nod's notes, and what you tell it in its chat becomes notes only it reads. **Own memory only** reads only its own notes and never sees your chat with Nod. Nod never reads a teammate's own notes. **Memory** in Settings shows every note. Removing a teammate deletes its own notes, and switching it to **Shares Nod's memory** moves them into Nod's.
+
 ## Memory is context, not permission
 
 :::caution
