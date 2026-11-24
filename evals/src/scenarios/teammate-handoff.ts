@@ -47,7 +47,10 @@ export default scenario({
   stance: 'regression',
   calibration: 'pending',
   seconds: 360,
-  user: { approve: false },
+  user: {
+    approve: false,
+    answers: [{ when: /pay/i, say: "I'll pay it myself. Just keep a note of it." }],
+  },
   world(clock) {
     const due = new Intl.DateTimeFormat('en-GB', {
       timeZone: 'Europe/Madrid',
