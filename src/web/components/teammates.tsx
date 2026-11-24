@@ -197,12 +197,7 @@ function ContextMenu({
             >
               Remove
             </button>
-            <button
-              type="button"
-              role="menuitem"
-              className="teammate-button"
-              onClick={() => setConfirming(false)}
-            >
+            <button type="button" role="menuitem" className="teammate-button" onClick={onClose}>
               Keep
             </button>
           </div>
