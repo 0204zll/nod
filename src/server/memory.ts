@@ -26,12 +26,14 @@ import {
   pathOf,
   render,
   same,
+  scoped,
   slug,
   slugFor,
   unsafe,
   view as memoryView,
   type Area,
   type Entry,
+  type MemoryScope,
   type Tree,
 } from './memory-tree.ts';
 
@@ -109,8 +111,8 @@ export function createMemoryService(options: {
     }
   }
 
-  async function context() {
-    const { tree } = await load();
+  async function context(scope?: MemoryScope) {
+    const tree = scoped((await load()).tree, scope);
     return [
       ...(tree.enabled ? [] : ['savingEnabled: false']),
       ...(tree.sensitive ? ['sensitiveTopics: allowed'] : []),
@@ -171,10 +173,12 @@ export function createMemoryService(options: {
     return (locate(tree, target) ?? tree.archive.find((item) => pathOf(item) === target))?.text;
   }
 
-  async function forget(raw: unknown, expected?: string) {
+  async function forget(raw: unknown, expected?: string, scope?: MemoryScope) {
     const target = path.parse(raw);
     return edit(
       (tree) => {
+        if (scope && noteText(scoped(tree, scope), target) === undefined)
+          fail('This note is no longer in memory.', 404);
         if (expected !== undefined && noteText(tree, target) !== expected)
           fail('The note changed. Review it before asking again.', 409);
         const entry = locate(tree, target);
@@ -440,8 +444,39 @@ export function createMemoryService(options: {
     );
   }
 
-  async function view() {
-    const { tree } = await load();
+  async function chatOwners(ids: string[]) {
+    if (
+      !ids.length ||
+      !(await options.pool.query("SELECT to_regclass('tasks') AS name")).rows[0]?.name
+    )
+      return new Map<string, string>();
+    const { rows } = await options.pool.query<{ id: string; teammate: string }>(
+      `SELECT m.id,t.id AS teammate FROM messages m
+       JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+       JOIN tasks t ON t.id=u.task_id AND t.owner_id=u.owner_id
+       WHERE m.owner_id=$1 AND m.id=ANY($2::uuid[]) AND t.name IS NOT NULL AND t.memory<>'shared'`,
+      [options.ownerId, ids],
+    );
+    return new Map(rows.map((row) => [row.id, row.teammate]));
+  }
+
+  async function forTeammate(id: string, keep: boolean) {
+    await edit(
+      (tree) => {
+        if (keep)
+          for (const entry of [...tree.entries, ...tree.archive])
+            if (entry.teammate === id) delete entry.teammate;
+        if (!keep) {
+          tree.entries = tree.entries.filter((entry) => entry.teammate !== id);
+          tree.archive = tree.archive.filter((entry) => entry.teammate !== id);
+        }
+      },
+      { allowDisabled: true },
+    );
+  }
+
+  async function view(scope?: MemoryScope) {
+    const tree = scoped((await load()).tree, scope);
     const ids = [...new Set([...tree.entries, ...tree.archive].flatMap((entry) => entry.sources))];
     const found = await sources(ids);
     const learnedIn = tree.skills.flatMap((skill) => skill.turn ?? []);
@@ -481,12 +516,15 @@ export function createMemoryService(options: {
     settings,
     view,
     load: async () => (await load()).tree,
-    find: async (raw: unknown) => {
+    chatOwners,
+    shareTeammate: (id: string) => forTeammate(id, true),
+    removeTeammate: (id: string) => forTeammate(id, false),
+    find: async (raw: unknown, scope?: MemoryScope) => {
       const input = findInput.parse(raw);
-      return find((await load()).tree, input.query, input.area);
+      return find(scoped((await load()).tree, scope), input.query, input.area);
     },
-    read: async (raw: unknown) => {
-      const { tree } = await load();
+    read: async (raw: unknown, scope?: MemoryScope) => {
+      const tree = scoped((await load()).tree, scope);
       const result = open(tree, readInput.parse(raw).path);
       if (!('sources' in result)) return result;
       const quote = locate(tree, result.path)?.quote;
@@ -505,7 +543,8 @@ export function createMemoryService(options: {
         }),
       };
     },
-    note: async (raw: unknown) => noteText((await load()).tree, path.parse(raw)),
+    note: async (raw: unknown, scope?: MemoryScope) =>
+      noteText(scoped((await load()).tree, scope), path.parse(raw)),
   };
 }
 

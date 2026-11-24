@@ -27,7 +27,6 @@ import { afterCommit, transaction } from './transaction.ts';
 import { cancellationTransaction } from './db.ts';
 import { snapshotAnalytics, type CaptureAnalytics } from './analytics.ts';
 import { createPreferencesStore, deliveryTime, isQuietTime } from './preferences.ts';
-import { personalSecret } from './memory-tree.ts';
 import {
   assertNameFree,
   freeTeammateName,
@@ -49,7 +48,9 @@ import {
   teammateMarks,
   type TeammateAvatar,
   type TeammateChannel,
+  type TeammateProfile,
 } from '../shared/teammates.ts';
+import { personalSecret, turnMemoryScope, type MemoryScope } from './memory-tree.ts';
 import { texts as codeTexts } from './chat-verification.ts';
 import {
   reactionReplySql,
@@ -223,7 +224,7 @@ export function createTasks(options: {
   refresh?: () => void;
   clearBrowser?: (id: string) => Promise<void>;
   validateModel?: (choice: ModelSelection) => ModelSelection;
-  removeTeammateMemory?: (id: string) => Promise<void>;
+  teammateMemory?: { remove(id: string): Promise<void>; share(id: string): Promise<void> };
 }) {
   const { pool, ownerId } = options;
   const refresh = options.refresh ?? (() => {});
@@ -386,14 +387,24 @@ export function createTasks(options: {
   }
 
   async function chatStart(sessionId: string) {
-    return (
-      (
-        await pool.query<{ created_at: Date }>(
-          'SELECT created_at FROM tasks WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL',
-          [sessionId, ownerId],
-        )
-      ).rows[0]?.created_at ?? null
-    );
+    const teammate = (
+      await pool.query<{ created_at: Date; memory: string }>(
+        'SELECT created_at,memory FROM tasks WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL',
+        [sessionId, ownerId],
+      )
+    ).rows[0];
+    return teammate?.memory === 'own' ? new Date(0) : (teammate?.created_at ?? null);
+  }
+
+  async function memoryScope(turnId: string): Promise<MemoryScope> {
+    const teammate = (
+      await pool.query<{ id: string; memory: TeammateProfile['memory'] }>(
+        `SELECT t.id,t.memory FROM turns u JOIN tasks t ON t.id=u.task_id AND t.owner_id=u.owner_id
+         WHERE u.id=$1 AND u.owner_id=$2 AND t.name IS NOT NULL`,
+        [turnId, ownerId],
+      )
+    ).rows[0];
+    return turnMemoryScope(teammate && { id: teammate.id, teammate });
   }
 
   async function ownModels() {
@@ -1326,6 +1337,7 @@ export function createTasks(options: {
         await lockThread(client);
         await updateTeammate(client, id, change);
       }, pool);
+      if (change.memory === 'shared') await options.teammateMemory?.share(id);
       refresh();
       return (await read(pool, { id, closed: true }))[0];
     });
@@ -1347,8 +1359,8 @@ export function createTasks(options: {
           `UPDATE tasks SET archived_at=now(),channels='{}',updated_at=now() WHERE id=$1 AND owner_id=$2`,
           [id, ownerId],
         );
-        await options.removeTeammateMemory?.(id);
       }, pool);
+      await options.teammateMemory?.remove(id);
       refresh();
       return { ok: true };
     });
@@ -1550,6 +1562,7 @@ export function createTasks(options: {
     ledger: async (thread?: string) =>
       (await read(pool, { closed: true, thread })).filter((task) => !task.archivedAt).map(shown),
     chatStart,
+    memoryScope,
     resumeDue,
     wakeDue,
     registerRoutes,

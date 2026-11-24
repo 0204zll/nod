@@ -57,6 +57,7 @@ export type ChannelPresentation =
 
 interface ChannelOptions {
   present?: (threadId: string | null, input: ChannelPresentation) => Promise<string>;
+  speaker?: (messageId: string) => Promise<string | undefined>;
   admission?: WorkAdmission;
   ownerId: string;
   transport: MessagingTransport;
@@ -1291,6 +1292,8 @@ export async function createChannels(pool: Pool, options: ChannelOptions) {
     );
     const row = result.rows[0];
     if (!row) return false;
+    const speaker = row.text.trim() ? await options.speaker?.(row.message_id) : undefined;
+    if (speaker) row.text = `${speaker}: ${row.text}`;
     const block = (
       reason: string,
       state: 'preparing' | 'sending' = 'preparing',

@@ -6,7 +6,14 @@ import type { MemoryCurator } from '../ports/memory-curator.ts';
 import { repair } from './memory-lint.ts';
 import { applyOps, type Rejection } from './memory-ops.ts';
 import { localTimestamp } from '../shared/date-locale.ts';
-import { indexLayout, unsafe } from './memory-tree.ts';
+import {
+  claimNotes,
+  indexLayout,
+  learningScope,
+  scoped,
+  unsafe,
+  type MemoryScope,
+} from './memory-tree.ts';
 import { withdrawnSql } from './turn-chain.ts';
 import type { MemoryService } from './memory.ts';
 import type { WorkConsumers } from './work-admission.ts';
@@ -121,12 +128,20 @@ export function createMemoryLearning(options: {
     if (!rows.length) return;
     const mark = `${rows.at(-1).at}/${rows.at(-1).id}`;
     const messages: OwnerText[] = rows.filter((row) => !unsafe(row.text));
-    let ops: unknown[] = [];
-    if (messages.length) {
+    const owners = await options.memory.chatOwners(messages.map((message) => message.id));
+    const groups = new Map<string | undefined, OwnerText[]>();
+    for (const message of messages) {
+      const owner = owners.get(message.id);
+      groups.set(owner, [...(groups.get(owner) ?? []), message]);
+    }
+    const plans: Array<{ owner: string | undefined; messages: OwnerText[]; ops: unknown[] }> = [];
+    for (const [owner, group] of groups) {
       const proposed = await ask(reflectInstructions(tree.sensitive), {
         today: new Date().toISOString().slice(0, 10),
-        memory: JSON.stringify(indexLayout(tree, { tentative: true })),
-        messages: numbered(messages),
+        memory: JSON.stringify(
+          indexLayout(scoped(tree, learningScope(owner)), { tentative: true }),
+        ),
+        messages: numbered(group),
       });
       if (!proposed) {
         await options.memory.edit((fresh) => {
@@ -139,11 +154,16 @@ export function createMemoryLearning(options: {
         });
         return;
       }
-      ops = proposed;
+      plans.push({ owner, messages: group, ops: proposed });
     }
     const result = await options.memory.edit((fresh) => {
       if (fresh.reflected !== tree.reflected) return;
-      const { applied: operations } = applyOps(fresh, ops, messages, new Date().toISOString());
+      const now = new Date().toISOString();
+      const operations = plans.flatMap(({ owner, messages: group, ops }) => {
+        const { applied } = applyOps(fresh, ops, group, now);
+        claimNotes(fresh, new Set(group.map((message) => message.id)), owner);
+        return applied;
+      });
       fresh.reflected = mark;
       fresh.retries = 0;
       return { operations, applied: operations.length, more: rows.length === batchSize };
@@ -157,9 +177,11 @@ export function createMemoryLearning(options: {
     sourceMessageId: string | null,
     commit: <T>(write: () => Promise<T>) => Promise<T> = (write) => write(),
     signal?: AbortSignal,
+    scope: MemoryScope = 'nod',
   ) {
     signal?.throwIfAborted();
     const input = rememberInput.parse(raw);
+    const owner = scope !== 'nod' && scope.mode !== 'shared' ? scope.teammate : undefined;
     if (!sourceMessageId) throw new Error('Only a message from the owner can save to memory.');
     if (!options.curator.configured) throw new Error('Saving to memory needs the memory model.');
     const tree = await options.memory.load();
@@ -176,7 +198,10 @@ export function createMemoryLearning(options: {
        ORDER BY m.created_at,m.id`,
       [options.ownerId, required, sourceMessageId],
     );
-    const messages: OwnerText[] = rows.filter((row) => !unsafe(row.text));
+    const owners = await options.memory.chatOwners(rows.map((row) => row.id));
+    const messages: OwnerText[] = rows.filter(
+      (row) => !unsafe(row.text) && owners.get(row.id) === owner,
+    );
     const clicked = await options.pool.query(
       'SELECT 1 FROM messages WHERE id=$2 AND owner_id=$1 AND approval_answer IS NOT NULL',
       [options.ownerId, sourceMessageId],
@@ -206,7 +231,11 @@ export function createMemoryLearning(options: {
             instructions: rememberInstructions(tree.sensitive),
             input: {
               today: new Date().toISOString().slice(0, 10),
-              memory: JSON.stringify(indexLayout(tree, { tentative: true })),
+              memory: JSON.stringify(
+                indexLayout(scoped(tree, learningScope(owner)), {
+                  tentative: true,
+                }),
+              ),
               current: said.at(-1),
               earlier: said.slice(0, -1),
             },
@@ -231,6 +260,7 @@ export function createMemoryLearning(options: {
           new Date().toISOString(),
           'stated',
         );
+        claimNotes(fresh, new Set(ordered.map((message) => message.id)), owner);
         if (rejected.length) throw new Error(`Nothing was saved. ${notSaved(rejected)}`);
         return applied;
       }),

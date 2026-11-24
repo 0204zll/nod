@@ -12,6 +12,7 @@ import { activeThreadSql, createHistorySearch } from './history.ts';
 import { withdrawnSql } from './turn-chain.ts';
 import { createSchedules, type ScheduleDependencies } from './schedules.ts';
 import type { MemoryChange } from './analytics.ts';
+import type { MemoryScope } from './memory-tree.ts';
 import { modelSelectionInput, type createModelService } from './models.ts';
 import { defaultEffort } from '../shared/model-defaults.ts';
 import type { ModelRoute, ModelSelection } from '../shared/models.ts';
@@ -154,17 +155,25 @@ export function createPersonalService(dependencies: PersonalDependencies) {
   async function reviewMemory(
     action: string,
     args: Record<string, unknown>,
-    provenance: { sourceMessageId: string | null; turnId: string; ownerRooted: boolean },
+    provenance: {
+      sourceMessageId: string | null;
+      turnId: string;
+      ownerRooted: boolean;
+      memoryScope?: MemoryScope;
+    },
   ): Promise<Record<string, unknown>> {
     if (!memory) throw new Error('Memory is unavailable.');
     if (action === 'memory_forget') {
       if (!provenance.sourceMessageId || !provenance.ownerRooted)
         throw new Error('Only a request from the owner can forget a note.');
       const { path } = forgetInput.parse(args);
-      const note = await memory.note(path);
+      const note = await memory.note(path, provenance.memoryScope);
       if (note === undefined) throw new Error('This note is no longer in memory.');
       return { path, note };
     }
+    const scope = provenance.memoryScope;
+    if (scope && scope !== 'nod' && scope.mode !== 'shared')
+      throw new Error('Memory settings change in the owner’s chat with Nod.');
     const { quote, ...change } = args;
     const input = controlInput.parse(change);
     if (input.clear && !provenance.ownerRooted)
@@ -182,8 +191,14 @@ export function createPersonalService(dependencies: PersonalDependencies) {
       expectedRevision?: number;
       instructionChange?: InstructionChange;
     },
-    options?: { expectedRules?: string; expectedNotificationRule?: string; client?: PoolClient },
+    options?: {
+      expectedRules?: string;
+      expectedNotificationRule?: string;
+      client?: PoolClient;
+      memoryScope?: MemoryScope;
+    },
   ) {
+    const memoryScope = options?.memoryScope;
     if (action === 'notification_preferences_get') return preferences.get();
     if (action === 'models_get') {
       if (!dependencies.models) throw new Error('Model settings are unavailable.');
@@ -285,11 +300,11 @@ export function createPersonalService(dependencies: PersonalDependencies) {
       );
     if (action === 'memory_find') {
       if (!memory) throw new Error('Memory is unavailable.');
-      return memory.find(args);
+      return memory.find(args, memoryScope);
     }
     if (action === 'memory_read') {
       if (!memory) throw new Error('Memory is unavailable.');
-      return memory.read(args);
+      return memory.read(args, memoryScope);
     }
     if (action === 'memory_control') {
       if (!memory) throw new Error('Memory is unavailable.');
@@ -301,11 +316,11 @@ export function createPersonalService(dependencies: PersonalDependencies) {
     if (action === 'memory_forget') {
       if (!memory) throw new Error('Memory is unavailable.');
       const input = forgetReview.parse(args);
-      const result = await memory.forget(input.path, input.note);
+      const result = await memory.forget(input.path, input.note, memoryScope);
       remembered('forget', 'agent');
       return result;
     }
-    if (action === 'history_search') return searchHistory(args);
+    if (action === 'history_search') return searchHistory(args, memoryScope);
     throw new Error('This personal-data action is not available.');
   }
 

@@ -2379,7 +2379,7 @@ test(
       );
 
       await t.test(
-        'a named chat keeps follow-ups to itself and starts each request fresh',
+        'a teammate keeps follow-ups to itself and starts each request fresh',
         async (t) => {
           const previousObserver = inspectObserver;
           t.after(() => {
@@ -2400,13 +2400,21 @@ test(
           let chat: Task | undefined;
           let reuse: Promise<unknown> | undefined;
           let writing: string | undefined;
-          let record: { chat: { id: string }; messages: Array<{ text: string }> } | undefined;
+          let record: { record: { id: string }; messages: Array<{ text: string }> } | undefined;
           inspectObserver = async (context) => {
+            if (context.taskContext?.teammate?.setup) {
+              await context.task!({
+                action: 'finish',
+                id: context.taskContext.id,
+                status: 'done',
+                result: 'Ready',
+              });
+              return { status: 'succeeded' };
+            }
             if (context.prompt === prompt && !context.background) {
               chat = (await context.task!({
                 action: 'start',
-                name: 'Recruiter',
-                newBecause: 'No synthetic chat hires people yet.',
+                teammate: chat!.id,
                 title: 'Find a synthetic designer',
                 message: 'Recruiter is on it.',
                 doneWhen: 'A synthetic shortlist exists',
@@ -2415,24 +2423,24 @@ test(
               await assert.rejects(
                 context.task!({
                   action: 'start',
-                  name: 'recruiter',
-                  title: 'Duplicate',
-                  message: 'Duplicate',
+                  teammate: randomUUID(),
+                  title: 'Missing',
+                  message: 'Missing',
                   doneWhen: 'Never',
                   now: 'Never',
                 }),
-                /already exists/,
+                /No teammate has this id/,
               );
               return { status: 'succeeded' };
             }
             if (context.prompt === next && !context.background) {
               record = (await context.task!({
                 action: 'read',
-                chat: 'recruiter',
+                id: 'recruiter',
               })) as typeof record;
               reuse = context.task!({
                 action: 'start',
-                chat: chat!.id,
+                teammate: chat!.id,
                 title: 'Find a synthetic copywriter',
                 message: 'On it.',
                 doneWhen: 'A synthetic copywriter shortlist exists',
@@ -2444,7 +2452,7 @@ test(
             if (context.prompt === slow && !context.background) {
               await context.task!({
                 action: 'start',
-                chat: chat!.id,
+                teammate: chat!.id,
                 title: 'Finish synthetically',
                 message: 'On it.',
                 doneWhen: 'A synthetic slow result exists',
@@ -2457,21 +2465,12 @@ test(
               if (context.taskContext) throw new ModelRequestError('Synthetic chat failure');
               await context.task!({
                 action: 'start',
-                chat: chat!.id,
+                teammate: chat!.id,
                 title: 'Fail synthetically',
                 message: 'On it.',
                 doneWhen: 'Never',
                 now: 'Failing',
               });
-              return { status: 'succeeded' };
-            }
-            if (context.taskContext?.nameAuto) {
-              const own = { action: 'name', id: context.taskContext.id };
-              await context.task!({ ...own, name: 'Travel' });
-              await assert.rejects(
-                context.task!({ ...own, name: 'Trips' }),
-                /already has its name/,
-              );
               return { status: 'succeeded' };
             }
             if (context.taskContext?.id !== chat?.id || !chat) return;
@@ -2500,6 +2499,32 @@ test(
             return { status: 'succeeded' };
           };
           await waitFor(settledThread);
+          const created = await app.inject({
+            method: 'POST',
+            url: '/api/teammates',
+            headers,
+            payload: {},
+          });
+          assert.equal(created.statusCode, 200);
+          assert.equal(created.json().name, 'New teammate');
+          assert.equal(created.json().teammate.memory, 'read');
+          chat = created.json() as Task;
+          await waitFor(
+            async () => (await tasks.read()).find(({ id }) => id === chat!.id)?.status === 'done',
+          );
+          const setupTurn = (
+            await db.pool.query('SELECT session_id,task_id,source FROM turns WHERE task_id=$1', [
+              chat.id,
+            ])
+          ).rows;
+          assert.deepEqual(setupTurn, [{ session_id: chat.id, task_id: chat.id, source: 'task' }]);
+          const named = await app.inject({
+            method: 'PATCH',
+            url: `/api/teammates/${chat.id}`,
+            headers,
+            payload: { name: 'Recruiter', job: 'Hiring' },
+          });
+          assert.equal(named.json().name, 'Recruiter');
           const request = await userMessages.submit(prompt);
           await waitFor(settled(request.turnId));
           assert.ok(chat, 'the coordinator fixture did not start the chat');
@@ -2611,7 +2636,7 @@ test(
             [['Synthetic chat result', request.messageId]],
           );
           const inChat = (
-            await app.inject({ method: 'GET', url: `/api/chats/${chat!.id}/messages`, headers })
+            await app.inject({ method: 'GET', url: `/api/teammates/${chat!.id}/messages`, headers })
           ).json().messages as Shown[];
           assert.ok(!inChat.some(({ chatReport }) => chatReport));
           assert.equal(inChat.find(({ id }) => id === first.messageId)?.inMain, false);
@@ -2651,7 +2676,7 @@ test(
               (
                 await app.inject({
                   method: 'GET',
-                  url: `/api/chats/${chat!.id}/messages`,
+                  url: `/api/teammates/${chat!.id}/messages`,
                   headers,
                 })
               ).json().messages as Array<{ id: string }>
@@ -2668,29 +2693,36 @@ test(
           const wrong = randomUUID();
           await assert.rejects(
             userMessages.submit('Synthetic message to a missing chat', [], { chatId: wrong }),
-            /unavailable/,
+            /removed/,
           );
 
           const made = await app.inject({
             method: 'POST',
-            url: '/api/chats',
+            url: '/api/teammates',
             headers,
-            payload: { name: 'Finance' },
+            payload: {},
           });
-          assert.equal(made.statusCode, 200);
-          assert.equal(made.json().name, 'Finance');
-          assert.equal(made.json().pinned, true);
+          await waitFor(
+            async () =>
+              (await tasks.read()).find(({ id }) => id === made.json().id)?.status === 'done',
+          );
           assert.equal(
             (
               await app.inject({
-                method: 'POST',
-                url: '/api/chats',
+                method: 'PATCH',
+                url: `/api/teammates/${made.json().id}`,
                 headers,
-                payload: { name: 'finance' },
+                payload: { name: 'recruiter' },
               })
             ).statusCode,
             409,
           );
+          await app.inject({
+            method: 'PATCH',
+            url: `/api/teammates/${made.json().id}`,
+            headers,
+            payload: { name: 'Finance', job: 'Money' },
+          });
           const hello = await userMessages.submit('Synthetic first message in Finance', [], {
             chatId: made.json().id,
           });
@@ -2706,42 +2738,27 @@ test(
           assert.equal((await message(hello.messageId)).chat_only, true);
           await waitFor(settled(hello.turnId));
 
-          const unnamed = (
-            await app.inject({
-              method: 'POST',
-              url: '/api/chats',
-              headers,
-              payload: {},
-            })
-          ).json();
-          assert.equal(unnamed.name, 'New chat');
-          assert.equal(unnamed.nameAuto, true);
-          const trip = await userMessages.submit('Synthetic travel plans for spring', [], {
-            chatId: unnamed.id,
-          });
-          await waitFor(settled(trip.turnId));
-          const travel = (await tasks.read()).find(({ id }) => id === unnamed.id);
-          assert.equal(travel?.name, 'Travel');
-          assert.equal(travel?.nameAuto, undefined);
-
           const again = await userMessages.submit(next);
           await waitFor(settled(again.turnId));
           await reuse;
-          assert.equal(record?.chat.id, chat!.id);
+          assert.equal(record?.record.id, chat!.id);
           const read = record!.messages.map(({ text }) => text);
           assert.ok(read.includes('Second synthetic request in the chat'));
           assert.ok(!read.includes('Synthetic first message in Finance'));
           await waitFor(async () => (await row()).state === 'done');
           const reused = await row();
           assert.equal(reused.source_message_id, again.messageId);
-          assert.equal(
+          assert.deepEqual(
             (
               await db.pool.query(
-                'SELECT m.text FROM messages m JOIN tasks t ON t.message_id=m.id WHERE t.id=$1',
+                'SELECT m.text,m.handoff FROM messages m JOIN tasks t ON t.message_id=m.id WHERE t.id=$1',
                 [chat!.id],
               )
-            ).rows[0].text,
-            'Recruiter: On it.',
+            ).rows[0],
+            {
+              text: 'On it.',
+              handoff: { teammate: chat!.id, title: 'Find a synthetic copywriter' },
+            },
           );
           const chatList = await transaction(
             (client) => tasks.chatCommand(client, 'tasks'),
@@ -2750,8 +2767,8 @@ test(
           assert.ok(
             chatList.replies.some(
               ({ presentation }) =>
-                (presentation as { data?: { task?: { chat?: string } } })?.data?.task?.chat ===
-                'Recruiter',
+                (presentation as { data?: { task?: { teammate?: string } } })?.data?.task
+                  ?.teammate === 'Recruiter',
             ),
           );
           const granted = await evidence();
@@ -2763,7 +2780,7 @@ test(
           assert.equal(granted.find(({ id }) => id === second.messageId)?.canAuthorize, false);
           assert.ok(!granted.some(({ id }) => id === hello.messageId));
           const kept = (
-            await app.inject({ method: 'GET', url: `/api/chats/${chat!.id}/messages`, headers })
+            await app.inject({ method: 'GET', url: `/api/teammates/${chat!.id}/messages`, headers })
           ).json().messages as Array<{ id: string }>;
           assert.ok(kept.some(({ id }) => id === request.messageId));
           assert.equal((await tasks.read()).filter(({ name }) => name === 'Recruiter').length, 1);
@@ -2793,44 +2810,6 @@ test(
             asked.turnId,
           );
           await waitFor(settled(answered.turnId));
-
-          const origin = (
-            await db.pool.query(
-              `SELECT m.id,q.text AS request FROM messages m JOIN turns u ON u.id=m.turn_id
-               JOIN messages q ON q.id=u.message_id
-               WHERE m.role='assistant' AND NOT m.chat_only AND m.text<>'' AND u.session_id=u.thread_id
-               ORDER BY m.created_at DESC LIMIT 1`,
-            )
-          ).rows[0];
-          const continued = await app.inject({
-            method: 'POST',
-            url: '/api/chats',
-            headers,
-            payload: { from: origin.id },
-          });
-          assert.equal(continued.statusCode, 200);
-          assert.equal(continued.json().name, 'Side chat');
-          assert.equal(continued.json().nameAuto, true);
-          assert.equal(continued.json().continuedFrom, origin.id);
-          assert.equal(continued.json().title, origin.request);
-          const repeated = await app.inject({
-            method: 'POST',
-            url: '/api/chats',
-            headers,
-            payload: { from: origin.id },
-          });
-          assert.equal(repeated.json().id, continued.json().id);
-          assert.equal(
-            (
-              await app.inject({
-                method: 'POST',
-                url: '/api/chats',
-                headers,
-                payload: { from: question.id },
-              })
-            ).statusCode,
-            404,
-          );
 
           const slowRequest = await userMessages.submit(slow);
           await finishedSlow;
@@ -3826,7 +3805,7 @@ test(
           assert.equal(await workOf(start.messageId), undefined);
           const quoted = async (turnId: string) =>
             (
-              (await request('GET', `/api/chats/${taskId}/messages`)).json().messages as Array<{
+              (await request('GET', '/api/state')).json().messages as Array<{
                 role: string;
                 turnId: string | null;
                 replyTo?: { id: string; role: string } | null;
@@ -8292,7 +8271,10 @@ test(
           assert.equal(current.workspacePath, join(root, 'workspaces', freshThread));
           assert.notEqual(current.workspacePath, heldContext.workspacePath);
           assert.deepEqual(current.history, []);
-          assert.deepEqual(current.tasks, []);
+          assert.deepEqual(
+            current.tasks?.filter((task) => !task.teammate),
+            [],
+          );
           await db.pool.query(
             "INSERT INTO tasks(id,owner_id,turn_id,title,done_when,now_text,state,result) VALUES($1,$2,$3,'Fresh task','Fixture done','Fixture step','done','Fresh task result')",
             [randomUUID(), ownerId, fresh.json().turnId],
@@ -8303,7 +8285,9 @@ test(
           });
           await waitFor(async () => (await turnStatus(followUp.json().turnId)) === 'succeeded');
           assert.deepEqual(
-            ran(followUp.json().turnId)!.tasks?.map((task) => task.title),
+            ran(followUp.json().turnId)!
+              .tasks?.filter((task) => !task.teammate)
+              .map((task) => task.title),
             ['Fresh task'],
           );
           assert.equal(
@@ -12841,6 +12825,82 @@ const scriptedCurator = (configured = true) => {
   };
   return { calls, state, curator };
 };
+
+test(
+  "a teammate's own notes stay with it and Nod never reads them",
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 30_000 },
+  async () => {
+    const { pool, ownerId, post, memory, close } = await memoryFixture([
+      approvalsTable,
+      'ALTER TABLE turns ADD COLUMN task_id uuid',
+      "CREATE TABLE tasks (id uuid PRIMARY KEY, owner_id text NOT NULL, name text, memory text NOT NULL DEFAULT 'shared')",
+    ]);
+    const { calls, state, curator } = scriptedCurator();
+    const learning = createMemoryLearning({ pool, ownerId, memory, curator });
+    try {
+      const olive = randomUUID();
+      await pool.query("INSERT INTO tasks(id,owner_id,name,memory) VALUES($1,$2,'Olive','own')", [
+        olive,
+        ownerId,
+      ]);
+      await memory.edit((tree) => {
+        tree.reflected = nilMark;
+      });
+      await post('My sister Ana lives in Lisbon.', { at: '2026-01-01T10:00:00Z' });
+      const meal = await post('I eat vegetarian on weekdays.', { at: '2026-01-01T10:01:00Z' });
+      await pool.query("INSERT INTO turns(id,owner_id,channel,task_id) VALUES($1,$2,'web',$3)", [
+        meal.turnId,
+        ownerId,
+        olive,
+      ]);
+      state.answer = (input) => {
+        const [message] = (input as { messages: Array<{ text: string }> }).messages;
+        const diet = message!.text.includes('vegetarian');
+        return {
+          ops: [
+            {
+              op: 'add',
+              sensitive: false,
+              area: diet ? 'preferences' : 'people',
+              slug: diet ? 'diet' : 'ana',
+              text: diet ? 'Eats vegetarian on weekdays.' : "Ana is the user's sister in Lisbon.",
+              m: [1],
+              quote: diet ? 'vegetarian on weekdays' : 'sister Ana',
+            },
+          ],
+        };
+      };
+      await learning.reflect();
+      assert.deepEqual(
+        calls.map(({ input }) => (input as { messages: unknown[] }).messages.length),
+        [1, 1],
+      );
+      assert.deepEqual(
+        (await memory.load()).entries
+          .map(({ slug, teammate }) => [slug, teammate])
+          .sort(([a], [b]) => String(a).localeCompare(String(b))),
+        [
+          ['ana', undefined],
+          ['diet', olive],
+        ],
+      );
+      const own = { teammate: olive, mode: 'own' } as const;
+      assert.equal((await memory.find({ query: 'vegetarian' }, 'nod')).length, 0);
+      assert.equal((await memory.find({ query: 'vegetarian' }, own)).length, 1);
+      assert.equal((await memory.find({ query: 'Ana' }, own)).length, 0);
+      assert.equal((await memory.find({ query: 'Ana' }, { ...own, mode: 'read' })).length, 1);
+      assert.doesNotMatch(await memory.context('nod'), /diet/);
+      await assert.rejects(memory.forget('preferences/diet', undefined, 'nod'), /no longer/);
+      await memory.removeTeammate(olive);
+      assert.deepEqual(
+        (await memory.load()).entries.map(({ slug }) => slug),
+        ['ana'],
+      );
+    } finally {
+      await close();
+    }
+  },
+);
 
 test(
   'memory opt-out stops background work and rejects reflection started before disable and re-enable',

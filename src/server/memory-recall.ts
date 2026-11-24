@@ -5,7 +5,7 @@ import type { RuntimeContext } from '../ports/agent.ts';
 import type { MemoryBrief } from '../ports/memory-recall.ts';
 import type { MemoryService } from './memory.ts';
 import { createHistorySearch } from './history.ts';
-import { unsafe } from './memory-tree.ts';
+import { turnMemoryScope, unsafe } from './memory-tree.ts';
 
 const planSchema = z.object({
   mode: z.enum(['none', 'personalize', 'recall', 'aggregate']),
@@ -76,7 +76,8 @@ export function createMemoryRecall(options: {
       (context.background && !context.taskContext)
     )
       return;
-    const view = await options.memory.view();
+    const scope = turnMemoryScope(context.taskContext);
+    const view = await options.memory.view(scope);
     const today = new Date().toISOString().slice(0, 10);
     const notes = view.notes.filter(
       (note) => (!note.expires || note.expires >= today) && !unsafe(note.text),
@@ -91,7 +92,7 @@ export function createMemoryRecall(options: {
         return bounded;
       });
     if (!notes.length && !recent.length && !context.relatedConversation?.length) return;
-    const fallback = await options.memory.find({ query: context.prompt });
+    const fallback = await options.memory.find({ query: context.prompt }, scope);
     const selectionDeadline = AbortSignal.timeout(1_000);
     const parsed = planSchema.safeParse(
       options.curator.configured && canContinue()
@@ -136,7 +137,7 @@ export function createMemoryRecall(options: {
       let cursor: string | undefined;
       for (let page = 0; page < (plan.mode === 'aggregate' ? 5 : 1); page++) {
         signal.throwIfAborted();
-        const result = await search({ query, cursor });
+        const result = await search({ query, cursor }, scope);
         for (const message of result.messages) {
           if (message.id === context.currentMessageId || unsafe(message.text)) continue;
           if (plan.mode === 'personalize' && message.role !== 'user') continue;

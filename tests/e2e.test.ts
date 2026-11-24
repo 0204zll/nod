@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { randomUUID } from 'node:crypto';
-import { startNod } from './e2e-harness.ts';
+import { startNod, type NodMessage } from './e2e-harness.ts';
 
 test(
   'end to end, every request keeps its own work through bursts, steering, stops and a crash',
@@ -13,7 +12,7 @@ test(
       nod.query<{ title: string; status: string; result: string }>(
         `SELECT t.title,t.state AS status,
            (SELECT string_agg(m.text, ' | ' ORDER BY m.created_at) FROM messages m JOIN turns u ON u.id=m.turn_id
-            WHERE u.task_id=t.id AND m.role='assistant' AND m.text LIKE 'Done:%' AND NOT m.chat_report) AS result
+            WHERE u.task_id=t.id AND m.role='assistant' AND m.text LIKE 'Done:%') AS result
          FROM tasks t ORDER BY t.created_at`,
       );
 
@@ -34,14 +33,6 @@ test(
         ],
       );
       assert.ok(first.turnId);
-      assert.deepEqual(
-        (await nod.state()).messages.filter((message) => message.chatReport).map((m) => m.text),
-        [
-          'Done: task: compare Lisbon hotels',
-          'Done: task: write a packing list',
-          'Done: task: research the Charles Bridge',
-        ],
-      );
       assert.deepEqual(await nod.violations(), []);
     });
 
@@ -51,16 +42,50 @@ test(
       assert.ok(hotels);
       await nod.send('only near the metro', { replyTo: hotels.id });
       await nod.settle();
-      const delivered = await nod.query<{ name: string }>(
-        `SELECT t.name FROM turns u JOIN tasks t ON t.id=u.task_id JOIN messages m ON m.id=u.message_id
+      const delivered = await nod.query<{ title: string }>(
+        `SELECT t.title FROM turns u JOIN tasks t ON t.id=u.task_id JOIN messages m ON m.id=u.message_id
          WHERE m.text='only near the metro'`,
       );
-      assert.deepEqual(delivered, [{ name: 'compare Lisbon' }]);
+      assert.deepEqual(delivered, [{ title: 'compare Lisbon hotels' }]);
       assert.deepEqual(await nod.violations(), []);
     });
 
-    await t.test('an approval a side chat asks for stays there and runs once', async () => {
-      await nod.send('task: approve: raise the limit');
+    await t.test('a request for a teammate runs in its chat and reports back once', async () => {
+      const created = await nod.api<{ id: string }>('POST', '/api/teammates', {});
+      await nod.settle();
+      await nod.api('PATCH', `/api/teammates/${created.id}`, { name: 'Penny', job: 'Bills' });
+      const sent = await nod.send('@Penny file the March bill');
+      await nod.settle();
+      assert.deepEqual(
+        await nod.query(
+          'SELECT session_id,task_id FROM turns WHERE message_id=$1 AND task_id IS NOT NULL',
+          [sent.messageId],
+        ),
+        [{ session_id: created.id, task_id: created.id }],
+      );
+      const { messages } = await nod.state();
+      assert.deepEqual(
+        messages.filter((message) => message.handoff).map((message) => message.handoff),
+        [{ teammate: created.id, title: 'file the March bill' }],
+      );
+      assert.deepEqual(
+        messages.filter((message) => message.chatReport).map((message) => message.text),
+        ['Done: @Penny file the March bill'],
+      );
+      const own = await nod.api<{ messages: NodMessage[] }>(
+        'GET',
+        `/api/teammates/${created.id}/messages`,
+      );
+      assert.ok(
+        own.messages.some(
+          (message) => message.text === 'Done: @Penny file the March bill' && !message.chatReport,
+        ),
+      );
+      assert.deepEqual(await nod.violations(), []);
+    });
+
+    await t.test('an approval a teammate asks for stays in its chat and runs once', async () => {
+      await nod.send('@Penny approve: raise the limit');
       const pending = () =>
         nod.query<{ id: string; confirmation: string; chat: string }>(
           `SELECT a.id,a.confirmation_message_id AS confirmation,u.task_id AS chat
@@ -73,7 +98,7 @@ test(
       await nod.api('POST', '/api/messages', {
         text: 'Yes',
         threadId,
-        clientMessageId: randomUUID(),
+        clientMessageId: crypto.randomUUID(),
         chatId: approval!.chat,
         replyToMessageId: approval!.confirmation,
         approvalAnswer: { approvalId: approval!.id, approved: true },
@@ -140,7 +165,7 @@ test(
         await nod.restart();
         await nod.settle();
         const [interrupted] = await nod.query<{ status: string; error: string; notice: string }>(
-          `SELECT u.status,u.error,(SELECT m.text FROM messages m WHERE m.turn_id=u.id AND m.role='assistant' AND NOT m.chat_report) AS notice
+          `SELECT u.status,u.error,(SELECT m.text FROM messages m WHERE m.turn_id=u.id AND m.role='assistant') AS notice
          FROM turns u JOIN tasks t ON t.id=u.task_id WHERE t.title='hold: draft the newsletter'`,
         );
         assert.equal(interrupted?.status, 'failed');

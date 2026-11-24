@@ -9,7 +9,7 @@ Chat is where you give Nod work, answer its questions and get the results.
 
 Nod keeps one ongoing conversation with you. The desktop app, the web app, Telegram and WhatsApp all add to that same conversation, so Nod remembers what you said in any of them.
 
-To change topics, type your new request in this conversation. Bigger work goes to a [side chat](/use/tasks/#side-chats) that Nod starts for it, and **New chat** in the chat list starts one yourself. You do not need to delete data to change topics.
+To change topics, type your new request in this conversation. You do not need to delete data to change topics. For a job you hand off again and again, add a [teammate](/use/teammates/) with its own chat, and type **@** in your chat with Nod to bring it in.
 
 Nod follows your latest clear message's language, spoken or typed, including questions, confirmations and connection instructions. This covers tasks too: a task you started in one language reports in the language of your latest message. Answers to approval cards don't count. When your latest message is too short to tell, Nod keeps the language it last used. An explicit language request takes precedence. Your email, websites and other data never set it, and before you've written anything, such as at the start of setup, Nod writes in English. Asking for an email or document in a different language applies to that output; a neutral acknowledgement such as "OK" keeps the preceding language. What Nod reads on websites, in email and in documents comes back translated. It keeps the original wording only in quotes, such as a menu or button name you need to find, with a short translation when the meaning isn't clear. Voice, region, date format and time zone are separate preferences.
 
@@ -130,7 +130,7 @@ After an operation finishes, the line keeps up to four recent operations, with t
 
 ![Expanded recent activity below the current step and above the message box.](../../../assets/screens/chat-recent-activity.png)
 
-The line follows only the work on your messages. A task started in chat shows its progress in its [side chat](/use/tasks/#side-chats), which opens from the tasks line at the end of the chat, and a question from a task or schedule shows it on the small line above that question. When your message goes to a task, the line's place shows that task's title and current step under your message. This happens when you reply to one of the task's messages or answer its question, or when Nod sends your message to the task. The task's progress stays there until it posts a message, finishes or needs you. Select it to open the task. Meanwhile, the line above an earlier question from that task shows only the task's name. While anything works, the message box says **Send another message to Nod…**. While tasks started in chat run, one line at the end of the chat counts them and says how many need you, such as "2 tasks running · 1 needs you". Select it to open a task. See [Tasks](/use/tasks/).
+The line follows only the work on your messages. A task started in chat shows its progress on its own card, which opens from the tasks line at the end of the chat, and a question from a task or schedule shows it on the small line above that question. When your message goes to a task, the line's place shows that task's title and current step under your message. This happens when you reply to one of the task's messages or answer its question, or when Nod sends your message to the task. The task's progress stays there until it posts a message, finishes or needs you. Select it to open the task. Meanwhile, the line above an earlier question from that task shows only the task's name. While anything works, the message box says **Send another message to Nod…**. While tasks started in chat run, one line at the end of the chat counts them and says how many need you, such as "2 tasks running · 1 needs you". Select it to open a task's card. See [Tasks](/use/tasks/).
 
 ### Send more while Nod works
 
@@ -154,7 +154,7 @@ In the web and desktop apps, if Nod cannot recover from a context error, a small
 
 The banner appears only after automatic recovery fails and the chat has stopped. It is hidden when you start another chat request. Connection, access and quota errors keep their specific error and recovery steps.
 
-The **Chat** icon on the left shows a moving dot while Nod works and a solid dot when it's waiting for you. In the chat list, a moving dot marks a side chat that's working and **?** marks one that needs you.
+In the sidebar, **Nod** shows **Working…** and a moving dot while Nod works, and a dot when there are new messages. Each [teammate](/use/teammates/) has its own row with its latest message.
 
 ### In Telegram and WhatsApp
 
@@ -213,7 +213,7 @@ Nod has one main chat. `/clear` does not create a second conversation or delete 
 
 ## Stop Nod
 
-While Nod works, the status line under the chat shows its work on your messages, and each task started in chat shows its progress in its side chat, which opens from the tasks line at the end of the chat.
+While Nod works, the status line under the chat shows its work on your messages, and each task started in chat shows its progress on its card, which opens from the tasks line at the end of the chat.
 
 While the message box is empty, **Stop** appears beside the send button while Nod is working. Select it to stop Nod. The send button stays in place and becomes available when you type a message.
 
@@ -239,13 +239,13 @@ If Nod may have sent or changed something, verify the result yourself or ask Nod
 
 Open the **Settings** page, then **Models** to choose the model Nod uses from your connected providers. See [Models](/connect/models/).
 
-## Show or hide the list
+## Adjust the sidebar
 
-The icons on the left open **Chat**, **Scheduled** and **Settings**. Each one shows its list next to the icons. Select the panel button next to the list's title to hide the list, and the same button at the top of the page to show it again. Narrow screens use the navigation menu at the top.
+The sidebar lists **Nod**, your teammates and **Settings**. Press ⌘B on a Mac or Ctrl+B on Windows and Linux to hide or show it; while it's hidden, the button at the top left shows it again. On a narrow screen, the sidebar becomes a row at the top with Nod, your teammates and Settings.
 
 ## Desktop shortcuts
 
-In the desktop app, hold Command on a Mac or Ctrl on Windows and Linux to reveal the navigation tooltips. These are the same tooltips shown on hover. Use that key with 1–6 for Chat, Scheduled, Apps, Channels, Usage and Vault, including while the chat message box is focused; B shows or hides the list, and comma opens Settings > General. Web browsers keep their own shortcuts.
+In the desktop app, hold Command on a Mac or Ctrl on Windows and Linux to reveal the navigation tooltips. These are the same tooltips shown on hover. Use that key with 1–6 for Chat, Scheduled, Apps, Channels, Usage and Vault, including while the chat message box is focused; B hides or shows the sidebar, and comma opens Settings. Web browsers keep their own shortcuts.
 
 ## React to messages
 
@@ -257,17 +257,18 @@ Nod sometimes reacts to your messages too, such as ✅ when you say yes to somet
 
 Links to Nod screens open in the current window. A link to **Settings > Models** opens that Settings tab. Close Settings to return to the screen and control you used before. Browser Back and Forward also work.
 
-| To see or change                          | Open                    |
-| ----------------------------------------- | ----------------------- |
-| Your conversation                         | **Chat**                |
-| Scheduled work                            | **Scheduled**           |
-| App connections                           | **Settings > Apps**     |
-| Telegram and WhatsApp                     | **Settings > Channels** |
-| Spending and activity                     | **Settings > Usage**    |
-| Saved logins, cards, and browser sessions | **Settings > Vault**    |
-| General preferences                       | **Settings > General**  |
-| Model connections and selection           | **Settings > Models**   |
-| Saved notes and skills                    | **Settings > Memory**   |
+| To see or change                          | Open                     |
+| ----------------------------------------- | ------------------------ |
+| Your conversation                         | **Nod** in the sidebar   |
+| Teammates                                 | **Settings > Teammates** |
+| Scheduled work                            | **Settings > Scheduled** |
+| App connections                           | **Settings > Apps**      |
+| Telegram and WhatsApp                     | **Settings > Channels**  |
+| Spending and activity                     | **Settings > Usage**     |
+| Saved logins, cards, and browser sessions | **Settings > Vault**     |
+| General preferences                       | **Settings > General**   |
+| Model connections and selection           | **Settings > Models**    |
+| Saved notes and skills                    | **Settings > Memory**    |
 
 In Telegram and WhatsApp, a screen link opens a public page. Select **Open in Nod** on the computer where Nod is installed. On a phone, use the location on that page to continue in Nod on your computer. The link contains only the screen name. It cannot change settings or approve an action.
 

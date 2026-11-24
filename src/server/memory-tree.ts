@@ -103,6 +103,7 @@ const entryFields = z.object({
   expires: z.iso.date().optional(),
   fact: factSchema.optional().catch(undefined),
   quote: lines(400).optional().catch(undefined),
+  teammate: id.optional().catch(undefined),
 });
 const evidenced = (entry: z.infer<typeof entryFields>) =>
   entry.sources.length > 0 || !!entry.edited || entry.origin === 'email';
@@ -140,6 +141,38 @@ export interface Tree {
   archive: Archived[];
   skills: Skill[];
 }
+
+export type MemoryScope = 'nod' | { teammate: string; mode: 'shared' | 'read' | 'own' };
+
+export function visibleIn(scope: MemoryScope | undefined) {
+  return (entry: { teammate?: string }) =>
+    !scope
+      ? true
+      : scope === 'nod' || scope.mode === 'shared'
+        ? !entry.teammate
+        : scope.mode === 'read'
+          ? !entry.teammate || entry.teammate === scope.teammate
+          : entry.teammate === scope.teammate;
+}
+
+export function scoped(tree: Tree, scope: MemoryScope | undefined): Tree {
+  if (!scope) return tree;
+  const visible = visibleIn(scope);
+  return { ...tree, entries: tree.entries.filter(visible), archive: tree.archive.filter(visible) };
+}
+
+export function claimNotes(tree: Tree, ids: ReadonlySet<string>, owner: string | undefined) {
+  if (!owner) return;
+  for (const entry of [...tree.entries, ...tree.archive])
+    if (entry.sources.some((source) => ids.has(source))) entry.teammate = owner;
+}
+
+export const turnMemoryScope = (
+  task: { id: string; teammate?: { memory: 'shared' | 'read' | 'own' } } | null | undefined,
+): MemoryScope => (task?.teammate ? { teammate: task.id, mode: task.teammate.memory } : 'nod');
+
+export const learningScope = (owner: string | undefined): MemoryScope =>
+  owner ? { teammate: owner, mode: 'own' } : 'nod';
 
 export const emptyTree = (): Tree => ({
   enabled: true,

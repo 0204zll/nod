@@ -231,7 +231,7 @@ export interface ThreadDependencies {
   localFiles?: boolean;
   computerUse?: boolean;
   mcpServers?: () => Promise<NonNullable<RuntimeContext['mcpServers']>>;
-  memoryContext?: () => Promise<RuntimeContext['memory']>;
+  memoryContext?: (turnId: string) => Promise<RuntimeContext['memory']>;
   recall?: (
     text: string,
     before: Date | undefined,
@@ -977,7 +977,8 @@ export async function submitUserMessage(
       ],
     );
     const chatOnly = taskTarget
-      ? (await taskTarget.record(turnId, options.prompt ?? text, live)) && channel === 'web'
+      ? (await taskTarget.record(turnId, options.prompt ?? text, live)) &&
+        Boolean(await chatOnlyPlacement(client, ownerId, turnId))
       : false;
     if (live) await confirmAction?.close(client, question?.session_id ?? thread.id, turnId);
     const prepared = (await options.prepareAttachments?.(client, thread.id)) ?? [];
@@ -2016,7 +2017,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       [ownerId],
     ),
     dependencies.accountProfile?.().catch(() => undefined),
-    dependencies.memoryContext?.().catch(() => ''),
+    dependencies.memoryContext?.(turn.id).catch(() => ''),
     dependencies.learnedSkills?.().catch(() => undefined),
     turn.background
       ? dependencies.connectedApps?.()

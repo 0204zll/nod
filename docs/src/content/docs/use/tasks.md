@@ -5,7 +5,7 @@ sidebar:
   order: 2
 ---
 
-In chat, a link under Nod's message opens the task's [side chat](#side-chats), and one tasks line at the end of Main chat shows what your tasks are doing and what needs your attention. The **Scheduled** page holds schedules and their recent runs, and the tasks Nod starts on its own. Select **New schedule** to open chat, where Nod helps you decide what to do and when.
+In chat, a chip under Nod's message and one tasks line at the end of the chat show what your tasks are doing and what needs your attention. The **Scheduled** page holds open and finished tasks, schedules and their recent runs. Select **New schedule** to open chat, where Nod helps you decide what to do and when.
 
 Nod keeps quick answers, simple lookups and status questions in chat, including flight searches. It starts a saved task for substantial work, including multi-step work it can finish in one sitting, such as research across sources, checked comparisons or report creation, and for an outside wait, such as a person, a reply or an action elsewhere, or work you ask it to track. You never pick an execution mode: Nod starts the task itself and lets it finish the assigned work. Browsing a website, signing in, paying or using a desktop app always runs as its own task, with its own browser and questions.
 
@@ -21,45 +21,15 @@ The main chat stays available while tasks work. Each task keeps its goal and his
 
 Tasks share one [workspace](/use/workspace/#one-workspace-for-all-tasks) and owner memory. Each task has its own working folder and saved session. See [Task sessions](/how-it-works/task-sessions/) for the architecture.
 
-## Side chats
+## Tasks and teammates
 
-Every task Nod starts from your request gets a side chat named after its subject, such as **Designer search** or **Hosting costs**. The list next to the icons starts with **Main chat**, where briefings, reminders and your Telegram and WhatsApp messages land. Your side chats follow. A moving dot marks a chat that's working, and **?** marks one that needs you.
+When work fits one of your [teammates](/use/teammates/), Nod hands it to that teammate instead of starting a task, and the work happens in the teammate's chat. Everything else runs as a task here.
 
-Main chat stays clean. When Nod hands work to a side chat, its message in Main chat links to it with **Continued in** and the chat's name. The work, its questions and approvals, and its full answer stay in the side chat. When the work finishes, its result arrives in Main chat as one sentence under your request, with **Open** and the chat's name to read the rest. If the work fails, Main chat says why. Until then, the tasks line at the end of Main chat counts it, and selecting it opens the chat. Inside the side chat, a card under your request shows what Nod is doing now, and says when it needs you.
-
-![The Team offsite side chat asking which weekend works, with a ? next to it in the chat list.](../../../assets/screens/named-chats.png)
-
-| You want to                      | Do this                                                                                      |
-| -------------------------------- | -------------------------------------------------------------------------------------------- |
-| Hand over a piece of work        | Ask in Main chat. Nod starts a side chat for the work and stays free.                        |
-| Move an answer into its own chat | Select **Continue in a side chat** under Nod's latest answer in Main chat.                   |
-| Start a subject yourself         | Select **New chat** and write your first message. Nod names the chat after it.               |
-| Ask a follow-up                  | Type in the side chat, and Nod answers there. Or reply to its result in Main chat.           |
-| Answer a question or approval    | Open the chat marked **?**, or select the tasks line in Main chat, and answer there.         |
-| Send related work                | Ask in Main chat. Nod sends it to the side chat that already covers the subject.             |
-| Keep a chat in the list          | Open the chat's menu and select **Keep**.                                                    |
-| Rename or archive                | Use the chat's menu in the list or at the top right of the chat.                             |
-| See steps, activity or the model | Open the chat's menu and select **Details**.                                                 |
-| Find an older or archived chat   | Select **Earlier** under the chat list. Open an archived chat and select **Restore**.        |
-| Search one chat                  | Open the chat, then search. Results come from that chat only.                                |
-| Jump to a chat                   | Open the command menu and type the chat's name.                                              |
-| Hide the list                    | Select the panel button next to the list's title. The same button at the top shows it again. |
-
-A chat you continue from Main chat starts with your request and Nod's answer as context. It's called **Side chat** until your first message there, which names it.
-
-A side chat keeps its own conversation, so one subject does not crowd another. Every chat knows which other chats exist and what each is doing, and reads another chat's goal, result and latest messages when your request depends on it. Ask in one chat what another one found, and Nod looks it up. What a chat reads there is information only: it never counts as your permission for an action. Your memory, files, connected apps and rules are shared across all of them.
-
-Nod sends new work to the chat whose subject covers it. A second request about the same hire goes to the chat you already have, not to a new one.
-
-Each new request in a finished chat stands alone. An earlier message in that chat can give Nod context, but it cannot approve a new action.
-
-A chat you start or keep stays in the list, and Nod gives it new work on its subject. Nod never keeps a chat on its own. Other chats leave the list a day after they finish and move to **Earlier**. A notification for a side chat opens that chat, in the browser and in the desktop app.
-
-Telegram and WhatsApp keep one conversation, and your chats work inside it. Nod's first message for a chat carries its name, and the chat's questions and results reply to that message, so you can see which chat is talking. To talk to a chat, reply to any of its messages or just say what you need: Nod sends it to the chat that covers the subject. `/tasks` lists your chats.
+A teammate's chat keeps its own conversation, so one job does not crowd another. Each teammate knows which other teammates and tasks exist, and reads another one's goal, result and latest messages when your request depends on it. What it reads there is information only: it never counts as your permission for an action. Each new request to a teammate stands alone: an earlier message in its chat can give it context, but it cannot approve a new action.
 
 ## Scheduled work
 
-Open **Scheduled** to review upcoming schedules and the tasks Nod started on its own. Tasks you asked for are [side chats](#side-chats) in the chat list. Open tasks appear first, and a working task shows a live line of what it is doing. Expand **Finished** for tasks that are done or stopped, and **Inactive** for paused schedules. Select a schedule’s name for its runs. See [Schedules](/use/schedules/).
+Open **Scheduled** to review tasks and upcoming schedules. Open tasks appear first, and a working task shows a live line of what it is doing. Expand **Finished** for tasks that are done or stopped, and **Inactive** for paused schedules. Select a schedule’s name for its runs. See [Schedules](/use/schedules/).
 
 ![The Scheduled page with a working task and a task that needs you above two recurring schedules, each with its model, and three ideas for another schedule.](../../../assets/screens/scheduled-open-tasks.png)
 
@@ -77,11 +47,11 @@ Select **Rules** to ask Nod in chat to show the rules that apply to every task. 
 | **Done when**  | What finished looks like                                                          |
 | **Model**      | The model the task uses. Select **Change** to give this task its own model        |
 
-When Nod starts a task from your request, its message links to the task's side chat with **Continued in** and the chat's name. A task Nod starts on its own has a chip under its message that says **Task started** with the task's title. The chip follows the task's [status](#statuses), such as **Needs you**, **Finishing**, **Task done**, **Task failed** or **Task stopped**. Select it while the task is active to open the task or, once it's done and has an answer, to jump to that answer. A task that is waiting, checking back, failed or finished keeps its chip in chat, and its card with every control is on **Scheduled**.
+When Nod starts a task, a chip under its message says **Task started** with the task's title. The chip follows the task's [status](#statuses), such as **Needs you**, **Finishing**, **Task done**, **Task failed** or **Task stopped**. Select it while the task is active to open the task or, once it's done and has an answer, to jump to that answer. A task that is waiting, checking back, failed or finished keeps its chip in chat, and its card with every control is on **Scheduled**.
 
-While tasks that started in the chat run, one line at the end of the chat sums them up, such as "2 tasks running · 1 needs you". It sits on the right of Nod's own status line, on its last line, and takes that line on its own when Nod isn't working on anything else. Select it to list the tasks, then select one. A side chat opens, and a task Nod started on its own opens its card. With one task, it opens at once. The card shows the task's question when it needs you or what it is doing now, its plan as a checklist with how many steps are done, **Details** for when it counts as done, **Reply** and **Stop**. Nod's status line stays on one line until you open it. Hover over it or select it to read a long step in full. Selecting it also shows its recent steps.
+While tasks that started in the chat run, one line at the end of the chat sums them up, such as "2 tasks running · 1 needs you". It sits on the right of Nod's own status line, on its last line, and takes that line on its own when Nod isn't working on anything else. Select it to list the tasks, then select one to open its card. With one task, the card opens at once. The card shows the task's question when it needs you or what it is doing now, its plan as a checklist with how many steps are done, **Details** for when it counts as done, **Reply** and **Stop**. Nod's status line stays on one line until you open it. Hover over it or select it to read a long step in full. Selecting it also shows its recent steps.
 
-When your message goes to a task, the status line's place shows that task's title and current step under your message. This happens when you reply to one of the task's messages or answer its question, or when Nod sends your message to the task. The task's progress stays there until it posts a message, finishes or needs you. Select it to open the task. When you start a new task, its progress shows in its side chat.
+When your message goes to a task, the status line's place shows that task's title and current step under your message. This happens when you reply to one of the task's messages or answer its question, or when Nod sends your message to the task. The task's progress stays there until it posts a message, finishes or needs you. Select it to open the task. When you start a new task, its progress stays on its card.
 
 The live line keeps up to four recent completed steps, with the newest first. Tool calls under the same progress update share one entry; calls without a progress update appear separately. These details start closed for each turn. Select the line to show or hide them. This control works separately from the task's details.
 
@@ -91,7 +61,7 @@ Tasks Nod starts on its own, such as a reply your notification rule asks for, sh
 
 The progress indicator shows the task title above its current step. Both wrap so you can read the full text.
 
-![Main chat with a Continued in link under Nod's message, a finished side chat's result with an Open link, and 2 tasks running · 1 needs you at the end of the chat.](../../../assets/screens/task-sessions-chat.png)
+![Nod's chat with a Task started chip under its message and 2 tasks running · 1 needs you at the end of Nod's status line.](../../../assets/screens/task-sessions-chat.png)
 
 ## Reply or stop one task
 
@@ -101,11 +71,11 @@ A message without a reply target goes to the main chat. Nod can send that messag
 
 Say "Try again" just after Nod reports the result of a task you requested. In web or desktop chat, this also works for a result from Telegram or WhatsApp. In a chat app, the result must be in that chat. Nod continues the task with your original request and checks whether an action already happened before repeating it. If the target is unclear, Nod asks.
 
-When a task waits for you in its browser, its side chat shows the live page under its message. A task Nod started on its own shows **Open browser** on its card in chat and on its preview on **Scheduled**. See [Take over the browser](/use/browser/#take-over-the-browser).
+When a task waits for you in its browser, its card in chat and its preview on **Scheduled** show **Open browser**, which takes you to the live page. See [Take over the browser](/use/browser/#take-over-the-browser).
 
 An owner update has a revision. **Owner update queued** means the task has not received it at an execution boundary. An outside action that has already started can still finish. Other tasks continue while one task waits for your answer.
 
-In a side chat, the stop button in the message box or **Stop** in the chat's menu stops that task and its helpers. For a task Nod started on its own, open its card from the tasks line or its chip, or its preview on **Scheduled**, and select **Stop**. Other tasks continue. When a task asks you to approve an action, **Skip this step** declines only that action and the task goes on with its other work; **Stop the task** stops it. The main Stop control stops active work and closes all open tasks. You can also ask Nod in the main chat to stop one task, or all background work, including scheduled runs and app checks. Reset also closes the old thread's open tasks.
+Open a task's card from the tasks line or its chip, or its preview on **Scheduled**, and select **Stop** to stop that task and its helpers. Other tasks continue. When a task asks you to approve an action, **Skip this step** declines only that action and the task goes on with its other work; **Stop the task** stops it. The main Stop control stops active work and closes all open tasks. You can also ask Nod in the main chat to stop one task, or all background work, including scheduled runs and app checks. Reset also closes the old thread's open tasks.
 
 A task checks in when its spending since your last message to it passes the check-in amount, $5 by default, and asks whether to keep going. Tell Nod in chat to change the amount. See [Task check-ins](/use/spending/#task-check-ins).
 
@@ -139,9 +109,9 @@ On **Scheduled**, the card of a task that is done has **Schedule task**, which t
 
 ## Use tasks on mobile
 
-Mobile web shows the same links and tasks line, with a shorter summary such as "2 tasks · 1 needs you". Select the tasks line to open a task, read its steps, reply or stop it.
+Mobile web shows the same chip and tasks line, with a shorter summary such as "2 tasks · 1 needs you". Select the tasks line to open a task's card, read its steps, reply or stop it.
 
-![Mobile web Main chat with a Continued in link and 2 tasks · 1 needs you at the end of the chat.](../../../assets/screens/task-sessions-mobile.png)
+![Mobile web chat with a Task started chip and 2 tasks · 1 needs you next to Nod's status line.](../../../assets/screens/task-sessions-mobile.png)
 
 ## Telegram and WhatsApp without a task page
 
@@ -151,7 +121,7 @@ Use the chat app's **Reply** control to send an update or answer to a task. Othe
 
 | Command   | Result                                                                                                             |
 | --------- | ------------------------------------------------------------------------------------------------------------------ |
-| `/tasks`  | List open tasks, the chats you keep and chats that finished in the last day, one message each.                     |
+| `/tasks`  | List open tasks and their current state.                                                                           |
 | `/status` | Show each open task's goal, steps and current state. Reply to a task message to see only that task.                |
 | `/stop`   | Stop all active work and close open tasks. Reply to a task message with `/stop` to stop only that task.            |
 | `/clear`  | Start fresh main-chat context and a clean view. Independent tasks keep running. Previous messages stay searchable. |

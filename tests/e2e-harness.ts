@@ -20,6 +20,7 @@ export type NodMessage = {
   turnId: string | null;
   reactions?: Array<{ actor: string; reaction: string }>;
   chatReport?: boolean;
+  handoff?: { teammate: string; title: string } | null;
 };
 export type NodTask = { id: string; status: string; title: string };
 export type NodState = {
@@ -58,6 +59,7 @@ function scriptedReply(messages: Entry[]) {
   );
   const current = messages.slice(finished + 1);
   let task: { id: string } | undefined;
+  let teammates: Array<{ id: string; name: string }> = [];
   let background = false;
   const pending: OwnerRequest[] = [];
   for (const entry of current) {
@@ -67,6 +69,7 @@ function scriptedReply(messages: Entry[]) {
     const id = data?.messageId ?? data?.currentMessageId;
     if (data?.task && typeof data.task === 'object') task = data.task as { id: string };
     if (data?.mode === 'background') background = true;
+    if (Array.isArray(data?.teammates)) teammates = data.teammates as typeof teammates;
     if (typeof text === 'string') pending.push({ id: typeof id === 'string' ? id : '', text });
   }
   const calls = current.flatMap((entry) =>
@@ -139,6 +142,29 @@ for (const id of ids) await tools.nod({ action: 'schedule_pause', args: { id } }
       hold: unacknowledged.text.startsWith('hold:') ? unacknowledged.text : undefined,
       call: tool('react_to_message', { messageId: unacknowledged.id, reaction: '👍' }),
     };
+  const handed = pending
+    .map((request) => ({
+      request,
+      teammate: teammates.find((mate) => request.text.includes(`@${mate.name}`)),
+    }))
+    .find(
+      ({ request, teammate }) =>
+        teammate &&
+        request.id &&
+        !calls.some((call) => call.includes('\\"teammate\\"') && call.includes(request.id)),
+    );
+  if (handed)
+    return {
+      call: tool('task', {
+        action: 'start',
+        teammate: handed.teammate!.id,
+        title: handed.request.text.replace(/@\S+\s*/u, '').trim(),
+        message: `Passing this to ${handed.teammate!.name}.`,
+        doneWhen: 'The scripted work is done',
+        now: 'Working',
+        request: handed.request.id,
+      }),
+    };
   const unstarted = pending.find(
     (request) =>
       request.text.startsWith('task:') &&
@@ -156,7 +182,11 @@ for (const id of ids) await tools.nod({ action: 'schedule_pause', args: { id } }
       }),
     };
   const answers = pending
-    .filter((request) => !request.text.startsWith('task:'))
+    .filter(
+      (request) =>
+        !request.text.startsWith('task:') &&
+        !teammates.some((mate) => request.text.includes(`@${mate.name}`)),
+    )
     .map((request) => `Answer: ${request.text}`);
   return {
     hold: pending.find(
@@ -471,7 +501,7 @@ export async function startNod(options: { checker?: boolean } = {}) {
            AND NOT m.chat_only AND NOT m.chat_report`,
       );
       for (const message of leaked)
-        problems.push(`side chat message "${message.text}" shows in the main chat`);
+        problems.push(`teammate message "${message.text}" shows in the main chat`);
       const repeated = await query<{ message_id: string; count: number }>(
         `SELECT message_id,count(*)::int AS count FROM turns
          WHERE message_id IS NOT NULL AND source='user' GROUP BY message_id HAVING count(*)>1`,

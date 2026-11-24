@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Pool } from 'pg';
 import { inChatSql, reactionReplySql, withdrawnSql } from './turn-chain.ts';
+import type { MemoryScope } from './memory-tree.ts';
 export function activeThreadSql(alias = 'm') {
   return `${alias}.thread_id=(SELECT th.id FROM threads th WHERE th.owner_id=${alias}.owner_id AND th.archived_at IS NULL)`;
 }
@@ -43,14 +44,36 @@ export function createHistorySearch({
 }) {
   const kept = (alias: string) =>
     standing ? ` AND NOT (${alias}.role='user' AND ${withdrawnSql(alias)})` : '';
-  return async function search(raw: unknown) {
-    const { query, before, cursor, from, to, around, order, chat } = inputSchema.parse(raw);
+  return async function search(raw: unknown, memoryScope?: MemoryScope) {
+    const input = inputSchema.parse(raw);
+    const { query, before, cursor, from, to, around, order } = input;
+    const viewer =
+      memoryScope && memoryScope !== 'nod' ? z.uuid().parse(memoryScope.teammate) : undefined;
+    const chat =
+      memoryScope && memoryScope !== 'nod' && memoryScope.mode === 'own' ? viewer : input.chat;
+    const hidden =
+      memoryScope && (await pool.query("SELECT to_regclass('tasks') AS name")).rows[0]?.name
+        ? (
+            await pool.query<{ id: string }>(
+              `SELECT id FROM tasks WHERE owner_id=$1 AND name IS NOT NULL AND memory='own'
+                 AND id IS DISTINCT FROM $2::uuid`,
+              [ownerId, viewer ?? null],
+            )
+          ).rows.map((row) => z.uuid().parse(row.id))
+        : [];
+    const others = (alias: string) =>
+      hidden.length
+        ? ` AND NOT EXISTS (SELECT 1 FROM turns pu WHERE pu.owner_id=${alias}.owner_id
+            AND pu.id=${alias === 'u' ? 'u.id' : `${alias}.turn_id`}
+            AND pu.task_id IN (${hidden.map((id) => `'${id}'::uuid`).join(',')}))`
+        : '';
     const inChat = (alias: string) =>
-      !chat
+      (!chat
         ? ''
         : alias === 'u'
           ? ` AND u.task_id='${chat}'::uuid`
-          : ` AND ${inChatSql(alias, `'${chat}'::uuid`)} AND NOT ${reactionReplySql(alias)}`;
+          : ` AND ${inChatSql(alias, `'${chat}'::uuid`)} AND NOT ${reactionReplySql(alias)}`) +
+      others(alias);
     if (around) {
       const { rows } = await pool.query<HistoryMessage>(
         `WITH target AS (

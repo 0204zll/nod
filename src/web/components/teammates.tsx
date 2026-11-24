@@ -677,7 +677,7 @@ function AvatarMenu({ teammate, onClose }: { teammate: Teammate; onClose(): void
             className="teammate-input"
             rows={2}
             value={description}
-            placeholder="Describe the avatar, e.g. a friendly robot in pastel colors"
+            placeholder="Describe its colors, e.g. calm blue or a warm sunset"
             onChange={(event) => setDescription(event.target.value)}
           />
           <button type="submit" className="teammate-button" disabled={busy}>

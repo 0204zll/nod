@@ -99,21 +99,32 @@ export async function latestChatMessages(client: Queryable, ownerId: string, cha
 }
 
 export async function chatOnlyPlacement(client: Queryable, ownerId: string, turnId: string) {
-  const taskId = (
-    await client.query<{ task_id: string | null }>(
-      "SELECT to_jsonb(u)->>'task_id' AS task_id FROM turns u WHERE u.id=$1 AND u.owner_id=$2 AND u.channel='web'",
+  const turn = (
+    await client.query<{ task_id: string | null; channel: string }>(
+      "SELECT to_jsonb(u)->>'task_id' AS task_id,u.channel FROM turns u WHERE u.id=$1 AND u.owner_id=$2",
       [turnId, ownerId],
     )
-  ).rows[0]?.task_id;
-  if (!taskId) return null;
+  ).rows[0];
+  if (!turn?.task_id) return null;
   return (
     (
       await client.query<{ id: string }>(
-        'SELECT id FROM tasks WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL',
-        [taskId, ownerId],
+        `SELECT id FROM tasks WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL
+           AND ($3='web' OR split_part($3,':',1)=ANY(channels))`,
+        [turn.task_id, ownerId, turn.channel],
       )
     ).rows[0]?.id ?? null
   );
+}
+
+export async function channelTeammate(client: Queryable, ownerId: string, channel: string) {
+  return (
+    await client.query<{ id: string }>(
+      `SELECT id FROM tasks WHERE owner_id=$1 AND name IS NOT NULL AND archived_at IS NULL
+           AND split_part($2,':',1)=ANY(channels) LIMIT 1`,
+      [ownerId, channel],
+    )
+  ).rows[0]?.id;
 }
 
 export async function reportChat(
@@ -195,4 +206,15 @@ export async function setChatRequestSource(
     'UPDATE tasks SET source_message_id=$3 WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL',
     [chatId, ownerId, messageId],
   );
+}
+
+export async function messageSpeaker(client: Queryable, ownerId: string, messageId: string) {
+  return (
+    await client.query<{ name: string }>(
+      `SELECT t.name FROM messages m JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+         JOIN tasks t ON t.id=u.task_id AND t.owner_id=u.owner_id
+         WHERE m.id=$1 AND m.owner_id=$2 AND t.name IS NOT NULL`,
+      [messageId, ownerId],
+    )
+  ).rows[0]?.name;
 }

@@ -199,6 +199,7 @@ import { createOnboardingProfile } from './onboarding-profile.ts';
 import { createMemoryLearning, initializeMemoryLearning } from './memory-learning.ts';
 import { createScheduleIdeas } from './schedule-ideas.ts';
 import { createMemoryService, importMemoryFile } from './memory.ts';
+import { channelTeammate, messageSpeaker } from './teammates.ts';
 import { createMemoryRecall } from './memory-recall.ts';
 import { createLearnedSkills } from './learned-skills.ts';
 import { automaticSpeechVoice, createSpeech } from './speech.ts';
@@ -1203,6 +1204,7 @@ async function initializeApplication(
     analytics: captureAnalytics,
     refresh,
     clearBrowser: (id) => adapters.computer.clear(id),
+    teammateMemory: { remove: memory.removeTeammate, share: memory.shareTeammate },
     ...(adapters.models
       ? { validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice) }
       : {}),
@@ -2552,7 +2554,7 @@ async function initializeApplication(
       accountProfile,
       connectedApps: integrations.connectedApps,
       mcpServers: discovered.servers,
-      memoryContext: memory.context,
+      memoryContext: async (turnId) => memory.context(await tasks.memoryScope(turnId)),
       recall: personal.recall,
       learnedSkills: learnedSkills.index,
       taskContext: tasks.context,
@@ -2885,10 +2887,12 @@ async function initializeApplication(
         }
         if (action === 'memory_forget' || action === 'memory_control') {
           const origin = await turnOrigin(turn.turnId);
+          const memoryScope = await tasks.memoryScope(turn.turnId);
           const input = await personal.reviewMemory(action, args, {
             ...provenance,
             turnId: turn.turnId,
             ownerRooted: origin?.source === 'user',
+            memoryScope,
           });
           const verdict = await trust.check(turn, `NOD_${action}`, input, signal);
           return approvals.request(turn, `NOD_${action}`, input, {
@@ -2925,6 +2929,7 @@ async function initializeApplication(
             provenance.sourceMessageId,
             (write) => withTurnLock({ turnId: turn.turnId, signal }, write),
             signal,
+            await tasks.memoryScope(turn.turnId),
           );
         }
         if (action === 'usage_get')
@@ -2939,7 +2944,9 @@ async function initializeApplication(
           return withTurnLock({ turnId: turn.turnId, signal }, (client) =>
             personal.manage(action, args, source, { client }),
           );
-        return personal.manage(action, args, source);
+        return personal.manage(action, args, source, {
+          memoryScope: await tasks.memoryScope(turn.turnId),
+        });
       },
       requestPayment: async (turn, input, show) => {
         const { image, ...result } = await payments.request(turn, input);
@@ -3495,6 +3502,7 @@ async function initializeApplication(
       ? setup.create(await channelSettings!.environment())
       : adapters.messaging!;
     channels = await createChannels(pool, {
+      speaker: (messageId) => messageSpeaker(pool, ownerId, messageId),
       admission,
       ownerId,
       present: communication.present,
@@ -3589,6 +3597,7 @@ async function initializeApplication(
             answer,
             onInserted,
             stopSignal,
+            chatId: replyToMessageId ? undefined : await channelTeammate(client, ownerId, channel),
           })
         ).turnId,
       stopSignal,
