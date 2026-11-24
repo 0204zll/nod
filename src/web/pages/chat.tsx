@@ -32,7 +32,6 @@ import { ChatTools } from '../components/chat-tools';
 import { ServiceLogo } from '../components/service-logo';
 import { Composer, type ComposerHandle, type ComposerSendResult } from '../components/composer';
 import { HandoffNote } from '../components/teammates';
-import { quickChoices } from '../components/answer-choices';
 import { NodAvatar, TeammateAvatar } from '../components/teammate-avatar';
 import { isTeammate, teammatePath, type ChatMessage, type Teammate } from '../lib/teammates';
 import { MessageBubble, WorkLabel, type MessageWork } from '../components/message';
@@ -91,13 +90,6 @@ function verificationFailure(
     return 'The result could not be confirmed. Check the sign-in or payment before trying again.';
   return 'The verification code could not be confirmed. Check the sign-in request and try again.';
 }
-function quickAnswer(message: Message, messages: Message[]) {
-  const question = message.replyTo?.id
-    ? messages.find((item) => item.id === message.replyTo!.id)
-    : undefined;
-  return Boolean(question && !question.approval && quickChoices(question.answerChoices));
-}
-
 function scrollBehavior(): ScrollBehavior {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth';
 }
@@ -972,7 +964,7 @@ export function Chat({
     }),
   );
   const displayMessages: Message[] = [
-    ...allMessages.filter((message) => !message.cardAnswer || quickAnswer(message, allMessages)),
+    ...allMessages.filter((message) => !message.cardAnswer),
     ...streamEntries.map(([id, value]): Message => {
       if (!streamTimes.current.has(id)) streamTimes.current.set(id, new Date().toISOString());
       return {
@@ -2435,18 +2427,15 @@ export function Chat({
                   ) : (
                     <MessageBubble
                       message={
-                        message.cardAnswer && quickAnswer(message, visibleMessages)
+                        (chat || message.chatReport) &&
+                        message.role === 'assistant' &&
+                        message.replyTo?.role === 'user' &&
+                        !message.replyTo.isQuote &&
+                        message.replyTo.id ===
+                          visibleMessages.slice(0, index).findLast((item) => item.role === 'user')
+                            ?.id
                           ? { ...message, replyTo: undefined }
-                          : (chat || message.chatReport) &&
-                              message.role === 'assistant' &&
-                              message.replyTo?.role === 'user' &&
-                              !message.replyTo.isQuote &&
-                              message.replyTo.id ===
-                                visibleMessages
-                                  .slice(0, index)
-                                  .findLast((item) => item.role === 'user')?.id
-                            ? { ...message, replyTo: undefined }
-                            : message
+                          : message
                       }
                       avatar={message.role === 'assistant' ? speaker(message) : undefined}
                       speakerName={
@@ -2483,7 +2472,7 @@ export function Chat({
                       }
                       taskStopped={approvalTask(message)?.status === 'cancelled'}
                       answersDisabled={sending || !state.configuration.llmReady || welcoming}
-                      onAnswer={async (value, answer, displayText) => {
+                      onAnswer={async (value, answer) => {
                         if (replyTo?.id === message.id && composer.current?.hasDraft()) {
                           composer.current.focus();
                           throw new Error(
@@ -2497,7 +2486,6 @@ export function Chat({
                           'answer_choice',
                           undefined,
                           answer,
-                          displayText,
                         );
                         if (result.questionUnavailable) return 'unavailable';
                         if (!result.sent && result.error) throw new Error(result.error);

@@ -14,7 +14,7 @@ import {
   sidebarItems,
 } from '../lib/navigation';
 import { teammatePath } from '../lib/teammates';
-import { createTeammate, toast } from './teammates';
+import { createTeammate, toastError } from './teammates';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
 import { useArtifactDrawer } from './artifact-context';
 import { ownedArtifactUrl, type ImagePreview } from './attachment-images';
@@ -171,7 +171,7 @@ export function ChatTools({
       action: () =>
         void createTeammate()
           .then((teammate) => navigate(teammatePath(teammate.id)))
-          .catch((cause) => toast(errorMessage(cause))),
+          .catch(toastError),
     },
     ...sidebarItems.map((item) => ({
       id: item.path,

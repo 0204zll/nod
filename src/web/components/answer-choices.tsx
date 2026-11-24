@@ -14,11 +14,7 @@ export interface AnswerChoicesProps {
   question: { id: string; text: string };
   title: ReactNode;
   disabled?: boolean;
-  onAnswer(
-    text: string,
-    answer: QuestionAnswer,
-    displayText?: string,
-  ): Promise<boolean | 'unavailable'>;
+  onAnswer(text: string, answer: QuestionAnswer): Promise<boolean | 'unavailable'>;
 }
 
 type GivenAnswer = NonNullable<Message['choiceAnswer']>;
@@ -281,92 +277,5 @@ export function ChoiceAnswer({
         )}
       </div>
     </section>
-  );
-}
-
-export function quickChoices(choices: AnswerChoicesValue | undefined) {
-  return Boolean(choices && !choices.multiple);
-}
-
-export function QuickChoices({
-  choices,
-  answer,
-  disabled = false,
-  onAnswer,
-}: {
-  choices: AnswerChoicesValue;
-  answer?: GivenAnswer;
-  disabled?: boolean;
-  onAnswer?: AnswerChoicesProps['onAnswer'];
-}) {
-  const [busy, setBusy] = useState(false);
-  const [sent, setSent] = useState<string[] | null>(null);
-  const [error, setError] = useState('');
-  const detailed = choices.options.some((option) => option.description);
-  const chosen = answer?.choiceIds ?? sent;
-  if (chosen) {
-    const picked = choices.options.filter((option) => chosen.includes(option.id));
-    const label = picked.map((option) => option.label).join(', ') || answer?.text;
-    return detailed && label ? (
-      <div className="quick-done" data-analytics-private>
-        <Check size={14} aria-hidden="true" />
-        {label}
-      </div>
-    ) : null;
-  }
-  if (!onAnswer) return null;
-  async function pick(option: AnswerChoicesValue['options'][number]) {
-    if (busy || disabled) return;
-    setBusy(true);
-    setError('');
-    try {
-      const outcome = await onAnswer!(
-        choiceAnswerText([option]),
-        { choiceIds: [option.id] },
-        option.label,
-      );
-      if (outcome === true || outcome === 'unavailable') {
-        if (outcome === true)
-          analyticsForCurrentSession()('answer_choices_selected', {
-            multiple: false,
-            option_count: choices.options.length,
-            selected_count: 1,
-          });
-        setSent([option.id]);
-        return;
-      }
-      setError('Your answer could not be sent. Try again.');
-    } catch (cause) {
-      setError(errorMessage(cause));
-    }
-    setBusy(false);
-  }
-  return (
-    <div className={detailed ? 'quick-cards' : 'quick-chips'} data-analytics-private>
-      <div role="group" aria-label="Answers" aria-busy={busy}>
-        {choices.options.map((option) => (
-          <button
-            key={option.id}
-            type="button"
-            aria-disabled={busy || disabled}
-            onClick={() => void pick(option)}
-          >
-            {detailed ? (
-              <>
-                <b>{option.label}</b>
-                {option.description && <small>{option.description}</small>}
-              </>
-            ) : (
-              option.label
-            )}
-          </button>
-        ))}
-      </div>
-      {error && (
-        <p className="choice-card-error" role="alert">
-          {error}
-        </p>
-      )}
-    </div>
   );
 }

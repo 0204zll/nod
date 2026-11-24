@@ -408,7 +408,7 @@ export function TeammateModel({ teammate }: { teammate: Task & { name: string } 
   const models = useModels();
   const usage = usePageData<WorkUsageResponse>(workUsagePath);
   const data = models.data;
-  if (!data) return <span className="teammate-row-value">…</span>;
+  if (!data) return <span className="teammate-setting-text">…</span>;
   const own = kept(data, teammate.model);
   const chat = modelOf(data, data.selection);
   return (

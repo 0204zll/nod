@@ -394,6 +394,7 @@ function Workspace({
             )}
           </main>
         </div>
+        <Toasts />
       </div>
       {showPanel && (
         <TeammatePanel
@@ -406,7 +407,6 @@ function Workspace({
           }}
         />
       )}
-      <Toasts />
     </div>
   );
 }

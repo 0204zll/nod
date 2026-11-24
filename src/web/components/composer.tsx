@@ -1068,11 +1068,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         }}
       >
         {mention && (
-          <div className="mention-menu" role="listbox" aria-label="Teammates">
+          <div className="menu mention-menu" role="listbox" aria-label="Teammates">
             {mention.options.map((option, index) => (
               <button
                 key={option.id}
                 type="button"
+                className="menu-item"
                 role="option"
                 aria-selected={index === mention.index}
                 onPointerDown={(event) => {

@@ -1,8 +1,11 @@
+import * as Popover from '@radix-ui/react-popover';
 import {
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
+  type ComponentProps,
   type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
@@ -15,8 +18,8 @@ import {
   memoryModes,
   teammateChannels,
   teammateHues,
+  teammateInstructionsLimit,
   teammateMarks,
-  teammateNameLimit,
   type MemoryMode,
   type TeammateAvatar as Avatar,
   type TeammateChannel,
@@ -31,26 +34,37 @@ import {
   teammateState,
   type Teammate,
 } from '../lib/teammates';
-import { ChevronRight, LockKeyhole, Plus, Settings, X } from './icons';
+import { ActionMenu, ActionMenuItem, ActionMenuSurface, focusActionMenuItem } from './action-menu';
+import { ChevronDown, LockKeyhole, MessageSquare, Plus, Settings, Trash2, X } from './icons';
+import { InlineName } from './inline-name';
 import { NodModel, TeammateModel } from './model-choices';
+import { Tabs } from './tabs';
 import { NodAvatar, TeammateAvatar } from './teammate-avatar';
+import { Button, Dialog, DialogContent, DialogDescription, DialogTitle, Field, Notice } from './ui';
 
 function plain(event: MouseEvent) {
   return !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0);
 }
 
-export function toast(text: string) {
-  window.dispatchEvent(new CustomEvent('nod:toast', { detail: text }));
+type ToastValue = { text: string; kind: 'success' | 'error' };
+
+export function toast(text: string, kind: ToastValue['kind'] = 'success') {
+  window.dispatchEvent(new CustomEvent<ToastValue>('nod:toast', { detail: { text, kind } }));
 }
 
+export const toastError = (cause: unknown) => toast(errorMessage(cause), 'error');
+
 export function Toasts() {
-  const [text, setText] = useState('');
+  const [value, setValue] = useState<ToastValue>();
+  const [open, setOpen] = useState(false);
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const show = (event: Event) => {
-      setText((event as CustomEvent<string>).detail);
+      const next = (event as CustomEvent<ToastValue>).detail;
+      setValue(next);
+      setOpen(true);
       clearTimeout(timer);
-      timer = setTimeout(() => setText(''), 2600);
+      timer = setTimeout(() => setOpen(false), next.kind === 'error' ? 6000 : 2600);
     };
     window.addEventListener('nod:toast', show);
     return () => {
@@ -58,9 +72,19 @@ export function Toasts() {
       window.removeEventListener('nod:toast', show);
     };
   }, []);
-  return text ? (
-    <div className="teammate-toast" role="status">
-      {text}
+  return value ? (
+    <div
+      className="teammate-toast"
+      data-open={open || undefined}
+      inert={!open || undefined}
+      onTransitionEnd={(event) => {
+        if (!open && event.target === event.currentTarget && event.propertyName === 'opacity')
+          setValue(undefined);
+      }}
+    >
+      <Notice kind={value.kind} onDismiss={() => setOpen(false)}>
+        {value.text}
+      </Notice>
     </div>
   ) : null;
 }
@@ -87,11 +111,6 @@ export async function createTeammate() {
   return created;
 }
 
-export async function removeTeammate(id: string) {
-  await api(`/api/teammates/${id}`, { method: 'DELETE' });
-  teammatesChanged();
-}
-
 export function MentionText({ text, names }: { text: string; names: string[] }) {
   return (
     <>
@@ -108,133 +127,147 @@ export function MentionText({ text, names }: { text: string; names: string[] }) 
   );
 }
 
-function RowMarker({ teammate, unread }: { teammate: Teammate; unread: boolean }) {
-  const state = teammateState(teammate);
-  if (state === 'needs' && teammate.teammate.job)
-    return <span className="teammate-dot teammate-dot-needs" aria-label="Needs you" />;
-  if (unread) return <span className="teammate-dot" aria-label="Unread" />;
-  if (state === 'working')
-    return <span className="teammate-dot teammate-dot-working" aria-label="Working" />;
-  return null;
-}
-
-function ContextMenu({
+function RemoveTeammate({
   teammate,
-  point,
-  onClose,
-  onOpen,
-  onSettings,
+  open,
+  onOpenChange,
   onRemoved,
 }: {
   teammate: Teammate;
+  open: boolean;
+  onOpenChange(open: boolean): void;
+  onRemoved(): void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (open) setError('');
+  }, [open]);
+  const goes = [
+    'Its chat',
+    teammate.teammate.memory === 'shared' ? '' : ' and its own notes',
+    ' go with it.',
+    teammate.teammate.channels.length ? ' Its channels go back to Nod.' : '',
+  ].join('');
+  return (
+    <Dialog open={open} onOpenChange={(value) => !busy && onOpenChange(value)}>
+      <DialogContent className="teammate-remove-dialog">
+        <DialogTitle>Remove {teammate.name}?</DialogTitle>
+        <DialogDescription>{goes}</DialogDescription>
+        {error && <Notice>{error}</Notice>}
+        <div className="dialog-actions">
+          <Button variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              setError('');
+              void api(`/api/teammates/${teammate.id}`, { method: 'DELETE' })
+                .then(() => {
+                  teammatesChanged();
+                  onOpenChange(false);
+                  toast(`Removed ${teammate.name}`);
+                  onRemoved();
+                })
+                .catch((cause) => setError(errorMessage(cause)))
+                .finally(() => setBusy(false));
+            }}
+          >
+            {busy ? 'Removing…' : `Remove ${teammate.name}`}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RowMarker({ teammate, unread }: { teammate: Teammate; unread: boolean }) {
+  const state = teammateState(teammate);
+  if (state === 'needs' && teammate.teammate.job)
+    return <span className="teammate-dot teammate-dot-needs" aria-hidden="true" />;
+  if (unread) return <span className="teammate-dot" aria-hidden="true" />;
+  if (state === 'working')
+    return <span className="teammate-dot teammate-dot-working" aria-hidden="true" />;
+  return null;
+}
+
+function RowMenu({
+  teammate,
+  point,
+  anchor,
+  onClose,
+  onOpen,
+  onSettings,
+  onRemove,
+}: {
+  teammate: Teammate;
   point: { x: number; y: number };
+  anchor: HTMLElement;
   onClose(): void;
   onOpen(): void;
   onSettings(): void;
-  onRemoved(): void;
+  onRemove(): void;
 }) {
   const menu = useRef<HTMLDivElement>(null);
-  const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [position, setPosition] = useState(point);
+  const [position, setPosition] = useState({ left: point.x, top: point.y });
   useLayoutEffect(() => {
     const element = menu.current;
     if (!element) return;
     setPosition({
-      x: Math.min(point.x, window.innerWidth - element.offsetWidth - 8),
-      y: Math.min(point.y, window.innerHeight - element.offsetHeight - 8),
+      left: Math.min(point.x, window.innerWidth - element.offsetWidth - 8),
+      top: Math.min(point.y, window.innerHeight - element.offsetHeight - 8),
     });
-    element.querySelector<HTMLButtonElement>('button')?.focus();
-  }, [point, confirming]);
+    focusActionMenuItem(element.querySelector<HTMLElement>('[role="menuitem"]'));
+  }, [point]);
   useEffect(() => {
     const outside = (event: PointerEvent) => {
       if (!menu.current?.contains(event.target as Node)) onClose();
     };
     const key = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key !== 'Escape' && event.key !== 'Tab') return;
+      onClose();
+      if (event.key === 'Escape') anchor.focus({ preventScroll: true });
     };
     document.addEventListener('pointerdown', outside, true);
     document.addEventListener('keydown', key);
     window.addEventListener('scroll', onClose, true);
     window.addEventListener('resize', onClose);
+    window.addEventListener('blur', onClose);
     return () => {
       document.removeEventListener('pointerdown', outside, true);
       document.removeEventListener('keydown', key);
       window.removeEventListener('scroll', onClose, true);
       window.removeEventListener('resize', onClose);
+      window.removeEventListener('blur', onClose);
     };
-  }, [onClose]);
+  }, [onClose, anchor]);
+  const run = (action: () => void) => () => {
+    onClose();
+    action();
+  };
   return createPortal(
-    <div
+    <ActionMenuSurface
       ref={menu}
-      className="teammate-context"
-      role="menu"
+      className="action-menu-compact teammate-row-menu"
       aria-label={`${teammate.name} options`}
-      style={{ left: position.x, top: position.y }}
+      style={position}
     >
-      {confirming ? (
-        <div className="teammate-context-confirm">
-          <p>
-            <b>Remove {teammate.name}?</b> Its chat
-            {teammate.teammate.memory === 'shared' ? '' : ' and its own memory'} go with it.
-          </p>
-          <div className="teammate-context-actions">
-            <button
-              type="button"
-              role="menuitem"
-              className="teammate-button teammate-button-danger"
-              disabled={busy}
-              onClick={() => {
-                setBusy(true);
-                void removeTeammate(teammate.id)
-                  .then(() => {
-                    toast(`Removed ${teammate.name}`);
-                    onRemoved();
-                  })
-                  .catch((cause) => toast(errorMessage(cause)))
-                  .finally(onClose);
-              }}
-            >
-              Remove
-            </button>
-            <button type="button" role="menuitem" className="teammate-button" onClick={onClose}>
-              Keep
-            </button>
-          </div>
-        </div>
-      ) : (
-        <>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              onClose();
-              onOpen();
-            }}
-          >
-            Open chat
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              onClose();
-              onSettings();
-            }}
-          >
-            Settings
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className="danger"
-            onClick={() => setConfirming(true)}
-          >
-            Remove {teammate.name}
-          </button>
-        </>
-      )}
-    </div>,
+      <ActionMenuItem onClick={run(onOpen)}>
+        <MessageSquare size={16} aria-hidden="true" />
+        Open chat
+      </ActionMenuItem>
+      <ActionMenuItem onClick={run(onSettings)}>
+        <Settings size={16} aria-hidden="true" />
+        Settings
+      </ActionMenuItem>
+      <ActionMenuItem destructive onClick={run(onRemove)}>
+        <Trash2 size={16} aria-hidden="true" />
+        Remove
+      </ActionMenuItem>
+    </ActionMenuSurface>,
     document.body,
   );
 }
@@ -266,7 +299,12 @@ export function TeammateNav({
 }) {
   const known = useRef<Set<string> | null>(null);
   const [fresh, setFresh] = useState<Set<string>>(new Set());
-  const [menu, setMenu] = useState<{ teammate: Teammate; point: { x: number; y: number } }>();
+  const [menu, setMenu] = useState<{
+    teammate: Teammate;
+    point: { x: number; y: number };
+    anchor: HTMLElement;
+  }>();
+  const [removing, setRemoving] = useState<Teammate>();
   const [creating, setCreating] = useState(false);
   const ids = teammates.map((teammate) => teammate.id).join();
   useEffect(() => {
@@ -294,27 +332,23 @@ export function TeammateNav({
       const created = await createTeammate();
       onNavigate(teammatePath(created.id));
     } catch (cause) {
-      toast(errorMessage(cause));
+      toastError(cause);
     } finally {
       setCreating(false);
     }
   }
-  const openMenu = (teammate: Teammate, point: { x: number; y: number }) =>
-    setMenu({ teammate, point });
   return (
     <nav className="teammate-nav" aria-label="Chats">
       <a
         href="/"
-        className="teammate-brand"
+        className="teammate-item teammate-brand"
         aria-current={mainActive ? 'page' : undefined}
         aria-label={['Chat with Nod', nodWorking ? 'working' : null, nodUnread ? 'unread' : null]
           .filter(Boolean)
           .join(', ')}
         onClick={link('/')}
       >
-        <span className="teammate-brand-mark" aria-hidden="true">
-          <span />
-        </span>
+        <NodAvatar />
         <span className="teammate-meta">
           <span className="teammate-name">Nod</span>
           <span className={`teammate-sub${nodUnread ? ' teammate-sub-unread' : ''}`}>
@@ -330,17 +364,19 @@ export function TeammateNav({
       <div className="teammate-section">
         <div className="teammate-head">
           <span>Teammates</span>
-          <button
-            type="button"
-            className="teammate-icon-button"
+          <Button
+            variant="ghost"
+            size="icon"
+            title="New teammate"
             aria-label="New teammate"
+            tooltipSide="right"
             disabled={creating}
             onClick={() => void add()}
           >
             <Plus size={16} aria-hidden="true" />
-          </button>
+          </Button>
         </div>
-        {teammates.length ? (
+        {teammates.length > 0 && (
           <ul className="teammate-list">
             {teammates.map((teammate) => {
               const active = teammate.id === activeId;
@@ -352,6 +388,7 @@ export function TeammateNav({
                     href={teammatePath(teammate.id)}
                     className="teammate-item"
                     aria-current={active ? 'page' : undefined}
+                    aria-haspopup="menu"
                     aria-label={[
                       teammate.name,
                       state === 'needs' ? 'needs you' : state === 'working' ? 'working' : null,
@@ -362,14 +399,22 @@ export function TeammateNav({
                     onClick={link(teammatePath(teammate.id))}
                     onContextMenu={(event) => {
                       event.preventDefault();
-                      openMenu(teammate, { x: event.clientX, y: event.clientY });
+                      setMenu({
+                        teammate,
+                        point: { x: event.clientX, y: event.clientY },
+                        anchor: event.currentTarget,
+                      });
                     }}
                     onKeyDown={(event: KeyboardEvent) => {
                       if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10'))
                         return;
                       event.preventDefault();
                       const box = event.currentTarget.getBoundingClientRect();
-                      openMenu(teammate, { x: box.left + 24, y: box.bottom });
+                      setMenu({
+                        teammate,
+                        point: { x: box.left + 24, y: box.bottom },
+                        anchor: event.currentTarget as HTMLElement,
+                      });
                     }}
                   >
                     <TeammateAvatar name={teammate.name} avatar={teammate.teammate.avatar} />
@@ -385,35 +430,39 @@ export function TeammateNav({
               );
             })}
           </ul>
-        ) : (
-          <p className="teammate-empty">
-            No teammates yet.{' '}
-            <button type="button" onClick={() => void add()}>
-              Add one
-            </button>
-          </p>
         )}
       </div>
       <div className="teammate-foot">
         <button
           type="button"
-          className="teammate-foot-item"
+          className="teammate-item"
           aria-current={settingsActive ? 'page' : undefined}
           onClick={onSettings}
         >
-          <Settings size={16} aria-hidden="true" />
-          <span>Settings</span>
+          <span className="teammate-icon" aria-hidden="true">
+            <Settings size={18} />
+          </span>
+          <span className="teammate-name">Settings</span>
         </button>
       </div>
       {menu && (
-        <ContextMenu
+        <RowMenu
           teammate={menu.teammate}
           point={menu.point}
+          anchor={menu.anchor}
           onClose={() => setMenu(undefined)}
           onOpen={() => onNavigate(teammatePath(menu.teammate.id))}
           onSettings={() => onOpenPanel(menu.teammate.id)}
+          onRemove={() => setRemoving(menu.teammate)}
+        />
+      )}
+      {removing && (
+        <RemoveTeammate
+          teammate={removing}
+          open
+          onOpenChange={(open) => !open && setRemoving(undefined)}
           onRemoved={() => {
-            if (menu.teammate.id === activeId) onNavigate('/');
+            if (removing.id === activeId) onNavigate('/');
           }}
         />
       )}
@@ -432,14 +481,6 @@ export function ChatTop({
   onTogglePanel(): void;
   toolsRef?(element: HTMLDivElement | null): void;
 }) {
-  const summary = teammate
-    ? [
-        teammate.teammate.job || 'Setting up',
-        teammate.teammate.channels.map((c) => channelLabels[c]).join(', '),
-      ]
-        .filter(Boolean)
-        .join(' · ')
-    : 'Your main assistant';
   return (
     <header className="chat-top">
       <h1 className="chat-pill-wrap">
@@ -448,7 +489,7 @@ export function ChatTop({
           className="chat-pill"
           aria-expanded={panelOpen}
           aria-controls="teammate-panel"
-          title={summary}
+          aria-label={`${teammate?.name ?? 'Nod'} settings`}
           onClick={onTogglePanel}
         >
           {teammate ? (
@@ -494,8 +535,6 @@ export function HandoffNote({
     </div>
   );
 }
-
-const memoryShort = (mode: MemoryMode) => memoryLabels[mode].title.split(',')[0]!;
 
 function resizedImage(file: File) {
   return new Promise<string>((resolve, reject) => {
@@ -555,12 +594,11 @@ function generatedAvatar(name: string, description: string, fallback: Avatar['hu
   const seed = [...description].reduce((value, char) => (value * 31 + char.charCodeAt(0)) >>> 0, 7);
   const [from, to] = gradients[hue];
   const glyph = [...name.trim()][0]?.toUpperCase() ?? '?';
-  const angle = seed % 360;
   const canvas = document.createElement('canvas');
   canvas.width = 256;
   canvas.height = 256;
   const context = canvas.getContext('2d')!;
-  const radians = (angle * Math.PI) / 180;
+  const radians = ((seed % 360) * Math.PI) / 180;
   const gradient = context.createLinearGradient(
     128 - Math.cos(radians) * 128,
     128 - Math.sin(radians) * 128,
@@ -587,8 +625,17 @@ function generatedAvatar(name: string, description: string, fallback: Avatar['hu
   return { hue, image: canvas.toDataURL('image/webp', 0.9) };
 }
 
-function AvatarMenu({ teammate, onClose }: { teammate: Teammate; onClose(): void }) {
-  const [tab, setTab] = useState<'avatar' | 'generate' | 'upload'>('avatar');
+const avatarTabs = [
+  { value: 'avatar', label: 'Avatar' },
+  { value: 'generate', label: 'Generate' },
+  { value: 'upload', label: 'Upload' },
+] as const;
+
+function AvatarPicker({ teammate }: { teammate: Teammate }) {
+  const id = useId();
+  const file = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<(typeof avatarTabs)[number]['value']>('avatar');
   const [description, setDescription] = useState('');
   const [busy, setBusy] = useState(false);
   const avatar = teammate.teammate.avatar;
@@ -596,155 +643,121 @@ function AvatarMenu({ teammate, onClose }: { teammate: Teammate; onClose(): void
     setBusy(true);
     void changeTeammate(teammate.id, { avatar: next })
       .then(() => done && toast(done))
-      .catch((cause) => toast(errorMessage(cause)))
+      .catch(toastError)
       .finally(() => setBusy(false));
   };
   return (
-    <div className="avatar-menu" role="dialog" aria-label="Change avatar">
-      <div className="avatar-tabs" role="tablist">
-        {(
-          [
-            ['avatar', 'Avatar'],
-            ['generate', 'Generate'],
-            ['upload', 'Upload'],
-          ] as const
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            type="button"
-            role="tab"
-            aria-selected={tab === key}
-            onClick={() => setTab(key)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-      {tab === 'avatar' ? (
-        <>
-          <div className="avatar-label">Shape</div>
-          <div className="avatar-pick">
-            {teammateMarks.map((mark) => (
-              <button
-                key={mark || 'initial'}
-                type="button"
-                aria-pressed={!avatar.image && (avatar.mark ?? '') === mark}
-                aria-label={mark || 'First letter'}
-                disabled={busy}
-                onClick={() => save({ hue: avatar.hue, mark })}
-              >
-                <TeammateAvatar name={teammate.name} avatar={{ hue: avatar.hue, mark }} />
-              </button>
-            ))}
-          </div>
-          <div className="avatar-label">Color</div>
-          <div className="avatar-swatches">
-            {teammateHues.map((hue) => (
-              <button
-                key={hue}
-                type="button"
-                className={`h-${hue}`}
-                aria-pressed={avatar.hue === hue}
-                aria-label={hue}
-                disabled={busy}
-                onClick={() =>
-                  save(
-                    avatar.image
-                      ? { hue, image: avatar.image }
-                      : { hue, ...(avatar.mark !== undefined ? { mark: avatar.mark } : {}) },
-                  )
-                }
-              />
-            ))}
-          </div>
-        </>
-      ) : tab === 'generate' ? (
-        <form
-          className="avatar-generate"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const value = description.trim();
-            if (!value) return toast('Describe the avatar first');
-            save(generatedAvatar(teammate.name, value, avatar.hue), 'Avatar generated');
-          }}
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger className="avatar-button" aria-label="Change avatar">
+        <TeammateAvatar name={teammate.name} avatar={avatar} size="lg" />
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          className="menu avatar-menu"
+          align="start"
+          sideOffset={8}
+          collisionPadding={12}
+          aria-label="Change avatar"
         >
-          <textarea
-            className="teammate-input"
-            rows={2}
-            value={description}
-            placeholder="Describe its colors, e.g. calm blue or a warm sunset"
-            onChange={(event) => setDescription(event.target.value)}
+          <Tabs
+            id={id}
+            panelId={`${id}-panel`}
+            label="Avatar source"
+            size="compact"
+            items={avatarTabs}
+            value={tab}
+            onValueChange={setTab}
           />
-          <button type="submit" className="teammate-button" disabled={busy}>
-            Generate
-          </button>
-        </form>
-      ) : (
-        <div className="avatar-upload">
-          <label>
-            <input
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              hidden
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                event.target.value = '';
-                if (!file) return;
-                void resizedImage(file)
-                  .then((image) => save({ hue: avatar.hue, image }, 'Avatar updated'))
-                  .catch((cause) => toast(errorMessage(cause)));
-              }}
-            />
-            <span className="teammate-button">Choose image…</span>
-          </label>
-          <span className="avatar-hint">PNG or JPG, square works best.</span>
-        </div>
-      )}
-      <button type="button" className="sr-only" onClick={onClose}>
-        Close
-      </button>
-    </div>
-  );
-}
-
-function NameField({ teammate }: { teammate: Teammate }) {
-  const [value, setValue] = useState(teammate.name);
-  const editing = useRef(false);
-  useEffect(() => {
-    if (!editing.current) setValue(teammate.name);
-  }, [teammate.name]);
-  function commit() {
-    editing.current = false;
-    const next = value.replace(/\s+/g, ' ').trim();
-    if (next === teammate.name) return setValue(teammate.name);
-    if (!next) {
-      toast('Give the teammate a name.');
-      return setValue(teammate.name);
-    }
-    void changeTeammate(teammate.id, { name: next }).catch((cause) => {
-      toast(errorMessage(cause));
-      setValue(teammate.name);
-    });
-  }
-  return (
-    <input
-      className="teammate-name-input"
-      value={value}
-      maxLength={teammateNameLimit}
-      aria-label="Name"
-      onFocus={() => (editing.current = true)}
-      onChange={(event) => setValue(event.target.value)}
-      onBlur={commit}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter') event.currentTarget.blur();
-        if (event.key === 'Escape') {
-          event.stopPropagation();
-          setValue(teammate.name);
-          editing.current = false;
-          requestAnimationFrame(() => event.currentTarget?.blur());
-        }
-      }}
-    />
+          <div id={`${id}-panel`} role="tabpanel" className="avatar-panel">
+            {tab === 'avatar' ? (
+              <>
+                <div className="avatar-pick" role="group" aria-label="Shape">
+                  {teammateMarks.map((mark) => (
+                    <button
+                      key={mark || 'initial'}
+                      type="button"
+                      aria-pressed={!avatar.image && (avatar.mark ?? '') === mark}
+                      aria-label={mark || 'First letter'}
+                      disabled={busy}
+                      onClick={() => save({ hue: avatar.hue, mark })}
+                    >
+                      <TeammateAvatar name={teammate.name} avatar={{ hue: avatar.hue, mark }} />
+                    </button>
+                  ))}
+                </div>
+                <div className="avatar-swatches" role="group" aria-label="Color">
+                  {teammateHues.map((hue) => (
+                    <button
+                      key={hue}
+                      type="button"
+                      className={`h-${hue}`}
+                      aria-pressed={avatar.hue === hue}
+                      aria-label={hue}
+                      disabled={busy}
+                      onClick={() =>
+                        save(
+                          avatar.image
+                            ? { hue, image: avatar.image }
+                            : { hue, ...(avatar.mark !== undefined ? { mark: avatar.mark } : {}) },
+                        )
+                      }
+                    />
+                  ))}
+                </div>
+              </>
+            ) : tab === 'generate' ? (
+              <form
+                className="avatar-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const value = description.trim();
+                  if (value)
+                    save(generatedAvatar(teammate.name, value, avatar.hue), 'Avatar generated');
+                }}
+              >
+                <textarea
+                  className="input"
+                  rows={2}
+                  value={description}
+                  aria-label="Colors"
+                  placeholder="Calm blue, a warm sunset…"
+                  onChange={(event) => setDescription(event.target.value)}
+                />
+                <Button size="sm" type="submit" disabled={busy || !description.trim()}>
+                  Generate
+                </Button>
+              </form>
+            ) : (
+              <div className="avatar-form">
+                <input
+                  ref={file}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  hidden
+                  onChange={(event) => {
+                    const chosen = event.target.files?.[0];
+                    event.target.value = '';
+                    if (!chosen) return;
+                    void resizedImage(chosen)
+                      .then((image) => save({ hue: avatar.hue, image }, 'Avatar updated'))
+                      .catch(toastError);
+                  }}
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => file.current?.click()}
+                >
+                  Choose image…
+                </Button>
+                <span className="field-hint">PNG, JPG or WebP. Square works best.</span>
+              </div>
+            )}
+          </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }
 
@@ -763,159 +776,141 @@ function InstructionsField({ teammate }: { teammate: Teammate }) {
     clearTimeout(timer.current);
     if (next.trim() === saved.current.trim()) return;
     saved.current = next;
-    void changeTeammate(teammate.id, { instructions: next }).catch((cause) =>
-      toast(errorMessage(cause)),
-    );
+    void changeTeammate(teammate.id, { instructions: next }).catch(toastError);
   }
   useEffect(() => () => clearTimeout(timer.current), []);
   return (
-    <textarea
-      className="teammate-input"
-      rows={3}
-      value={value}
-      aria-label="Instructions"
-      placeholder="What should it always or never do?"
-      maxLength={2000}
-      onFocus={() => (focused.current = true)}
-      onChange={(event) => {
-        const next = event.target.value;
-        setValue(next);
-        clearTimeout(timer.current);
-        timer.current = setTimeout(() => save(next), 700);
-      }}
-      onBlur={() => {
-        focused.current = false;
-        save(value);
-      }}
-    />
+    <Field label="Instructions" hint="They guide its work and never approve an action.">
+      <textarea
+        className="input"
+        rows={3}
+        value={value}
+        placeholder="What should it always or never do?"
+        maxLength={teammateInstructionsLimit}
+        onFocus={() => (focused.current = true)}
+        onChange={(event) => {
+          const next = event.target.value;
+          setValue(next);
+          clearTimeout(timer.current);
+          timer.current = setTimeout(() => save(next), 700);
+        }}
+        onBlur={() => {
+          focused.current = false;
+          save(value);
+        }}
+      />
+    </Field>
   );
 }
 
-function Channels({ teammate, others }: { teammate: Teammate; others: Teammate[] }) {
-  const [open, setOpen] = useState(false);
-  const root = useRef<HTMLSpanElement>(null);
+function MenuValue({ children, ...props }: ComponentProps<typeof Button>) {
+  return (
+    <Button {...props} variant="ghost" size="sm" className="teammate-setting-value">
+      <span>{children}</span>
+      <ChevronDown size={12} aria-hidden="true" />
+    </Button>
+  );
+}
+
+function MemoryMenu({ teammate }: { teammate: Teammate }) {
+  const mode = teammate.teammate.memory;
+  const choose = (value: MemoryMode) =>
+    value !== mode && void changeTeammate(teammate.id, { memory: value }).catch(toastError);
+  return (
+    <ActionMenu
+      label={`Memory: ${memoryLabels[mode].title}`}
+      trigger={<MenuValue>{memoryLabels[mode].title.split(',')[0]}</MenuValue>}
+      contentClassName="teammate-setting-menu"
+    >
+      {(close) =>
+        memoryModes.map((value) => (
+          <ActionMenuItem
+            key={value}
+            checked={mode === value}
+            onClick={() => {
+              close();
+              choose(value);
+            }}
+          >
+            <span>
+              {memoryLabels[value].title}
+              <small>{memoryLabels[value].detail}</small>
+            </span>
+          </ActionMenuItem>
+        ))
+      }
+    </ActionMenu>
+  );
+}
+
+function ChannelMenu({ teammate, others }: { teammate: Teammate; others: Teammate[] }) {
   const settings = usePageData<ChannelSettings>('/api/channel-settings');
   const connected = new Set(
     settings.data?.channels.filter((item) => item.enabled).map((item) => item.provider) ?? [],
   );
   const assigned = teammate.teammate.channels;
-  useEffect(() => {
-    if (!open) return;
-    const outside = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener('pointerdown', outside, true);
-    return () => document.removeEventListener('pointerdown', outside, true);
-  }, [open]);
-  const set = (channels: TeammateChannel[], done: string) =>
-    void changeTeammate(teammate.id, { channels })
-      .then(() => toast(done))
-      .catch((cause) => toast(errorMessage(cause)));
-  const available = teammateChannels.filter((channel) => !assigned.includes(channel));
+  const toggle = (channel: TeammateChannel) => {
+    const on = assigned.includes(channel);
+    void changeTeammate(teammate.id, {
+      channels: on ? assigned.filter((item) => item !== channel) : [...assigned, channel],
+    })
+      .then(() =>
+        toast(
+          on
+            ? `${channelLabels[channel]} goes to Nod again`
+            : `${channelLabels[channel]} messages now go to ${teammate.name}`,
+        ),
+      )
+      .catch(toastError);
+  };
   return (
-    <span className="channel-wrap" ref={root}>
-      {assigned.map((channel) => (
-        <span key={channel} className="channel-chip">
-          {channelLabels[channel]}
-          <button
-            type="button"
-            aria-label={`Remove ${channelLabels[channel]}`}
-            onClick={() =>
-              set(
-                assigned.filter((item) => item !== channel),
-                `${channelLabels[channel]} goes to Nod again`,
-              )
-            }
-          >
-            <X size={11} aria-hidden="true" />
-          </button>
-        </span>
-      ))}
-      {available.length > 0 && (
-        <span className="channel-add">
-          <button
-            type="button"
-            className="teammate-icon-button"
-            aria-label="Add a channel"
-            aria-expanded={open}
-            onClick={() => setOpen((value) => !value)}
-          >
-            <Plus size={16} aria-hidden="true" />
-          </button>
-          {open && (
-            <span className="channel-menu" role="menu">
-              {available.map((channel) => {
-                const owner = others.find((item) => item.teammate.channels.includes(channel));
-                const ready = connected.has(channel);
-                return (
-                  <button
-                    key={channel}
-                    type="button"
-                    role="menuitem"
-                    disabled={!ready}
-                    onClick={() => {
-                      setOpen(false);
-                      set(
-                        [...assigned, channel],
-                        `${channelLabels[channel]} messages now go to ${teammate.name}`,
-                      );
-                    }}
-                  >
-                    <span>{channelLabels[channel]}</span>
-                    <small>
-                      {!ready ? 'Not connected' : owner ? `Now with ${owner.name}` : 'With Nod'}
-                    </small>
-                  </button>
-                );
-              })}
-            </span>
-          )}
-        </span>
-      )}
-    </span>
+    <ActionMenu
+      label={`Channels: ${assigned.map((channel) => channelLabels[channel]).join(', ') || 'None'}`}
+      trigger={
+        <MenuValue>
+          {assigned.map((channel) => channelLabels[channel]).join(', ') || 'None'}
+        </MenuValue>
+      }
+      contentClassName="teammate-setting-menu"
+    >
+      {(close) =>
+        teammateChannels.map((channel) => {
+          const on = assigned.includes(channel);
+          const holder = others.find((item) => item.teammate.channels.includes(channel));
+          const ready = on || connected.has(channel);
+          return (
+            <ActionMenuItem
+              key={channel}
+              checked={on}
+              aria-disabled={!ready}
+              onClick={() => {
+                close();
+                toggle(channel);
+              }}
+            >
+              <span>
+                {channelLabels[channel]}
+                <small>
+                  {on
+                    ? `Comes to ${teammate.name}`
+                    : !ready
+                      ? 'Not connected'
+                      : `Now with ${holder?.name ?? 'Nod'}`}
+                </small>
+              </span>
+            </ActionMenuItem>
+          );
+        })
+      }
+    </ActionMenu>
   );
 }
 
-function MemoryRow({ teammate }: { teammate: Teammate }) {
-  const [open, setOpen] = useState(false);
-  const mode = teammate.teammate.memory;
+function Setting({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className={`panel-row${open ? ' panel-row-open' : ''}`}>
-      <button
-        type="button"
-        className="panel-row-head"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <span>Memory</span>
-        <span className="panel-row-value">{memoryShort(mode)}</span>
-        <ChevronRight size={14} className="panel-row-chevron" aria-hidden="true" />
-      </button>
-      {open && (
-        <div className="panel-row-body">
-          <div className="panel-options" role="radiogroup" aria-label="Memory">
-            {memoryModes.map((value) => (
-              <label key={value} className="panel-option">
-                <input
-                  type="radio"
-                  name={`memory-${teammate.id}`}
-                  value={value}
-                  checked={mode === value}
-                  onChange={() =>
-                    void changeTeammate(teammate.id, { memory: value }).catch((cause) =>
-                      toast(errorMessage(cause)),
-                    )
-                  }
-                />
-                <div>
-                  <b>{memoryLabels[value].title}</b>
-                  <span>{memoryLabels[value].detail}</span>
-                </div>
-              </label>
-            ))}
-          </div>
-        </div>
-      )}
+    <div className="account-preference-row teammate-setting">
+      <span>{label}</span>
+      {children}
     </div>
   );
 }
@@ -931,186 +926,94 @@ export function TeammatePanel({
   onClose(): void;
   onRemoved(): void;
 }) {
-  const [avatarOpen, setAvatarOpen] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const avatarRoot = useRef<HTMLSpanElement>(null);
-  useEffect(() => {
-    setAvatarOpen(false);
-    setConfirming(false);
-  }, [teammate?.id]);
-  useEffect(() => {
-    if (!avatarOpen) return;
-    const outside = (event: PointerEvent) => {
-      if (!avatarRoot.current?.contains(event.target as Node)) setAvatarOpen(false);
-    };
-    document.addEventListener('pointerdown', outside, true);
-    return () => document.removeEventListener('pointerdown', outside, true);
-  }, [avatarOpen]);
-  const close = (
-    <button
-      type="button"
-      className="teammate-icon-button"
-      aria-label="Close settings"
-      onClick={onClose}
-    >
-      <X size={16} aria-hidden="true" />
-    </button>
-  );
+  const [removing, setRemoving] = useState(false);
+  useEffect(() => setRemoving(false), [teammate?.id]);
   return (
     <aside
       id="teammate-panel"
       className="teammate-panel"
       aria-label={teammate ? `${teammate.name} settings` : 'Nod settings'}
       onKeyDown={(event) => {
-        if (event.key !== 'Escape') return;
-        if (avatarOpen) {
-          event.stopPropagation();
-          return setAvatarOpen(false);
-        }
-        onClose();
+        if (event.key === 'Escape' && !event.defaultPrevented) onClose();
       }}
     >
       <div className="panel-head">
-        <div className="panel-head-top">{close}</div>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="panel-close"
+          title="Close"
+          aria-label="Close settings"
+          onClick={onClose}
+        >
+          <X size={16} aria-hidden="true" />
+        </Button>
         <div className="panel-identity">
-          {teammate ? (
-            <span className="avatar-wrap" ref={avatarRoot}>
-              <button
-                type="button"
-                className="avatar-button"
-                aria-expanded={avatarOpen}
-                aria-label="Change avatar"
-                onClick={() => setAvatarOpen((value) => !value)}
-              >
-                <TeammateAvatar name={teammate.name} avatar={teammate.teammate.avatar} size="lg" />
-              </button>
-              {avatarOpen && (
-                <AvatarMenu teammate={teammate} onClose={() => setAvatarOpen(false)} />
-              )}
-            </span>
-          ) : (
-            <NodAvatar size="lg" />
-          )}
+          {teammate ? <AvatarPicker teammate={teammate} /> : <NodAvatar size="lg" />}
           <div className="panel-identity-text">
-            {teammate ? (
-              <>
-                <NameField teammate={teammate} />
-                {teammate.teammate.job && <p>{teammate.teammate.job}</p>}
-              </>
-            ) : (
-              <>
-                <h2>Nod</h2>
-                <p>Your main assistant</p>
-              </>
-            )}
+            <h2>
+              {teammate ? (
+                <InlineName
+                  value={teammate.name}
+                  label="name"
+                  save={async (name) => {
+                    await changeTeammate(teammate.id, { name });
+                  }}
+                />
+              ) : (
+                'Nod'
+              )}
+            </h2>
+            <p>{teammate ? teammate.teammate.job || 'Setting up' : 'Your main assistant'}</p>
           </div>
         </div>
       </div>
       <div className="panel-body">
         {teammate ? (
           <>
-            <div className="panel-rows">
-              <div className="panel-row">
-                <div className="panel-row-head panel-row-still">
-                  <span>Model</span>
-                  <span className="panel-row-control">
-                    <TeammateModel teammate={teammate} />
-                  </span>
-                </div>
-              </div>
-              <MemoryRow teammate={teammate} />
-              <div className="panel-row">
-                <div className="panel-row-head panel-row-still">
-                  <span>Instructions</span>
-                </div>
-                <div className="panel-row-body">
-                  <InstructionsField teammate={teammate} />
-                </div>
-              </div>
-              <div className="panel-row">
-                <div className="panel-row-head panel-row-still">
-                  <span>Channels</span>
-                  <Channels
-                    teammate={teammate}
-                    others={teammates.filter((item) => item.id !== teammate.id)}
-                  />
-                </div>
-              </div>
+            <div className="teammate-settings">
+              <Setting label="Model">
+                <TeammateModel teammate={teammate} />
+              </Setting>
+              <Setting label="Memory">
+                <MemoryMenu teammate={teammate} />
+              </Setting>
+              <Setting label="Channels">
+                <ChannelMenu
+                  teammate={teammate}
+                  others={teammates.filter((item) => item.id !== teammate.id)}
+                />
+              </Setting>
             </div>
-            {confirming ? (
-              <div className="panel-confirm" role="alert">
-                <p>
-                  <b>Remove {teammate.name}?</b> Its chat
-                  {teammate.teammate.memory === 'shared' ? '' : ' and its own memory'} go with it.
-                  {teammate.teammate.channels.length ? ' Its channels go back to Nod.' : ''}
-                </p>
-                <div className="panel-confirm-actions">
-                  <button
-                    type="button"
-                    className="teammate-button teammate-button-danger"
-                    disabled={busy}
-                    onClick={() => {
-                      setBusy(true);
-                      void removeTeammate(teammate.id)
-                        .then(() => {
-                          toast(`Removed ${teammate.name}`);
-                          onRemoved();
-                        })
-                        .catch((cause) => toast(errorMessage(cause)))
-                        .finally(() => setBusy(false));
-                    }}
-                  >
-                    Remove {teammate.name}
-                  </button>
-                  <button
-                    type="button"
-                    className="teammate-button"
-                    onClick={() => setConfirming(false)}
-                  >
-                    Keep
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <button
-                type="button"
-                className="teammate-button teammate-button-quiet-danger"
-                onClick={() => setConfirming(true)}
-              >
-                Remove {teammate.name}
-              </button>
-            )}
+            <InstructionsField key={teammate.id} teammate={teammate} />
+            <button type="button" className="teammate-remove" onClick={() => setRemoving(true)}>
+              Remove {teammate.name}
+            </button>
+            <RemoveTeammate
+              teammate={teammate}
+              open={removing}
+              onOpenChange={setRemoving}
+              onRemoved={onRemoved}
+            />
           </>
         ) : (
           <>
-            <div className="panel-rows">
-              <div className="panel-row">
-                <div className="panel-row-head panel-row-still">
-                  <span>Model</span>
-                  <span className="panel-row-control">
-                    <NodModel />
-                  </span>
-                </div>
-              </div>
-              <div className="panel-row">
-                <div className="panel-row-head panel-row-still">
-                  <span>Apps</span>
-                  <span className="panel-row-value">All connected apps</span>
-                </div>
-              </div>
-              <div className="panel-row">
-                <div className="panel-row-head panel-row-still">
-                  <span>Memory</span>
-                  <span className="panel-row-value">Yours</span>
-                </div>
-              </div>
+            <div className="teammate-settings">
+              <Setting label="Model">
+                <NodModel />
+              </Setting>
+              <Setting label="Apps">
+                <span className="teammate-setting-text">All connected apps</span>
+              </Setting>
+              <Setting label="Memory">
+                <span className="teammate-setting-text">Yours</span>
+              </Setting>
             </div>
-            <p className="panel-note">
+            <p className="panel-note field-hint">
               <LockKeyhole size={14} aria-hidden="true" />
               <span>
-                Nod can’t be renamed or removed. It holds your Vault, approvals and settings, and
-                every teammate’s actions go through its trust check.
+                Nod holds your Vault, approvals and settings, and every teammate’s actions go
+                through its trust check.
               </span>
             </p>
           </>
