@@ -18,6 +18,7 @@ import { untrustedBlock } from '../shared/untrusted.ts';
 import { localTimestamp } from '../shared/date-locale.ts';
 import { lockKey, locksTable } from './locks.ts';
 import { inChatSql, inMainSql, withdrawnSql } from './turn-chain.ts';
+import { chatOnlyPlacement } from './chats.ts';
 import { afterCommit, transaction } from './transaction.ts';
 import { computerRequestArgs, isComputerAction } from './computer-use.ts';
 import { createErrorRedactor } from './redaction.ts';
@@ -60,7 +61,9 @@ export interface ApprovalDescription {
 
 export interface ApprovalPresentation {
   question: string;
+  cardQuestion?: string;
   action: string;
+  decline?: string;
 }
 
 export interface ApprovalRepeat {
@@ -237,6 +240,7 @@ async function workOf(
 
 export async function turnOrigin(turnId: string) {
   const client = await pool.connect();
+  let failed = false;
   try {
     const current = await turnRow(client, turnId);
     const chain = current && (await turnChain(client, current));
@@ -274,8 +278,11 @@ export async function turnOrigin(turnId: string) {
           }
         : {}),
     };
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    client.release();
+    client.release(failed);
   }
 }
 
@@ -652,6 +659,8 @@ export async function createApprovals(
     };
     let question: string | undefined;
     let title: string | undefined;
+    let decline: string | undefined;
+    let cardQuestion: string | undefined;
     {
       let existing = await withTurnLock(turn.turnId, (client) => inspect(client, true));
       if ('repeat' in existing && existing.repeat && classifyRepeat) {
@@ -741,6 +750,8 @@ export async function createApprovals(
         );
         question = typeof presentation === 'string' ? presentation : presentation.question;
         title = typeof presentation === 'string' ? undefined : presentation.action;
+        decline = typeof presentation === 'string' ? undefined : presentation.decline;
+        cardQuestion = typeof presentation === 'string' ? undefined : presentation.cardQuestion;
         options.signal?.throwIfAborted();
         if (typeof question !== 'string' || !question.trim())
           throw new Error('The confirmation formatter did not produce a valid question.');
@@ -781,12 +792,19 @@ export async function createApprovals(
       }
       const messageId = randomUUID();
       await client.query(
-        "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text) VALUES($1,$2,$3,$4,'assistant',$5)",
-        [messageId, ownerId, turn.threadId, turn.turnId, question],
+        "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,chat_only) VALUES($1,$2,$3,$4,'assistant',$5,$6)",
+        [
+          messageId,
+          ownerId,
+          turn.threadId,
+          turn.turnId,
+          question,
+          Boolean(await chatOnlyPlacement(client, ownerId, turn.turnId)),
+        ],
       );
       const approval = (
         await client.query(
-          "INSERT INTO approvals(id,owner_id,thread_id,turn_id,action,args,status,source_message_id,confirmation_message_id,expected_revision,details,title,instruction_change) VALUES($1,$2,$3,$4,$5,$6,'pending',$7,$8,$9,$10::jsonb,$11,$12::jsonb) RETURNING *",
+          "INSERT INTO approvals(id,owner_id,thread_id,turn_id,action,args,status,source_message_id,confirmation_message_id,expected_revision,details,title,instruction_change,decline,card_question) VALUES($1,$2,$3,$4,$5,$6,'pending',$7,$8,$9,$10::jsonb,$11,$12::jsonb,$13,$14) RETURNING *",
           [
             randomUUID(),
             ownerId,
@@ -800,6 +818,8 @@ export async function createApprovals(
             details ?? null,
             title ?? null,
             instructionChange ? JSON.stringify(instructionChange) : null,
+            decline ?? null,
+            cardQuestion?.trim() || null,
           ],
         )
       ).rows[0];
@@ -938,7 +958,8 @@ export async function createApprovals(
       ownerId,
     ]);
     await client.query(
-      "INSERT INTO messages(id,owner_id,role,text,display_text,thread_id,turn_id,reply_to_message_id,approval_answer) VALUES($1,$2,'user',$3,$4,$5,$6,$7,$8)",
+      `INSERT INTO messages(id,owner_id,role,text,display_text,thread_id,turn_id,reply_to_message_id,approval_answer,chat_only)
+       VALUES($1,$2,'user',$3,$4,$5,$6,$7,$8,COALESCE((SELECT c.chat_only FROM messages c WHERE c.id=$9 AND c.owner_id=$2),false))`,
       [
         messageId,
         ownerId,
@@ -948,6 +969,7 @@ export async function createApprovals(
         turnId,
         input.replyToMessageId ?? null,
         input.clicked ? approved : null,
+        approval.confirmation_message_id,
       ],
     );
     await client.query('UPDATE approvals SET status=$2,execution_turn_id=$3 WHERE id=$1', [
@@ -1169,14 +1191,15 @@ export async function createApprovals(
     for (const task of tasks) {
       const messageId = randomUUID();
       await client.query(
-        `INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text)
-         VALUES($1,$2,$3,$4,'assistant',$5)`,
+        `INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,chat_only)
+         VALUES($1,$2,$3,$4,'assistant',$5,$6)`,
         [
           messageId,
           ownerId,
           task.thread_id,
           task.turn_id,
           'The schedule has changed. This task is still open. Reply here if you want to continue it.',
+          Boolean(await chatOnlyPlacement(client, ownerId, task.turn_id)),
         ],
       );
       await client.query(
@@ -1216,9 +1239,26 @@ export async function createApprovals(
     return Boolean(result.rowCount);
   }
 
+  async function closeSessionQuestions(client: PoolClient, sessionId: string, turnId: string) {
+    const expired = await client.query<{ action: string; source: string }>(
+      `UPDATE approvals a SET status='expired' FROM turns u
+       WHERE u.id=a.turn_id AND u.owner_id=a.owner_id AND a.owner_id=$1 AND a.status='pending'
+         AND u.session_id=$2 AND u.id<>$3 AND u.status IN ('waiting','cancelled')
+       RETURNING a.action,u.source`,
+      [ownerId, sessionId, turnId],
+    );
+    await client.query(
+      "UPDATE turns SET status='cancelled',finished_at=now() WHERE owner_id=$1 AND session_id=$2 AND id<>$3 AND status='waiting'",
+      [ownerId, sessionId, turnId],
+    );
+    afterCommit(client, () => {
+      for (const row of expired.rows) changed('expired', row.action, row.source);
+    });
+  }
+
   return {
     request,
-    chat: { answer: answerChat, accept: acceptChat },
+    chat: { answer: answerChat, accept: acceptChat, close: closeSessionQuestions },
     executeConfirmed,
     stoppedOutcomes,
     retireScheduleConfirmations,

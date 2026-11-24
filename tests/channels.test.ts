@@ -232,6 +232,11 @@ test('contact previews read vCard 2.1, 3.0 and 4.0 without treating field values
     contactCards('BEGIN:VCARD\r\nFN:First\r\nBEGIN:VCARD\r\nFN:Second\r\nEND:VCARD'),
     [],
   );
+  const escaped = contactCards(
+    'BEGIN:VCARD\r\nFN:Synthetic\r\nTITLE:C:\\\\new\\\\\r\nORG:Line\\nOne\\NTwo\\, \\;\r\nEND:VCARD',
+  )[0];
+  assert.equal(escaped.title, 'C:\\new\\');
+  assert.equal(escaped.organization, 'Line\nOne\nTwo, ;');
 });
 
 const vcardOf = (...lines: string[]) => ['BEGIN:VCARD', ...lines, 'END:VCARD'].join('\r\n');
@@ -774,7 +779,7 @@ test('channel transports check literal instructions against their actual formatt
 
 test(
   'WhatsApp links privately, admits only its owner, fences echoes across restart, and reconnects without repeating sends',
-  { skip: !process.env.TEST_DATABASE_URL, timeout: 30_000 },
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 30_000, concurrency: true },
   async (t) => {
     const schema = `test_whatsapp_link_${randomUUID().replaceAll('-', '')}`;
     const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
@@ -786,8 +791,15 @@ test(
     const keyStore = { id: 'fixture', configured: true, getKey: async () => key };
     const key = Buffer.alloc(32, 7);
     try {
-      for (const mode of ['bot', 'self-chat'] as const)
-        await t.test(mode, async () => {
+      const setup = await createChannelSessionStore({
+        pool,
+        ownerId: 'fixture-setup',
+        keyStore,
+      }).open();
+      await setup.close();
+      const modes: Promise<void>[] = [];
+      for (const mode of ['bot', 'self-chat'] as const) {
+        const subtest = t.test(mode, async () => {
           type Options = Parameters<typeof createWhatsAppLinkedTransport>[0];
           type Factory = NonNullable<Options['createSocket']>;
           const sockets: { events: EventEmitter; config: Parameters<Factory>[0] }[] = [];
@@ -1510,6 +1522,9 @@ test(
             await transport.close();
           }
         });
+        modes.push(subtest);
+      }
+      await Promise.all(modes);
     } finally {
       await pool.end();
       await admin.query(`DROP SCHEMA ${schema} CASCADE`);
@@ -1911,7 +1926,7 @@ test(
       threadId: 'telegram:123456',
       replyToMessageId: '123456:7',
       text: `Schedule instruction:\n\n\`\`\`\n${prompt}\n\`\`\`\n\nCreate this schedule?`,
-      approval: true as const,
+      approval: { approve: 'Zeitplan erstellen', decline: 'Abbrechen' },
     };
     try {
       assert.deepEqual(await transport.post(approval), {
@@ -1926,9 +1941,12 @@ test(
       assert.equal(Object(sent.reply_parameters).message_id, 7);
       assert.deepEqual(
         Object(sent.reply_markup).inline_keyboard[0].map(
-          (button: { callback_data: string }) => button.callback_data,
+          (button: { text: string; callback_data: string }) => [button.text, button.callback_data],
         ),
-        ['nod:approval:yes', 'nod:approval:no'],
+        [
+          ['Zeitplan erstellen', 'nod:approval:yes'],
+          ['Abbrechen', 'nod:approval:no'],
+        ],
       );
       rejectMarkdown = true;
       const plain = await transport.post(approval);
@@ -4404,7 +4422,7 @@ async function createFixtureTables(pool: pg.Pool, owner: string) {
   await pool.query(`${locksTable};
     CREATE TABLE threads(id uuid PRIMARY KEY,owner_id text NOT NULL,status text NOT NULL DEFAULT 'idle',created_at timestamptz NOT NULL DEFAULT now(),archived_at timestamptz);
     CREATE TABLE turns(id uuid PRIMARY KEY,parent_turn_id uuid,owner_id text NOT NULL,thread_id uuid NOT NULL REFERENCES threads(id),message_id uuid,source text NOT NULL DEFAULT 'user',source_id text UNIQUE,channel text NOT NULL DEFAULT 'web',channel_source_id text,status text NOT NULL DEFAULT 'queued',waiting_reason text,handoff_browser_id text,background boolean NOT NULL DEFAULT false,withdrawn boolean NOT NULL DEFAULT false,created_at timestamptz NOT NULL DEFAULT now(),started_at timestamptz,finished_at timestamptz,session_id uuid GENERATED ALWAYS AS (CASE WHEN background THEN id ELSE thread_id END) STORED);
-    CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text NOT NULL,role text NOT NULL,text text NOT NULL,thread_id uuid REFERENCES threads(id),turn_id uuid REFERENCES turns(id),attachments jsonb NOT NULL DEFAULT '[]',presentation jsonb,answer_choices jsonb,reply_to_message_id uuid,delivered_channel text,approval_answer boolean,assistant_reaction text,assistant_reacted_at timestamptz,hidden_at timestamptz,created_at timestamptz NOT NULL DEFAULT now())`);
+    CREATE TABLE messages(id uuid PRIMARY KEY,owner_id text NOT NULL,role text NOT NULL,text text NOT NULL,thread_id uuid REFERENCES threads(id),turn_id uuid REFERENCES turns(id),attachments jsonb NOT NULL DEFAULT '[]',presentation jsonb,answer_choices jsonb,reply_to_message_id uuid,delivered_channel text,approval_answer boolean,assistant_reaction text,assistant_reacted_at timestamptz,hidden_at timestamptz,chat_only boolean NOT NULL DEFAULT false,created_at timestamptz NOT NULL DEFAULT now())`);
   const threadId = randomUUID();
   await pool.query('INSERT INTO threads(id,owner_id) VALUES($1,$2)', [threadId, owner]);
   return threadId;
@@ -5486,6 +5504,20 @@ test(
         [ownerMessage],
       );
       assert.deepEqual(await react('👍'), { status: 'updated' });
+      const nextMessage = randomUUID();
+      await pool.query(
+        "INSERT INTO messages(id,owner_id,role,text,thread_id) VALUES($1,'local-development','user','Synthetic context',$2)",
+        [nextMessage, threadId],
+      );
+      assert.deepEqual(
+        await reactions.react({
+          threadId,
+          turnId: reactionTurn,
+          messageId: nextMessage,
+          reaction: '👍',
+        }),
+        { status: 'updated' },
+      );
       failReaction = true;
       assert.deepEqual(await react(null), { status: 'skipped', reason: 'delivery_failed' });
       assert.equal((await storedReaction()).assistant_reaction, '👍');

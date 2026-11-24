@@ -245,7 +245,7 @@ export function createTasks(options: {
          LEFT JOIN LATERAL (SELECT left(split_part(btrim(lm.text),E'\\n\\n',1),240) AS text FROM messages lm
            JOIN turns lu ON lu.id=lm.turn_id AND lu.owner_id=lm.owner_id
            WHERE t.name IS NOT NULL AND lm.owner_id=t.owner_id AND lu.task_id=t.id AND lm.role='assistant'
-             AND lm.text<>'' AND lm.hidden_at IS NULL
+             AND lm.text<>'' AND lm.hidden_at IS NULL AND NOT lm.chat_report
            ORDER BY lm.created_at DESC,lm.id DESC LIMIT 1) last_reply ON true
          LEFT JOIN LATERAL (SELECT m.id,m.text FROM messages m
            WHERE u.status='waiting' AND m.owner_id=u.owner_id AND m.turn_id=u.id AND m.role='assistant' AND m.text<>'' AND m.hidden_at IS NULL
@@ -910,7 +910,7 @@ export function createTasks(options: {
         request.result.length > chatResultLimit
       )
         throw failure(
-          `A chat's result is one sentence of at most ${chatResultLimit} characters: the owner reads it on the chat's card. Call finish again with that sentence, then give the full answer as your final text.`,
+          `A chat's result is one sentence of at most ${chatResultLimit} characters: the owner reads it in their main chat. Call finish again with that sentence, then give the full answer as your final text.`,
         );
       if (!updated.rowCount)
         throw failure(
@@ -1060,6 +1060,8 @@ export function createTasks(options: {
       ALTER TABLE turns ADD COLUMN IF NOT EXISTS task_id uuid REFERENCES tasks(id);
       CREATE INDEX IF NOT EXISTS turns_task ON turns(task_id) WHERE task_id IS NOT NULL;
       ${chatColumnsSql}
+      CREATE INDEX IF NOT EXISTS turns_task_message ON turns(message_id) WHERE task_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS tasks_message ON tasks(owner_id,message_id);
     `);
   }
 

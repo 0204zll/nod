@@ -160,14 +160,46 @@ export async function latestChatMessages(
 }
 
 export async function chatOnlyPlacement(client: Queryable, ownerId: string, turnId: string) {
+  const taskId = (
+    await client.query<{ task_id: string | null }>(
+      "SELECT to_jsonb(u)->>'task_id' AS task_id FROM turns u WHERE u.id=$1 AND u.owner_id=$2 AND u.channel='web'",
+      [turnId, ownerId],
+    )
+  ).rows[0]?.task_id;
+  if (!taskId) return null;
   return (
     (
       await client.query<{ id: string }>(
-        `SELECT t.id FROM turns u JOIN tasks t ON t.id=(to_jsonb(u)->>'task_id')::uuid AND t.owner_id=u.owner_id
-         WHERE u.id=$1 AND u.owner_id=$2 AND u.channel='web' AND t.name IS NOT NULL`,
-        [turnId, ownerId],
+        'SELECT id FROM tasks WHERE id=$1 AND owner_id=$2 AND name IS NOT NULL',
+        [taskId, ownerId],
       )
     ).rows[0]?.id ?? null
+  );
+}
+
+export async function reportChat(
+  client: Queryable,
+  ownerId: string,
+  turn: { threadId: string; turnId: string },
+  failure?: string,
+) {
+  if (!(await chatOnlyPlacement(client, ownerId, turn.turnId))) return;
+  await client.query(
+    `INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,reply_to_message_id,chat_report)
+     SELECT gen_random_uuid(),u.owner_id,'assistant',line.text,u.thread_id,u.id,s.id,true
+     FROM turns u JOIN tasks t ON t.id=u.task_id AND t.owner_id=u.owner_id
+     JOIN messages s ON s.id=t.source_message_id AND s.owner_id=t.owner_id AND s.thread_id=u.thread_id
+     CROSS JOIN LATERAL (SELECT COALESCE($4::text,
+       NULLIF(CASE WHEN length(t.result)<=${chatResultLimit} THEN btrim(t.result) END,''),
+       (SELECT CASE WHEN length(p.text)>${chatResultLimit} THEN left(p.text,${chatResultLimit - 1})||'…' ELSE p.text END
+        FROM (SELECT split_part(btrim(m.text),E'\\n\\n',1) AS text FROM messages m
+          WHERE m.owner_id=u.owner_id AND m.turn_id=u.id AND m.role='assistant' AND m.text<>'' AND m.hidden_at IS NULL
+          ORDER BY m.created_at DESC,m.id DESC LIMIT 1) p)) AS text) line
+     WHERE u.id=$1 AND u.owner_id=$2 AND u.thread_id=$3
+       AND ($4::text IS NOT NULL OR t.state='done') AND line.text<>''
+       AND NOT s.chat_only AND s.hidden_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.owner_id=u.owner_id AND r.turn_id=u.id AND r.chat_report)`,
+    [turn.turnId, ownerId, turn.threadId, failure ?? null],
   );
 }
 

@@ -231,6 +231,10 @@ test('a side chat reply notifies once with its chat and a waiting question shows
   f.tasks(chat('chat-message-1'));
   await eventually(() => f.snapshots.length === 1);
   f.tasks(chat('chat-message-2'));
+  f.messages([
+    { id: 'historical-assistant', role: 'assistant' },
+    { id: 'main-result-line', role: 'assistant', chatReport: true },
+  ]);
   f.send('data: {"type":"refresh"}\n\n');
   await eventually(() => f.notifications === 1);
   assert.equal(f.delivered[0].id, 'chat-message-2');

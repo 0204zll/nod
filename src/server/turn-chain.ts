@@ -8,8 +8,8 @@ export const taskMessageSql =
 export const inMainSql = (alias: string) => `NOT ${alias}.chat_only`;
 
 export function inChatSql(alias: string, chat: string) {
-  return `EXISTS (SELECT 1 FROM turns ct WHERE ct.owner_id=${alias}.owner_id AND ct.task_id=${chat}
-      AND (ct.id=${alias}.turn_id OR ct.message_id=${alias}.id))`;
+  return `(NOT ${alias}.chat_report AND EXISTS (SELECT 1 FROM turns ct WHERE ct.owner_id=${alias}.owner_id AND ct.task_id=${chat}
+      AND (ct.id=${alias}.turn_id OR ct.message_id=${alias}.id)))`;
 }
 
 export function supersededSql(alias: string, newer: string) {

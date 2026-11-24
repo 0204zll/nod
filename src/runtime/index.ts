@@ -1,3 +1,4 @@
+import type { FlightSearch } from '../ports/flights.ts';
 import { presentationInputSchema, type Presentation } from '../shared/presentation.ts';
 import { proactiveUpdateSchema, sourceReadSchema } from '../shared/proactivity.ts';
 import { appPages } from '../shared/app-links.ts';
@@ -34,8 +35,8 @@ import { BrowserActionError } from '../ports/computer.ts';
 import { threadIdentity } from '../ports/thread-identity.ts';
 import {
   compactHistory,
+  compactMemory,
   compactOwnerContext,
-  compactSystemPrompt,
   firstInstruction,
   observerInstruction,
   scheduledInstruction,
@@ -95,20 +96,22 @@ const parentTools = new Set([
   'task',
 ]);
 const parallelTools = new Set([
-  'nod_docs',
+  'nod',
+  'flights',
   'delegate',
   'share_file',
   'create_audio',
   'skills',
   'apps',
-  'manage_personal_context',
+  'memory',
   'react_to_message',
 ]);
 const orderedTools = new Set([
   'apps',
   'files',
   'computer',
-  'manage_personal_context',
+  'memory',
+  'nod',
   'skills',
   'read_source',
   'proactive_issue',
@@ -124,7 +127,6 @@ const reportingTaskActions = new Set(['finish', 'list', 'stop', 'update']);
 const limitActions = new Set(['usage_get', 'limits_update']);
 const dollars = (value: number) => `$${Number.isInteger(value) ? value : value.toFixed(2)}`;
 const delimitedTools = new Set([
-  'nod_docs',
   'read_source',
   'proactive_issue',
   'apps',
@@ -139,7 +141,31 @@ const delimitedTools = new Set([
   'get_search_content',
   'source_check',
   'codemode',
+  'flights',
 ]);
+export function webTarget(name: string, params: unknown, redact: (text: string) => string) {
+  const input = (params ?? {}) as Record<string, unknown>;
+  const first = (one: unknown, many: unknown) =>
+    [one, ...(Array.isArray(many) ? many : [])].find(
+      (value): value is string => typeof value === 'string' && value.trim() !== '',
+    );
+  if (name === 'web_search') {
+    const query = first(input.query, input.queries);
+    if (!query) return {};
+    const text = redact(query)
+      .replace(/(^|\s)-?(?:[a-z]+:|site\.)\S+/gi, ' ')
+      .replace(/["“”]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!text) return {};
+    return { detail: text.length > 40 ? `${text.slice(0, 39).trimEnd()}…` : text };
+  }
+  if (name !== 'fetch_content') return {};
+  const url = first(input.url, input.urls);
+  if (!url || !URL.canParse(url)) return {};
+  return { site: new URL(url).hostname.replace(/^www\./, '') };
+}
+
 function textResult(value: unknown): AgentToolResult {
   return {
     content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }],
@@ -189,6 +215,7 @@ export function createAgentRuntime(dependencies: {
   workspace: Workspace;
   skills?: SkillLibrary;
   documentation?: Documentation;
+  flights?: FlightSearch;
   redactError?(text: string): string;
   redactCommand?(text: string): string;
   observe?(turnId: string, event: RuntimeObservation): void;
@@ -251,6 +278,7 @@ export function createAgentRuntime(dependencies: {
     let completed = false;
     let lastReply = '';
     let lastPresentation = '';
+    let fallbackNoted: string | undefined;
     let checkInSpent = context.checkIn?.spentUsd ?? 0;
     let checkInPlan = context.checkIn?.planUsd ?? 0;
     let checkInBlocked = false;
@@ -290,8 +318,7 @@ export function createAgentRuntime(dependencies: {
     let reported = false;
     let finalDelivered = false;
     let requestRevision = 0;
-    let taskStart:
-      { revision: number; message: string; previousReply: string; named: boolean } | undefined;
+    let taskStart: { revision: number; message: string; previousReply: string } | undefined;
     const activeToolCalls = new Set<Promise<unknown>>();
     const observe = (event: RuntimeObservation) => {
       if (signal.aborted && !(event.type === 'tool_end' && event.status === 'cancelled')) return;
@@ -472,7 +499,7 @@ export function createAgentRuntime(dependencies: {
             name === 'proactive_issue' ||
             name === 'task' ||
             (name === 'ask_user' && overBudget()) ||
-            (name === 'manage_personal_context' &&
+            (name === 'memory' &&
               [
                 'memory_read',
                 'memory_find',
@@ -487,10 +514,7 @@ export function createAgentRuntime(dependencies: {
         if (
           context.spendingLimitReached &&
           !reportingTools.has(name) &&
-          !(
-            name === 'manage_personal_context' &&
-            limitActions.has(String((params as { action?: unknown })?.action))
-          )
+          !(name === 'nod' && limitActions.has(String((params as { action?: unknown })?.action)))
         )
           throw new Error(
             `The owner's ${dollars(context.spendingLimitReached.monthlyUsd)} monthly spending limit is reached, so only changing spending limits and replying work now.`,
@@ -505,7 +529,7 @@ export function createAgentRuntime(dependencies: {
         ) {
           if (source === execution) checkInBlocked = true;
           throw new Error(
-            `This work has used ${checkInUsed()} since the owner's last message, past the ${dollars(context.checkIn!.budgetUsd)} check-in.${checkInPlan >= 0.005 ? ' Plan usage costs the owner nothing extra.' : ''} Do no more work now. Call ask_user to state the cost and what continuing would do, then ask whether to keep going. Follow the shared reporting rules for any result you include.`,
+            `This work has passed the ${dollars(context.checkIn!.budgetUsd)} check-in since the owner's last message.${checkInPlan >= 0.005 ? ' Some of it is ChatGPT plan usage counted at API prices, which costs the owner nothing extra; write {plan} where you state that part.' : ''} Do no more work now. Call ask_user to state the cost and what continuing would do, then ask whether to keep going. Write {spent} exactly where the question states what this work has used; Nod puts in the current amount when it asks. Follow the shared reporting rules for any result you include.`,
           );
         }
         const id = randomUUID();
@@ -522,14 +546,16 @@ export function createAgentRuntime(dependencies: {
             ? redactCommand(commandLine).slice(0, 4000)
             : undefined;
         const event = (record?: WorkspaceCommandRecord) => {
+          const web = webTarget(name, params, dependencies.redactError ?? String);
           const site =
             browserTools.has(name) && sites.has(source.browserId)
               ? sites.get(source.browserId)
-              : appName(name, params);
+              : (appName(name, params) ?? web.site);
           return {
             execution: source,
             callId: id,
             ...(site ? { site } : {}),
+            ...(web.detail ? { detail: web.detail } : {}),
             ...(record && command !== undefined ? { command: record } : {}),
           };
         };
@@ -585,10 +611,6 @@ export function createAgentRuntime(dependencies: {
               revision,
               message: String((params as { message?: unknown }).message ?? ''),
               previousReply: lastReply,
-              named: Boolean(
-                (params as { name?: unknown; chat?: unknown }).name ||
-                (params as { chat?: unknown }).chat,
-              ),
             };
           const { commandOutput: fullOutput, ...toolResult } = isToolResult(output)
             ? output
@@ -792,28 +814,22 @@ export function createAgentRuntime(dependencies: {
         };
       const bind = (turn: Turn, take: () => Promise<unknown>): AgentTool[] =>
         [
-          ...nodTools(turn, skills, dependencies.documentation),
+          ...nodTools(turn, skills, dependencies.documentation, dependencies.flights),
           ...(context.proactivity ? [] : connectedTools(turn)),
         ]
           .filter(
             (tool) =>
               !context.proactivity ||
-              [
-                'read_source',
-                'proactive_issue',
-                'manage_personal_context',
-                'task',
-                'ask_user',
-              ].includes(tool.name),
+              ['read_source', 'proactive_issue', 'memory', 'task', 'ask_user'].includes(tool.name),
           )
           .map((tool): AgentTool => {
             const { name, execute } = tool;
             const description =
-              context.proactivity && name === 'manage_personal_context'
+              context.proactivity && name === 'memory'
                 ? 'Read owner context. memory_read {path}, memory_find {query,area?}, history_search {query?,from?,to?,before?,around?}, and notification_preferences_get {} are the only available actions. Memory is context, not source evidence or permission.'
                 : tool.description;
             const parameters =
-              context.proactivity && name === 'manage_personal_context'
+              context.proactivity && name === 'memory'
                 ? Type.Object(
                     {
                       action: Type.Union(
@@ -835,7 +851,7 @@ export function createAgentRuntime(dependencies: {
               description,
               parameters,
               ...(tool.eager ? { eager: true } : {}),
-              ...(tool.companions?.length ? { companions: tool.companions } : {}),
+              ...(tool.companions ? { companions: tool.companions } : {}),
               ...(deferred ? { deferred } : {}),
               parallel: Boolean(deferred) || parallelTools.has(name),
               execute: async (params, options) => {
@@ -883,9 +899,15 @@ export function createAgentRuntime(dependencies: {
         context.proactivity?.instructions ??
         systemPrompt(workspace, dependencies.skills, context.taskContext, context.background);
       const compactInstructions = {
-        systemPrompt: context.proactivity
-          ? system
-          : compactSystemPrompt(workspace, skills, context.taskContext, context.background),
+        systemPrompt:
+          context.proactivity?.instructions ??
+          systemPrompt(
+            workspace,
+            dependencies.skills,
+            context.taskContext,
+            context.background,
+            true,
+          ),
         ownerContext: compactOwnerContext(context),
       };
       const shared = {
@@ -929,6 +951,13 @@ export function createAgentRuntime(dependencies: {
           return reply(text, id, replyToMessageId, presentation, handoff);
         },
         pause,
+        checkInCost: () =>
+          overBudget()
+            ? {
+                spent: dollars(checkInSpent),
+                plan: dollars(Math.min(checkInPlan, checkInSpent)),
+              }
+            : undefined,
         confirm,
         visited: (browserId: string, url: string) => {
           const host = URL.parse(url)?.host;
@@ -1204,6 +1233,14 @@ export function createAgentRuntime(dependencies: {
             );
             void pendingReplies.catch(() => {});
           }
+          if (event.type === 'fallback' && event.to !== fallbackNoted) {
+            fallbackNoted = event.to;
+            const note = `${event.from} failed, so this used ${event.to}.`;
+            pendingReplies = pendingReplies.then(() =>
+              context.emit('retry', note, { execution }).catch(() => {}),
+            );
+            void pendingReplies.catch(() => {});
+          }
           if (event.type === 'message_start') {
             completeStream();
             streamId = randomUUID();
@@ -1266,10 +1303,9 @@ export function createAgentRuntime(dependencies: {
             if (
               taskStart?.revision === requestRevision &&
               !replyOwed &&
-              (taskStart.named ||
-                [taskStart.message, taskStart.previousReply].some((message) =>
-                  repeatsTaskStart(event.text, message),
-                ))
+              [taskStart.message, taskStart.previousReply].some((message) =>
+                repeatsTaskStart(event.text, message),
+              )
             )
               streamSubmitted = true;
             else queueStreamReply(event.text, streamId ?? randomUUID());
@@ -1287,6 +1323,7 @@ export function createAgentRuntime(dependencies: {
             history: compactHistory(context.history),
             relatedConversation: undefined,
             tasks: [],
+            memoryBrief: context.memoryBrief && compactMemory(context.memoryBrief),
           }
         : context;
       const observer = context.proactivity

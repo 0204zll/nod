@@ -6,6 +6,7 @@ import { classifyVerificationReply, securityCodeIn } from '../shared/verificatio
 import { lockThread } from './thread.ts';
 import { transaction } from './transaction.ts';
 import { supersededSql, waitingTurnSql } from './turn-chain.ts';
+import { chatOnlyPlacement } from './chats.ts';
 
 interface VerificationInput {
   clientMessageId: string;
@@ -160,18 +161,7 @@ export async function createChatVerification(
     if (incompatible && input.verificationRequestId)
       throw conflict('Send the verification code by itself in the sign-in conversation.');
     const channel = input.channel ?? 'web';
-    const client = await pool.connect();
-    let reserved:
-      | {
-          threadId: string;
-          turnId: string;
-          requestId: string;
-          kind: 'otp' | 'payment';
-          code: string;
-        }
-      | undefined;
-    try {
-      await client.query('BEGIN');
+    const reserve = async (client: PoolClient) => {
       const thread = await lockThread(client, options.ownerId);
       input.signal?.throwIfAborted();
       if (input.threadId !== undefined && input.threadId !== thread.id)
@@ -186,13 +176,11 @@ export async function createChatVerification(
         )
       ).rows[0];
       if (input.receiptOnly && !previous?.request_id) {
-        await client.query('COMMIT');
         return;
       }
       if (previous) {
         if (!previous.request_id) {
           await input.persistOrdinary?.(client);
-          await client.query('COMMIT');
           return;
         }
         const code = codes.otp ?? codes.payment;
@@ -221,7 +209,6 @@ export async function createChatVerification(
               : 'unavailable',
         };
         await input.persistVerification?.(client, response);
-        await client.query('COMMIT');
         return response;
       }
       let turnId: string | undefined;
@@ -298,7 +285,6 @@ export async function createChatVerification(
               : unavailableMessage,
           );
         await input.persistOrdinary?.(client);
-        await client.query('COMMIT');
         return;
       }
       if (requests.rowCount !== 1)
@@ -315,12 +301,10 @@ export async function createChatVerification(
         !paymentCodeLike
       ) {
         await input.persistOrdinary?.(client);
-        await client.query('COMMIT');
         return;
       }
       if (!code && request.kind === 'otp' && reply.kind === 'ordinary') {
         await input.persistOrdinary?.(client);
-        await client.query('COMMIT');
         return;
       }
       if (incompatible)
@@ -334,8 +318,8 @@ export async function createChatVerification(
       const codeFingerprint = await fingerprint(code, input);
       input.signal?.throwIfAborted();
       await client.query(
-        `INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,reply_to_message_id)
-         VALUES($1,$2,'user',$3,$4,$5,$6)`,
+        `INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,reply_to_message_id,chat_only)
+         VALUES($1,$2,'user',$3,$4,$5,$6,$7)`,
         [
           input.clientMessageId,
           options.ownerId,
@@ -343,6 +327,7 @@ export async function createChatVerification(
           thread.id,
           request.turn_id,
           input.replyToMessageId ?? null,
+          Boolean(await chatOnlyPlacement(client, options.ownerId, request.turn_id)),
         ],
       );
       await client.query(
@@ -350,20 +335,19 @@ export async function createChatVerification(
         [input.clientMessageId, request.id, codeFingerprint],
       );
       input.signal?.throwIfAborted();
-      await client.query('COMMIT');
-      reserved = {
-        threadId: thread.id,
-        turnId: request.turn_id,
-        requestId: request.id,
-        kind: request.kind,
-        code,
+      return {
+        reserved: {
+          threadId: thread.id,
+          turnId: request.turn_id,
+          requestId: request.id,
+          kind: request.kind,
+          code,
+        },
       };
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
+    };
+    const prepared = await transaction(reserve, pool, input.signal);
+    if (!prepared || !('reserved' in prepared)) return prepared;
+    const { reserved } = prepared;
     options.refresh();
     let status: 'submitted' | 'unavailable' | 'cancelled';
     if (input.signal?.aborted) {
@@ -416,10 +400,17 @@ export async function createChatVerification(
         .catch(() => undefined);
       if (typeof message === 'string' && message.trim())
         await pool.query(
-          `INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id)
-           SELECT $1,$2,'assistant',$3,u.thread_id,u.id FROM turns u JOIN threads th ON th.id=u.thread_id
+          `INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,chat_only)
+           SELECT $1,$2,'assistant',$3,u.thread_id,u.id,$6 FROM turns u JOIN threads th ON th.id=u.thread_id
            WHERE u.id=$4 AND u.owner_id=$2 AND th.owner_id=$2 AND th.id=$5 AND th.archived_at IS NULL`,
-          [randomUUID(), options.ownerId, message.trim(), reserved.turnId, reserved.threadId],
+          [
+            randomUUID(),
+            options.ownerId,
+            message.trim(),
+            reserved.turnId,
+            reserved.threadId,
+            Boolean(await chatOnlyPlacement(pool, options.ownerId, reserved.turnId)),
+          ],
         );
     }
     options.refresh();

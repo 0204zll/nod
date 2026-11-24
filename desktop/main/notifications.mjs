@@ -304,7 +304,13 @@ export function watchAssistantMessages({ request, onMessage, onState, retryMs = 
     for (const message of body.messages) {
       if (typeof message?.id !== 'string' || !['user', 'assistant'].includes(message.role))
         continue;
-      if (initialized && !seen.has(message.id) && message.role === 'assistant') received = message;
+      if (
+        initialized &&
+        !seen.has(message.id) &&
+        message.role === 'assistant' &&
+        !message.chatReport
+      )
+        received = message;
       seen.add(message.id);
     }
     const chats = [];
