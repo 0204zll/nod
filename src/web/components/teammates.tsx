@@ -27,13 +27,7 @@ import {
 import { usePageData } from '../hooks/use-page-data';
 import { api, errorMessage } from '../lib/api';
 import type { ChannelSettings } from '../lib/secondary-pages';
-import {
-  mentionParts,
-  teammateLine,
-  teammatePath,
-  teammateState,
-  type Teammate,
-} from '../lib/teammates';
+import { teammateLine, teammatePath, teammateState, type Teammate } from '../lib/teammates';
 import { ActionMenu, ActionMenuItem, ActionMenuSurface, focusActionMenuItem } from './action-menu';
 import { ChevronDown, LockKeyhole, MessageSquare, Plus, Settings, Trash2, X } from './icons';
 import { InlineName } from './inline-name';
@@ -89,7 +83,7 @@ export function Toasts() {
   ) : null;
 }
 
-export const teammatesChanged = () => window.dispatchEvent(new Event('nod:teammates-changed'));
+const teammatesChanged = () => window.dispatchEvent(new Event('nod:teammates-changed'));
 
 export async function changeTeammate(id: string, body: object) {
   const result = await api<Task>(`/api/teammates/${id}`, {
@@ -109,22 +103,6 @@ export async function createTeammate() {
   });
   teammatesChanged();
   return created;
-}
-
-export function MentionText({ text, names }: { text: string; names: string[] }) {
-  return (
-    <>
-      {mentionParts(text, names).map((part, index) =>
-        typeof part === 'string' ? (
-          part
-        ) : (
-          <span key={index} className="mention">
-            @{part.mention}
-          </span>
-        ),
-      )}
-    </>
-  );
 }
 
 function RemoveTeammate({

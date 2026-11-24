@@ -2385,10 +2385,10 @@ test(
           t.after(() => {
             inspectObserver = previousObserver;
           });
-          const prompt = 'Find a synthetic designer for the named chat fixture.';
-          const next = 'Now find a synthetic copywriter for the named chat fixture.';
-          const failing = 'Synthetic failing request for the named chat fixture.';
-          const slow = 'Synthetic slow request for the named chat fixture.';
+          const prompt = 'Find a synthetic designer for the teammate fixture.';
+          const next = 'Now find a synthetic copywriter for the teammate fixture.';
+          const failing = 'Synthetic failing request for the teammate fixture.';
+          const slow = 'Synthetic slow request for the teammate fixture.';
           let slowFinished!: () => void;
           const finishedSlow = new Promise<void>((resolve) => {
             slowFinished = resolve;

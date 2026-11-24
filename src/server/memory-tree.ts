@@ -144,7 +144,7 @@ export interface Tree {
 
 export type MemoryScope = 'nod' | { teammate: string; mode: 'shared' | 'read' | 'own' };
 
-export function visibleIn(scope: MemoryScope | undefined) {
+function visibleIn(scope: MemoryScope | undefined) {
   return (entry: { teammate?: string }) =>
     !scope
       ? true

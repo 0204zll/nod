@@ -216,7 +216,7 @@ test('assistant notifications use committed messages without history, delta, or 
   assert.equal(f.streams[0].signal.aborted, true);
 });
 
-test('a side chat reply notifies once with its chat and a waiting question shows the question', async (t) => {
+test('a teammate reply notifies once with its chat and a waiting question shows the question', async (t) => {
   const chat = (latestId, extra = {}) => [
     {
       id: 'synthetic-chat',

@@ -23,13 +23,12 @@ export const teammateChannels = ['telegram', 'whatsapp'] as const;
 export const teammateNameLimit = 24;
 export const teammateJobLimit = 80;
 export const teammateInstructionsLimit = 2000;
-export const teammateImageLimit = 160_000;
+const teammateImageLimit = 160_000;
 
-export type TeammateHue = (typeof teammateHues)[number];
 export type MemoryMode = (typeof memoryModes)[number];
 export type TeammateChannel = (typeof teammateChannels)[number];
 
-export const teammateImage = z
+const teammateImage = z
   .string()
   .max(teammateImageLimit)
   .regex(/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+=*$/);

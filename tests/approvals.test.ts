@@ -5542,7 +5542,7 @@ test(
       );
 
       await t.test('a text reply answers only a confirmation shown in its own view', async (t) => {
-        const turn = await begin('Synthetic named chat confirmation');
+        const turn = await begin('Synthetic teammate confirmation');
         const [quiet, asking] = [randomUUID(), randomUUID()];
         for (const id of [quiet, asking])
           await db.pool.query(
@@ -5551,7 +5551,7 @@ test(
           );
         await db.pool.query('UPDATE turns SET task_id=$2 WHERE id=$1', [turn.turnId, asking]);
         await approvals.request(turn, 'NOD_notification_preferences_update', {
-          notificationRule: 'Synthetic named chat rule',
+          notificationRule: 'Synthetic teammate rule',
         });
         const saved = await proposal(turn.turnId);
         await finish(turn.turnId);
