@@ -376,7 +376,7 @@ export function Chat({
   onReturnToMemory?(): void;
 }) {
   const dateFormat = useDateFormat();
-  const messagesUrl = chat ? `/api/chats/${chat.id}/messages` : '/api/messages';
+  const messagesUrl = chat ? `/api/teammates/${chat.id}/messages` : '/api/messages';
   const aroundScope = chat ? `?chat=${chat.id}` : '';
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
