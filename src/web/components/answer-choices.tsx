@@ -323,6 +323,7 @@ export function QuickChoices({
     if (busy || disabled) return;
     setBusy(true);
     setError('');
+    setSent([option.id]);
     try {
       const outcome = await onAnswer!(
         choiceAnswerText([option]),
@@ -336,13 +337,13 @@ export function QuickChoices({
             option_count: choices.options.length,
             selected_count: 1,
           });
-        setSent([option.id]);
         return;
       }
       setError('Your answer could not be sent. Try again.');
     } catch (cause) {
       setError(errorMessage(cause));
     }
+    setSent(null);
     setBusy(false);
   }
   return (

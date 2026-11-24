@@ -138,15 +138,17 @@ function ContextMenu({
       if (!menu.current?.contains(event.target as Node)) onClose();
     };
     const key = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      onClose();
     };
     document.addEventListener('pointerdown', outside, true);
-    document.addEventListener('keydown', key);
+    document.addEventListener('keydown', key, true);
     window.addEventListener('scroll', onClose, true);
     window.addEventListener('resize', onClose);
     return () => {
       document.removeEventListener('pointerdown', outside, true);
-      document.removeEventListener('keydown', key);
+      document.removeEventListener('keydown', key, true);
       window.removeEventListener('scroll', onClose, true);
       window.removeEventListener('resize', onClose);
     };
@@ -737,9 +739,9 @@ function Channels({ teammate }: { teammate: Teammate }) {
       .catch((cause) => toast(errorMessage(cause)));
   const available = teammateChannels.filter((channel) => !assigned.includes(channel));
   return (
-    <span className="channel-wrap" ref={root}>
+    <span className="teammate-channel-wrap" ref={root}>
       {assigned.map((channel) => (
-        <span key={channel} className="channel-chip">
+        <span key={channel} className="teammate-channel-chip">
           {channelLabels[channel]}
           <button
             type="button"
@@ -756,7 +758,7 @@ function Channels({ teammate }: { teammate: Teammate }) {
         </span>
       ))}
       {available.length > 0 && (
-        <span className="channel-add">
+        <span className="teammate-channel-add">
           <button
             type="button"
             className="teammate-icon-button"
@@ -767,7 +769,7 @@ function Channels({ teammate }: { teammate: Teammate }) {
             <Plus size={16} aria-hidden="true" />
           </button>
           {open && (
-            <span className="channel-menu" role="menu">
+            <span className="teammate-channel-menu" role="menu">
               {available.map((channel) => (
                 <button
                   key={channel}
@@ -841,6 +843,15 @@ export function TeammatePanel({ teammate, onClose }: { teammate?: Teammate; onCl
   const avatarRoot = useRef<HTMLSpanElement>(null);
   useEffect(() => setAvatarOpen(false), [teammate?.id]);
   useEffect(() => {
+    const key = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (avatarOpen) return setAvatarOpen(false);
+      onClose();
+    };
+    document.addEventListener('keydown', key);
+    return () => document.removeEventListener('keydown', key);
+  }, [avatarOpen, onClose]);
+  useEffect(() => {
     if (!avatarOpen) return;
     const outside = (event: PointerEvent) => {
       if (!avatarRoot.current?.contains(event.target as Node)) setAvatarOpen(false);
@@ -863,14 +874,6 @@ export function TeammatePanel({ teammate, onClose }: { teammate?: Teammate; onCl
       id="teammate-panel"
       className="teammate-panel"
       aria-label={teammate ? `${teammate.name} settings` : 'Nod settings'}
-      onKeyDown={(event) => {
-        if (event.key !== 'Escape') return;
-        if (avatarOpen) {
-          event.stopPropagation();
-          return setAvatarOpen(false);
-        }
-        onClose();
-      }}
     >
       <div className="panel-head">
         <div className="panel-head-top">{close}</div>
