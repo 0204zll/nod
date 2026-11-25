@@ -5,12 +5,12 @@ An HTML page opens inside Nod as a preview next to the chat, and as a downloaded
 ## What the viewer allows
 
 - The page makes no network request. Fonts, stylesheets, scripts, images and `fetch` from any address are blocked. Put all CSS in one `<style>` and all JavaScript inline.
-- Images are inline SVG or `data:` URIs. Draw a chart as inline SVG from the checked numbers, or embed a Matplotlib PNG as a `data:` URI.
+- Images are inline SVG or `data:` URIs.
 - Use the installed-font stacks in the base below. Never link a web font.
 - `localStorage`, `sessionStorage` and cookies throw. Keep state in script variables.
 - The page must never navigate. A form submit, `location` change or a second load closes the preview. Use `<button type="button">` for every control. An `<a href="#section">` link also counts as navigation and closes the preview, so jump within the page with a button and `window.scrollTo`, as the reference page layout does. Never call `scrollIntoView`: it can scroll the app around the preview.
 - Links to websites do not open from the preview. Print the address as visible text next to its label so the owner can copy it.
-- Thumbnails render with scripts off. Every section, table and slide must be readable before any script runs. Scripts add sorting, filtering, tabs and navigation; they never build the content.
+- Thumbnails render with scripts off. Every section and table must be readable before any script runs. Scripts add sorting, filtering, tabs and navigation; they never build the content.
 
 ## Base
 
@@ -395,12 +395,13 @@ Start every page from this document. It has a light and a dark theme, and the pa
 ## Content
 
 - Every number, name, date and quotation comes from the owner or a checked source. Leave out a section that has no real content. Never add sample text, an invented metric or a placeholder image. A sentence that joins supplied facts adds no cause, consequence or condition of its own. When you write requirements or explanations the owner did not supply, say which in the message that shares the page.
+- Write a date as the owner or the source gave it. Never add a year, a weekday or a time that was not given, even when you can work it out.
 - Where a value is missing, write what is missing in the cell, such as "Not stated". Never leave a blank cell or a dash.
 - No emoji as icons. Use a word, or an inline SVG line icon drawn with `currentColor`.
 - Write the page in the owner's language.
 
 ## Check before sharing
 
-Run `rg -n -i "https?://[^\"' <]+\.(css|js|woff2?|png|jpe?g|gif|svg|webp)|<link |<script[^>]+src=|<form|href=\"#|localStorage|sessionStorage|scrollIntoView|linear-gradient|border-left:[^;]*solid|transition: *all|lorem ipsum|#6366f1|#4f46e5|#8b5cf6|#7c3aed|#a855f7" FILE`. Any match is a defect except an address printed as visible text. Then read the file once as the reader would: the title, the summary and every table header make sense without the chat. The message that shares the page says what it is in a sentence or two and never lists its sections. The workspace has no browser, so say that you checked the source and did not see the rendered page when the owner asks whether it looks right.
+Run `rg -n -i "https?://[^\"' <]+\.(css|js|woff2?|png|jpe?g|gif|svg|webp)|<link |<script[^>]+src=|<form|href=\"#|localStorage|sessionStorage|scrollIntoView|linear-gradient|border-left:[^;]*solid|transition: *all|lorem ipsum|#6366f1|#4f46e5|#8b5cf6|#7c3aed|#a855f7" FILE`. Any match is a defect except an address printed as visible text. Then read the file once as the reader would: the title, the summary and every table header make sense without the chat. The message that shares the page says what it is in one or two sentences. After that, add at most three notes of one short sentence each, and only for something you assumed, reworded or left out that changes how the owner should read the page. Do not list every missing field: the page already marks them. Never restate what the page says, list its sections or offer further changes. The workspace has no browser, so say that you checked the source and did not see the rendered page when the owner asks whether it looks right.
 
 For a specification, a runbook, a reference page, a weekly update or meeting notes, read [references/page-layouts.md](references/page-layouts.md).

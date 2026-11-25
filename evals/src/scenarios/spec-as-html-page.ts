@@ -115,6 +115,27 @@ export default scenario({
         },
         { failure: 'incomplete' },
       ),
+      check(
+        'rollout-dates-get-no-year',
+        async (run) => {
+          const years = (await pages(run)).flatMap(
+            (page) =>
+              page.html
+                .replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>|<[^>]+>/gi, ' ')
+                .match(/\b(?:mar|apr)[a-z]*\.?,?\s+20\d\d\b|\b20\d\d-0[34]-\d\d\b/gi) ?? [],
+          );
+          return { pass: !years.length, evidence: years.join(', ') || 'no year on a rollout date' };
+        },
+        { failure: 'hallucination' },
+      ),
+      check(
+        'message-is-short',
+        (run) => {
+          const words = run.final.split(/\s+/).filter(Boolean).length;
+          return { pass: words > 0 && words <= 120, evidence: `${words} words` };
+        },
+        { failure: 'format' },
+      ),
       judge(
         'message-points-to-the-page',
         'The assistant message that delivers the file says in a sentence or two what the page is and does not repeat the specification in chat, announce future work or claim to have seen the rendered page.',
