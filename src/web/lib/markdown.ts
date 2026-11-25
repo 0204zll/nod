@@ -7,14 +7,17 @@ import { SKIP, visit } from 'unist-util-visit';
 
 const markdown = unified().use(remarkParse);
 
+const blocks = new Set(['paragraph', 'heading', 'listItem', 'tableCell', 'blockquote', 'break']);
+
 export function plainText(source: string) {
   const parts: string[] = [];
   visit(markdown.parse(source), (node) => {
-    if (node.type === 'text' || node.type === 'inlineCode' || node.type === 'code')
-      parts.push(node.value);
+    if (node.type === 'text' || node.type === 'inlineCode') parts.push(node.value);
+    else if (node.type === 'code') parts.push(` ${node.value} `);
     else if (node.type === 'image' && node.alt) parts.push(node.alt);
+    else if (blocks.has(node.type)) parts.push(' ');
   });
-  return parts.join(' ').replace(/\s+/g, ' ').trim();
+  return parts.join('').replace(/\s+/g, ' ').trim();
 }
 
 export function remarkLinkDestinations() {
