@@ -710,7 +710,7 @@ export const toolDefinitions = {
     Type.Object({
       path: Type.String(),
       name: Type.Optional(Type.String()),
-      page: Type.Optional(Type.String()),
+      page: Type.Optional(uuid),
     }),
     true,
   ),

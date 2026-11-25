@@ -84,29 +84,6 @@ When Nod shares a file, it appears as an attachment in the Nod app, up to 90 MB.
 
 File actions appear over previews in chat and in the panel's toolbar. Videos play directly in chat when your browser supports the format, with a preview frame when available. Playback starts when you select Play and pauses when the video leaves view. Use the expand control to open the larger player.
 
-## Find a page again
-
-Every HTML page Nod makes is kept on **Pages**, outside the conversation it came from. Each one shows a small preview, its title, its version and when it was last saved. Select one to open it in the panel. Pages are listed with the most recently changed first. Type in **Search** to show only the pages whose title contains those words.
-
-When you ask Nod to change a page, it saves a new version of the same page instead of a new file. Use the picker in the panel's title to open an earlier version. To ask for a change from **Pages**, select **Use in message** in the panel: Nod opens the chat with that page attached.
-
-| What you see  | What it means                                     |
-| ------------- | ------------------------------------------------- |
-| **Version 3** | The page has been changed twice since Nod made it |
-| The date      | When the latest version was saved                 |
-
-### Export a page
-
-Select **Download** in the panel's toolbar and choose **HTML file** or **PDF**.
-
-**PDF** opens your system's print window. Choose **Save as PDF** there. The page prints in the light theme. Nod prints a page in a separate locked frame where the page's own scripts do not run, so a printed page shows what is on it before any script changes it.
-
-Pages are private to you. Nod has no link that another person can open. To give someone a page, download it and send the file. A page is one file that needs no internet connection, so it opens the same way on their computer.
-
-### Delete a page
-
-A page keeps every version until you delete it. Select the bin on a page in **Pages**, then **Delete**. This removes every version and also takes the page out of the chat it was made in. It cannot be undone. The file Nod wrote in its workspace stays there, so Nod can share it again if you ask. [Remove all data](/trust/privacy/#delete-your-data) deletes every page.
-
 The panel remembers reading state for up to eight recently viewed files, with a total retention limit of 90 MB. Use the filename selector to jump between files during this conversation visit.
 
 - **Use in message** adds an existing file to your draft.
@@ -137,6 +114,29 @@ Previews have size limits: 4 MB for text, Markdown, HTML and spreadsheets, 25 MB
 When Nod puts a full workspace file path in a link or inline code in a reply, the server checks the file and attaches it. The link opens the attachment. A path the server can't attach, such as a folder, a missing file or a location outside this conversation's workspace, stays as plain text and the rest of the reply still arrives. File paths in code blocks remain examples.
 
 Files Nod saves along the way stay private in the workspace until it shares them. Ask for one by name if you want it. Telegram and the WhatsApp QR connection receive shared files up to 50 MB each. With the WhatsApp Cloud API, open Nod to get files. See [Telegram and WhatsApp](/use/channels/).
+
+## Find a page again
+
+Every HTML page Nod makes is kept on **Pages**, outside the conversation it came from. Each one shows a small preview, its title, its version and when it was last saved. Select one to open it in the panel. Pages are listed with the most recently changed first. Type in **Search** to show only the pages whose title contains those words.
+
+When you ask Nod to change a page, it saves a new version of the same page instead of a new file. Use the picker in the panel's title to open an earlier version. To ask for a change from **Pages**, select **Use in message** in the panel: Nod opens the chat with that page attached.
+
+| What you see  | What it means                                     |
+| ------------- | ------------------------------------------------- |
+| **Version 3** | The page has been changed twice since Nod made it |
+| The date      | When the latest version was saved                 |
+
+### Export a page
+
+Select **Download** in the panel's toolbar and choose **HTML file** or **PDF**.
+
+**PDF** opens your system's print window. Choose **Save as PDF** there. The page prints in the light theme. Nod prints a page in a separate locked frame where the page's own scripts do not run, so a printed page shows what is on it before any script changes it.
+
+Pages are private to you. Nod has no link that another person can open. To give someone a page, download it and send the file. A page is one file that needs no internet connection, so it opens the same way on their computer.
+
+### Delete a page
+
+A page keeps every version until you delete it. Select the bin on a page in **Pages**, then **Delete**. This removes every version and also takes the page out of the chat it was made in. It cannot be undone. The file Nod wrote in its workspace stays there, so Nod can share it again if you ask. [Remove all data](/trust/privacy/#delete-your-data) deletes every page.
 
 ## One workspace for all tasks
 

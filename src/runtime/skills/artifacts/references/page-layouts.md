@@ -90,7 +90,7 @@ Replace `<main class="page">` with a two-column shell and add these rules to the
     }
   }
 </style>
-<div class="shell">
+<main class="shell">
   <article>
     <p class="eyebrow">Guide</p>
     <h1>Title</h1>
@@ -101,7 +101,7 @@ Replace `<main class="page">` with a two-column shell and add these rules to the
     <p class="eyebrow">On this page</p>
     <button type="button" data-goto="install">Install</button>
   </nav>
-</div>
+</main>
 <script>
   document.addEventListener('click', function (e) {
     var b = e.target.closest('[data-goto]');

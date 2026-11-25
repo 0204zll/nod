@@ -1410,10 +1410,11 @@ test('print frames run only the print command, without same-origin, network or p
     'a'.repeat(32),
   );
   const policy = /http-equiv="Content-Security-Policy" content="([^"]+)"/.exec(source)![1];
-  const scripts = policy.split(';').find((part) => part.trim().startsWith('script-src'))!;
   assert.deepEqual(printSandbox.split(' ').sort(), ['allow-modals', 'allow-scripts']);
-  assert.match(policy, /default-src 'none'/);
-  assert.equal(scripts.trim(), `script-src 'nonce-${'a'.repeat(32)}'`);
+  assert.equal(
+    policy,
+    `default-src 'none'; script-src 'nonce-${'a'.repeat(32)}'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; base-uri 'none'; form-action 'none'`,
+  );
   assert.equal((source.match(/nonce="/g) ?? []).length, 1);
   assert.ok(source.indexOf('Content-Security-Policy') < source.indexOf('synthetic-page-script'));
 });

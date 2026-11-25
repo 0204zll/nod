@@ -26,11 +26,17 @@ async function pages(run: Run) {
 }
 
 const defects: Array<[string, RegExp]> = [
-  ['loads a stylesheet or font', /<link\b|@import|url\(\s*["']?https?:/i],
+  ['loads a stylesheet or font', /<link\b|@import|url\(\s*["']?(?:https?:)?\/\//i],
   ['loads a script', /<script[^>]+\bsrc\s*=/i],
-  ['loads an image from the network', /<img[^>]+\bsrc\s*=\s*["']?https?:/i],
+  [
+    'loads media from the network',
+    /<(?:img|video|audio|source|object|embed)[^>]+\b(?:src|data)\s*=\s*["']?(?:https?:)?\/\//i,
+  ],
+  ['embeds a frame', /<iframe\b/i],
   ['has a form', /<form\b/i],
   ['links within the page', /<a[^>]+\bhref\s*=\s*["']?#/i],
+  ['links to a website', /<a[^>]+\bhref\s*=\s*["']?(?:https?:)?\/\//i],
+  ['navigates', /\blocation\s*(?:=|\.\s*(?:href|assign|replace|reload)\b)|window\.open\s*\(/],
   ['uses browser storage', /localStorage|sessionStorage|document\.cookie/],
   ['calls the network', /\bfetch\s*\(|XMLHttpRequest|WebSocket/],
 ];
@@ -81,7 +87,7 @@ export default scenario({
         { failure: 'format' },
       ),
       check(
-        'page-has-both-themes',
+        'page-has-dark-theme',
         async (run) => {
           const found = await pages(run);
           return {

@@ -30,6 +30,11 @@
   padding: 0;
   list-style: none;
 }
+.pages-grid > li {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
 .pages-card {
   position: relative;
   overflow: hidden;

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ComponentProps } from 'react';
+import { useEffect, useRef, useState, type ComponentProps } from 'react';
 import type { Page, PageVersion } from '../../shared/contracts';
 import { useArtifactDrawer } from '../components/artifact-context';
 import { ArtifactWorkspace } from '../components/artifact-drawer';
@@ -41,15 +41,18 @@ function PageCards({
   const drawer = useArtifactDrawer();
   const format = useDateFormat();
   const [failed, setFailed] = useState<string | null>(null);
+  const opening = useRef(0);
   const open = async (page: Page) => {
+    const request = ++opening.current;
     setFailed(null);
     try {
       const { versions } = await api<{ versions: PageVersion[] }>(`/api/pages/${page.id}`);
+      if (request !== opening.current) return;
       if (!versions.length) throw new Error('The page has no versions.');
       onVersions(page, versions);
       drawer.open(versions[0].artifact.id);
     } catch {
-      setFailed(page.id);
+      if (request === opening.current) setFailed(page.id);
     }
   };
   return (
@@ -57,33 +60,35 @@ function PageCards({
       {pages.map((page) => {
         const kind = attachmentKind(page.artifact.mimeType, page.artifact.name);
         return (
-          <li key={page.id} className="pages-card">
-            <button type="button" className="pages-card-open" onClick={() => void open(page)}>
-              {kind ? (
-                <DataThumbnail item={page.artifact} kind={kind as ThumbnailKind} wide />
-              ) : (
-                <span className="pages-card-blank" aria-hidden="true">
-                  <FileText size={32} />
+          <li key={page.id}>
+            <div className="pages-card">
+              <button type="button" className="pages-card-open" onClick={() => void open(page)}>
+                {kind ? (
+                  <DataThumbnail item={page.artifact} kind={kind as ThumbnailKind} wide />
+                ) : (
+                  <span className="pages-card-blank" aria-hidden="true">
+                    <FileText size={32} />
+                  </span>
+                )}
+                <span className="pages-card-details">
+                  <span className="pages-card-title">{page.title}</span>
+                  <span className="pages-card-meta">
+                    Version {page.version} ·{' '}
+                    <time dateTime={page.createdAt}>{formatDateTime(page.createdAt, format)}</time>
+                  </span>
                 </span>
-              )}
-              <span className="pages-card-details">
-                <span className="pages-card-title">{page.title}</span>
-                <span className="pages-card-meta">
-                  Version {page.version} ·{' '}
-                  <time dateTime={page.createdAt}>{formatDateTime(page.createdAt, format)}</time>
-                </span>
-              </span>
-            </button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="pages-card-delete"
-              aria-label={`Delete ${page.title}`}
-              title="Delete"
-              onClick={() => onDelete(page)}
-            >
-              <Trash2 size={15} />
-            </Button>
+              </button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="pages-card-delete"
+                aria-label={`Delete ${page.title}`}
+                title="Delete"
+                onClick={() => onDelete(page)}
+              >
+                <Trash2 size={15} />
+              </Button>
+            </div>
             {failed === page.id && <Notice>This page could not be opened. Try again.</Notice>}
           </li>
         );
@@ -101,8 +106,12 @@ export function Pages() {
   }, [query]);
   const filter = search ? `q=${encodeURIComponent(search)}` : '';
   const { data, error, refresh } = usePageData<PageList>(`/api/pages${filter && `?${filter}`}`);
-  const [older, setOlder] = useState<Page[]>([]);
-  const [next, setNext] = useState<string | undefined>();
+  const [more, setMore] = useState<{ filter: string; pages: Page[]; next?: string } | null>(null);
+  const current = useRef(filter);
+  current.current = filter;
+  const loaded = more?.filter === filter ? more : null;
+  const older = loaded?.pages ?? [];
+  const next = loaded ? loaded.next : data?.next;
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [olderFailed, setOlderFailed] = useState(false);
   const [opened, setOpened] = useState<{ page: Page; versions: PageVersion[] } | null>(null);
@@ -116,7 +125,9 @@ export function Pages() {
     try {
       await api(`/api/pages/${deleting.id}`, { method: 'DELETE' });
       if (opened?.page.id === deleting.id) setOpened(null);
-      setOlder((current) => current.filter((page) => page.id !== deleting.id));
+      setMore((value) =>
+        value ? { ...value, pages: value.pages.filter((page) => page.id !== deleting.id) } : value,
+      );
       setDeleting(null);
       await refresh();
     } catch (error) {
@@ -125,10 +136,6 @@ export function Pages() {
       setBusy(false);
     }
   };
-  useEffect(() => {
-    setOlder([]);
-    setNext(data?.next);
-  }, [data]);
   useEffect(() => {
     const attached = () => navigate('/');
     window.addEventListener('nod:attach-artifact', attached);
@@ -150,13 +157,13 @@ export function Pages() {
     setLoadingOlder(true);
     setOlderFailed(false);
     try {
-      const more = await api<PageList>(
+      const result = await api<PageList>(
         `/api/pages?before=${encodeURIComponent(next)}${filter && `&${filter}`}`,
       );
-      setOlder((current) => [...current, ...more.pages]);
-      setNext(more.next);
+      if (current.current !== filter) return;
+      setMore({ filter, pages: [...older, ...result.pages], next: result.next });
     } catch {
-      setOlderFailed(true);
+      if (current.current === filter) setOlderFailed(true);
     } finally {
       setLoadingOlder(false);
     }

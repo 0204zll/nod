@@ -347,13 +347,23 @@ export function createArtifactService(options: {
       ]);
       const latest = (
         await client.query(
-          'SELECT * FROM artifacts WHERE owner_id=$1 AND page_id=$2 ORDER BY page_version DESC LIMIT 1',
+          'SELECT * FROM artifacts WHERE owner_id=$1 AND page_id=$2 AND deleting_at IS NULL ORDER BY page_version DESC LIMIT 1',
           [options.ownerId, pageId],
         )
       ).rows[0];
+      if (!latest && page !== undefined) throw new Error('The page is unavailable.');
+      if (
+        !latest &&
+        (
+          await client.query('SELECT 1 FROM artifacts WHERE owner_id=$1 AND page_id=$2 LIMIT 1', [
+            options.ownerId,
+            pageId,
+          ])
+        ).rowCount
+      )
+        pageId = randomUUID();
       if (
         latest &&
-        !latest.deleting_at &&
         latest.thread_id === threadId &&
         latest.size === bytes.length &&
         (await readRow(latest)).equals(bytes)
@@ -373,15 +383,16 @@ export function createArtifactService(options: {
     query?: string,
     limit = 50,
   ): Promise<{ pages: Page[]; next?: string }> {
+    const cursor = before?.split('_');
     const rows = (
       await options.database.query(
         `SELECT * FROM (SELECT DISTINCT ON (page_id) * FROM artifacts
            WHERE owner_id=$1 AND page_id IS NOT NULL AND deleting_at IS NULL
            ORDER BY page_id,page_version DESC) latest
-         WHERE ($2::timestamptz IS NULL OR created_at<$2)
+         WHERE ($2::timestamptz IS NULL OR (date_trunc('milliseconds',created_at),page_id)<($2,$5::uuid))
            AND ($4::text IS NULL OR strpos(lower(COALESCE(page_title,name)),lower($4))>0)
-         ORDER BY created_at DESC,id LIMIT $3`,
-        [options.ownerId, before ?? null, limit + 1, query ?? null],
+         ORDER BY date_trunc('milliseconds',created_at) DESC,page_id DESC LIMIT $3`,
+        [options.ownerId, cursor?.[0] ?? null, limit + 1, query ?? null, cursor?.[1] ?? null],
       )
     ).rows;
     const shown = rows.slice(0, limit);
@@ -391,7 +402,9 @@ export function createArtifactService(options: {
         title: row.page_title ?? row.name,
         ...pageVersion(row),
       })),
-      ...(rows.length > limit ? { next: pageVersion(shown.at(-1)!).createdAt } : {}),
+      ...(rows.length > limit
+        ? { next: `${pageVersion(shown.at(-1)!).createdAt}_${shown.at(-1)!.page_id}` }
+        : {}),
     };
   }
   async function readPage(id: string): Promise<PageVersion[]> {

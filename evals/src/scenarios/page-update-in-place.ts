@@ -77,9 +77,10 @@ export default scenario({
           );
           const html = file ? await run.text(file) : '';
           const text = pageText(html);
+          const updated = /northwind[\s\S]{0,400}?55\s?%|55\s?%[\s\S]{0,400}?northwind/i.test(text);
           return {
-            pass: /55\s?%/.test(text),
-            evidence: html ? `55% shown: ${/55\s?%/.test(text)}` : 'no page file',
+            pass: updated,
+            evidence: html ? `Northwind shown at 55%: ${updated}` : 'no page file',
           };
         },
         { failure: 'incomplete' },
@@ -92,6 +93,6 @@ export default scenario({
     ];
   },
   evidence() {
-    return `The owner first asked for a dashboard page from this data: ${data} Then the owner said Northwind Bakery sent the menu content, is back on track at 55% done, and asked to update the dashboard. Nod keeps each page with versions: sharing the same file again saves a new version of the same page. A dashboard is a data page, a JSON file that Nod draws itself. A correct result is one page of type data with two versions, the second showing Northwind Bakery on track at 55%. No account is connected.`;
+    return `The owner first asked for a dashboard page from this data: ${data} Then the owner said Northwind Bakery sent the menu content, is back on track at 55% done, and asked to update the dashboard. Nod keeps each page with versions: sharing the same file again saves a new version of the same page. A correct result is one HTML page with two versions, the second showing Northwind Bakery on track at 55%. No account is connected.`;
   },
 });

@@ -5922,6 +5922,15 @@ test(
           );
         assert.deepEqual((await found('FIXTURE%20rep')).sort(), [page, copy.page!.id].sort());
         assert.deepEqual(await found('100%25'), []);
+        const first = await artifacts.listPages(undefined, undefined, 1);
+        const rest = await artifacts.listPages(first.next, undefined, 50);
+        assert.equal(first.pages.length, 1);
+        assert.equal(
+          rest.pages.some((item) => item.id === first.pages[0].id),
+          false,
+        );
+        assert.equal(first.pages.length + rest.pages.length, listed.length);
+        assert.equal((await request('GET', '/api/pages?before=synthetic')).statusCode, 400);
         assert.equal(listed.find((item: { id: string }) => item.id === page).version, 3);
         const versions = JSON.parse((await request('GET', `/api/pages/${page}`)).body).versions;
         assert.deepEqual(
@@ -5969,6 +5978,9 @@ test(
         );
         assert.equal((await request('GET', `/api/pages/${page}`)).statusCode, 200);
         await db.pool.query('DELETE FROM messages WHERE id=$1', [note]);
+        await assert.rejects(share('copy.html', copy.page!.id), /page is unavailable/);
+        const again = await share('copy.html');
+        assert.notEqual(again.page?.id, copy.page!.id);
         const response = await request('GET', published.url);
         assert.equal(response.statusCode, 200);
         await db.pool.query('UPDATE artifacts SET owner_id=$2 WHERE id=$1', [

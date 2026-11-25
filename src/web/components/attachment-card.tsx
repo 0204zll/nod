@@ -198,7 +198,7 @@ function DocumentCard({
   const [pages, setPages] = useState<number | null>(null);
   const [thumbnail, setThumbnail] = useState(kind === 'pdf');
   const dataThumbnail = thumbnailKinds.has(kind ?? '');
-  const wide = kind === 'html';
+  const wide = Boolean(item.page);
   const meta = [
     item.page ? 'Page' : fileType(item.name),
     item.page ? `Version ${item.page.version}` : '',

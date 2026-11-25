@@ -8,7 +8,7 @@ An HTML page opens inside Nod as a preview next to the chat, and as a downloaded
 - Images are inline SVG or `data:` URIs.
 - Use the installed-font stacks in the base below. Never link a web font.
 - `localStorage`, `sessionStorage` and cookies throw. Keep state in script variables.
-- The page must never navigate. A form submit, `location` change or a second load closes the preview. Use `<button type="button">` for every control. An `<a href="#section">` link also counts as navigation and closes the preview, so jump within the page with a button and `window.scrollTo`, as the reference page layout does. Never call `scrollIntoView`: it can scroll the app around the preview.
+- The page must never navigate. A `location` change or a second load closes the preview, and a form does not submit. Use `<button type="button">` for every control. An `<a href="#section">` link is not reliable inside the preview, so jump within the page with a button and `window.scrollTo`, as the reference page layout does. Never call `scrollIntoView`: it can scroll the app around the preview.
 - Links to websites do not open from the preview. Print the address as visible text next to its label so the owner can copy it.
 - Thumbnails render with scripts off. Every section and table must be readable before any script runs. Scripts add sorting, filtering, tabs and navigation; they never build the content.
 
@@ -31,6 +31,9 @@ Start every page from this document. It has a light and a dark theme, and the pa
         --fg: #151515;
         --muted: #636363;
         --border: #e3e3e3;
+        --control: #8a8a8a;
+        --print-bg: #fff;
+        --print-fg: #000;
         --accent: #2459c9;
         --good: #16713a;
         --warn: #855d00;
@@ -45,6 +48,7 @@ Start every page from this document. It has a light and a dark theme, and the pa
           --fg: #ededed;
           --muted: #a3a3a3;
           --border: #ffffff1f;
+          --control: #8a8a8a;
           --accent: #8fb2ff;
           --good: #62cf8c;
           --warn: #e3b84f;
@@ -56,6 +60,10 @@ Start every page from this document. It has a light and a dark theme, and the pa
       *::after {
         box-sizing: border-box;
       }
+      strong,
+      b {
+        font-weight: 600;
+      }
       body {
         margin: 0;
         background: var(--bg);
@@ -66,7 +74,7 @@ Start every page from this document. It has a light and a dark theme, and the pa
       .page {
         max-width: 860px;
         margin: 0 auto;
-        padding: 56px 24px 96px;
+        padding: 48px 24px 96px;
       }
       h1,
       h2,
@@ -101,7 +109,7 @@ Start every page from this document. It has a light and a dark theme, and the pa
         text-wrap: pretty;
       }
       li + li {
-        margin-top: 6px;
+        margin-top: 8px;
       }
       a {
         color: inherit;
@@ -124,8 +132,8 @@ Start every page from this document. It has a light and a dark theme, and the pa
       .meta {
         display: flex;
         flex-wrap: wrap;
-        gap: 8px 20px;
-        margin-top: 20px;
+        gap: 8px 24px;
+        margin-top: 24px;
         font-size: 14px;
         color: var(--muted);
       }
@@ -171,7 +179,7 @@ Start every page from this document. It has a light and a dark theme, and the pa
         background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
-        padding: 20px;
+        padding: 24px;
       }
       .card > :first-child {
         margin-top: 0;
@@ -186,13 +194,14 @@ Start every page from this document. It has a light and a dark theme, and the pa
         background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
-        padding: 14px 18px;
+        padding: 12px 16px;
         margin-top: 16px;
         max-width: 68ch;
       }
       .note strong:first-child {
         display: block;
         font-size: 13px;
+        font-weight: 600;
         letter-spacing: 0.02em;
         color: var(--muted);
       }
@@ -215,7 +224,7 @@ Start every page from this document. It has a light and a dark theme, and the pa
       }
       th,
       td {
-        padding: 10px 24px 10px 0;
+        padding: 12px 24px 12px 0;
         border-bottom: 1px solid var(--border);
         vertical-align: top;
       }
@@ -258,9 +267,9 @@ Start every page from this document. It has a light and a dark theme, and the pa
         font: inherit;
         color: inherit;
         background: var(--surface);
-        border: 1px solid var(--border);
+        border: 1px solid var(--control);
         border-radius: 8px;
-        padding: 6px 12px;
+        padding: 8px 12px;
       }
       button {
         cursor: pointer;
@@ -277,7 +286,7 @@ Start every page from this document. It has a light and a dark theme, and the pa
       .bars {
         display: grid;
         grid-template-columns: max-content minmax(0, 1fr) max-content;
-        gap: 10px 12px;
+        gap: 8px 12px;
         align-items: center;
         margin-top: 16px;
         font-size: 15px;
@@ -315,8 +324,8 @@ Start every page from this document. It has a light and a dark theme, and the pa
       }
       @media print {
         body {
-          background: #fff;
-          color: #000;
+          background: var(--print-bg);
+          color: var(--print-fg);
         }
         .page {
           max-width: none;
@@ -367,7 +376,7 @@ Start every page from this document. It has a light and a dark theme, and the pa
 - Neutral tokens carry almost the whole page. Use `--accent` in at most two places a screen, such as the active item and one figure. Links stay the text colour with an underline.
 - `--good`, `--warn` and `--bad` mark a state and always sit beside a word that names it.
 - Write every colour as a token. A hex value outside `:root` is a mistake, and so is a second accent.
-- Body text needs a contrast of 4.5 to 1 with its background. Text of 24px, or 18.5px in bold, and control borders need 3 to 1. Check a changed token in both themes.
+- Body text needs a contrast of 4.5 to 1 with its background. Text of 24px, or 18.5px in bold, and control borders need 3 to 1; the base uses `--control` for those and keeps `--border` for hairlines between sections. Check a changed token in both themes.
 - No gradients, glows or shadows as decoration. A hairline border or space separates sections.
 
 ## Layout
@@ -376,7 +385,7 @@ Start every page from this document. It has a light and a dark theme, and the pa
 - When one thing needs the reader's action, such as a blocker or an overdue item, it comes straight after the summary in a `.note.warn`. Use that block at most once on a page.
 - A page with wide tables uses `<main class="page wide">`. Prose pages keep the narrow column.
 - Use one `h1`, never skip a heading level, and mark regions with `<header>`, `<main>`, `<nav>` and `<footer>`.
-- Space shows grouping: 8 to 12px inside a group and 32 to 48px between groups. Take spacing from 4, 8, 12, 16, 24, 32 and 48px.
+- Space shows grouping: 8 to 12px inside a group and 32 to 48px between groups. Take spacing between and inside sections from 4, 8, 12, 16, 24, 32, 48, 64 and 96px.
 - Separate with space first and a border second. A card sets one thing apart; when every section is a card, none stands out. Do not put a card inside a card, and do not give a card a coloured stripe on one side.
 - Structure carries meaning. Number items only when their order matters, and add a label, divider or eyebrow only where it tells the reader something.
 - Shape a section to its content: dated phases as a row of dated steps, a few headline numbers as a short list of label and value pairs, comparable values as a table.

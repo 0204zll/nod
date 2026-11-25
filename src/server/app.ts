@@ -708,7 +708,18 @@ export async function createApp(dependencies: AppDependencies = {}) {
   });
   app.get<{ Querystring: { before?: string; q?: string } }>('/api/pages', async (request) =>
     artifacts.listPages(
-      z.iso.datetime().optional().parse(request.query.before),
+      z
+        .string()
+        .refine((value) => {
+          const [time, id, ...rest] = value.split('_');
+          return (
+            !rest.length &&
+            z.iso.datetime().safeParse(time).success &&
+            z.uuid().safeParse(id).success
+          );
+        })
+        .optional()
+        .parse(request.query.before),
       z.string().trim().min(1).max(200).optional().parse(request.query.q),
     ),
   );
