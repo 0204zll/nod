@@ -31,7 +31,6 @@ export function fileSize(bytes: number) {
 
 export function fileType(name: string) {
   if (/\.n8n\.json$/i.test(name)) return 'n8n workflow';
-  if (/\.data\.json$/i.test(name)) return 'Data page';
   return /\.([a-z0-9]{1,10})$/i.exec(name)?.[1].toUpperCase() ?? 'File';
 }
 

@@ -12,7 +12,6 @@ export type AttachmentKind =
   | 'presentation'
   | 'archive'
   | 'n8n-workflow'
-  | 'data-page'
   | 'text';
 
 const extensionKinds: Record<string, AttachmentKind> = {
@@ -91,7 +90,6 @@ function kindFromType(type: string): AttachmentKind | null {
 export function attachmentKind(mimeType: string, name = ''): AttachmentKind | null {
   const type = mimeType.split(';', 1)[0].trim().toLowerCase();
   if (/\.n8n\.json$/i.test(name)) return 'n8n-workflow';
-  if (/\.data\.json$/i.test(name) || type === 'application/vnd.nod.data+json') return 'data-page';
   const extension = /\.([a-z0-9]+)$/i.exec(name)?.[1].toLowerCase() ?? '';
   const declaredKind = kindFromType(type);
   const extensionKind = Object.hasOwn(extensionKinds, extension) ? extensionKinds[extension] : null;

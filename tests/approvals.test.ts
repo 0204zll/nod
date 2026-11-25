@@ -5891,10 +5891,7 @@ test(
         const workflow = await artifacts.publishArtifact(id, 'alert.n8n.json', 'Rain alert', read);
         assert.equal(workflow.name, 'Rain alert.n8n.json');
         assert.equal(workflow.page, undefined);
-        assert.deepEqual(
-          [published.page?.version, published.page?.title, published.page?.type],
-          [1, 'report', 'docs'],
-        );
+        assert.deepEqual([published.page?.version, published.page?.title], [1, 'report']);
         const page = published.page!.id;
         const share = (path: string, target?: string) =>
           artifacts.publishArtifact(id, path, undefined, read, undefined, undefined, target);
@@ -5906,65 +5903,18 @@ test(
           [page, 2, 'Fixture report'],
         );
         await writeFile(join(workspace, 'copy.html'), '<title>Fixture report</title><p>3</p>');
-        assert.notEqual((await share('copy.html')).page?.id, page);
+        const copy = await share('copy.html');
+        assert.notEqual(copy.page?.id, page);
         await writeFile(join(workspace, 'copy.html'), '<title>Fixture report</title><p>4</p>');
         assert.deepEqual((await share('copy.html', page)).page, {
           id: page,
           version: 3,
           title: 'Fixture report',
-          type: 'docs',
         });
-        const dataPage = {
-          version: 1,
-          title: 'Fixture board',
-          source: 'Synthetic tracker',
-          readAt: '1 Nov 2026',
-          blocks: [
-            {
-              type: 'table',
-              title: 'Items',
-              columns: [
-                { key: 'name', label: 'Name' },
-                { key: 'count', label: 'Count', kind: 'number' },
-              ],
-              rows: [{ name: 'Synthetic', count: 2 }],
-            },
-          ],
-        };
-        await writeFile(join(workspace, 'board.data.json'), JSON.stringify(dataPage));
-        const board = await share('board.data.json');
-        assert.deepEqual(
-          [board.page?.type, board.page?.title, board.mimeType, board.name],
-          ['data', 'Fixture board', 'application/vnd.nod.data+json', 'board.data.json'],
-        );
-        dataPage.blocks[0].rows[0].count = 'two' as unknown as number;
-        await writeFile(join(workspace, 'board.data.json'), JSON.stringify(dataPage));
-        await assert.rejects(share('board.data.json'), /column count must be a number or null/);
-        await writeFile(join(workspace, 'board.data.json'), '{');
-        await assert.rejects(share('board.data.json'), /not valid JSON/);
-        await assert.rejects(share('copy.html', board.page!.id), /This page is data/);
-        await writeFile(join(workspace, 'deck.pptx'), 'synthetic deck 1');
-        const deck = await share('deck.pptx');
-        assert.deepEqual(
-          [deck.page?.type, deck.page?.title, deck.page?.version],
-          ['slides', 'deck', 1],
-        );
-        await writeFile(join(workspace, 'deck.pptx'), 'synthetic deck 2');
-        assert.equal((await share('deck.pptx')).page?.version, 2);
-        await assert.rejects(share('deck.pptx', page), /This page is docs/);
-        const typed = async (type: string) =>
-          JSON.parse((await request('GET', `/api/pages?type=${type}`)).body).pages.map(
-            (item: { id: string }) => item.id,
-          );
-        assert.deepEqual(await typed('slides'), [deck.page!.id]);
-        assert.deepEqual(await typed('data'), [board.page!.id]);
-        assert.equal((await typed('docs')).includes(page), true);
-        assert.equal((await request('GET', '/api/pages?type=other')).statusCode, 400);
+        await writeFile(join(workspace, 'deck.pptx'), 'synthetic deck');
+        assert.equal((await share('deck.pptx')).page, undefined);
         await assert.rejects(share('copy.html', randomUUID()), /page is unavailable/);
-        await assert.rejects(
-          share('alert.n8n.json', page),
-          /Only an HTML file, a data page or a presentation/,
-        );
+        await assert.rejects(share('alert.n8n.json', page), /Only an HTML file can update a page/);
         const listed = JSON.parse((await request('GET', '/api/pages')).body).pages;
         assert.equal(listed.find((item: { id: string }) => item.id === page).version, 3);
         const versions = JSON.parse((await request('GET', `/api/pages/${page}`)).body).versions;
@@ -5985,6 +5935,34 @@ test(
           /page is unavailable/,
         );
         assert.equal((await request('GET', `/api/pages/${randomUUID()}`)).statusCode, 404);
+        const owner = (await db.pool.query('SELECT owner_id FROM artifacts WHERE id=$1', [copy.id]))
+          .rows[0].owner_id;
+        const note = randomUUID();
+        await db.pool.query(
+          'INSERT INTO messages(id,owner_id,role,text,thread_id,attachments) VALUES($1,$2,$3,$4,$5,$6)',
+          [note, owner, 'assistant', 'Synthetic', id, JSON.stringify([copy, workflow])],
+        );
+        assert.equal(
+          (await foreign.deletePage(copy.page!.id).then(() => request('GET', copy.url))).statusCode,
+          200,
+        );
+        assert.equal((await request('DELETE', `/api/pages/${copy.page!.id}`)).statusCode, 200);
+        assert.equal((await request('GET', copy.url)).statusCode, 404);
+        assert.equal((await request('GET', `/api/pages/${copy.page!.id}`)).statusCode, 404);
+        assert.equal((await request('DELETE', `/api/pages/${copy.page!.id}`)).statusCode, 404);
+        assert.deepEqual(
+          (
+            await db.pool.query('SELECT attachments FROM messages WHERE id=$1', [note])
+          ).rows[0].attachments.map((item: { id: string }) => item.id),
+          [workflow.id],
+        );
+        assert.equal(
+          (await db.pool.query('SELECT 1 FROM artifacts WHERE page_id=$1', [copy.page!.id]))
+            .rowCount,
+          0,
+        );
+        assert.equal((await request('GET', `/api/pages/${page}`)).statusCode, 200);
+        await db.pool.query('DELETE FROM messages WHERE id=$1', [note]);
         const response = await request('GET', published.url);
         assert.equal(response.statusCode, 200);
         await db.pool.query('UPDATE artifacts SET owner_id=$2 WHERE id=$1', [

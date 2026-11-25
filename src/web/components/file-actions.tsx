@@ -11,7 +11,7 @@ import { Button } from './ui';
 import { analyticsForCurrentSession } from '../lib/analytics';
 import { attachmentKind } from '../lib/attachment-kind';
 import { ActionMenu, ActionMenuItem, actionMenuTabTarget } from './action-menu';
-import { appStyles, inlineBlobs, printDocument, printReset } from '../lib/print';
+import { printDocument } from '../lib/print';
 
 export function reuseFile(
   item: ImagePreview,
@@ -116,16 +116,7 @@ export function FileActions({
     const timer = setTimeout(() => setNotice(''), 5000);
     return () => clearTimeout(timer);
   }, [notice]);
-  const exportable =
-    location !== 'drawer'
-      ? null
-      : kind === 'html'
-        ? 'HTML file'
-        : kind === 'presentation'
-          ? 'PowerPoint file'
-          : kind === 'data-page'
-            ? 'Data file'
-            : null;
+  const exportable = location === 'drawer' && kind === 'html';
   if (!ownedArtifactUrl(artifact.url)) return null;
   async function run(action: string, origin?: HTMLElement, capture = analyticsForCurrentSession()) {
     if (action === 'reuse') {
@@ -138,35 +129,9 @@ export function FileActions({
     if (activeId.current === id) setBusy(true);
     try {
       if (action === 'print') {
-        if (kind === 'presentation') {
-          const slides = actions.current
-            ?.closest('.artifact-drawer')
-            ?.querySelector('.artifact-slides');
-          if (!slides) throw new Error('The slides have not finished loading.');
-          printDocument(
-            await inlineBlobs(slides.outerHTML),
-            `<style>${appStyles()}\n@page{size:landscape;margin:10mm}${printReset}.artifact-slides{display:block;overflow:visible;padding:1px;background:none}.artifact-slide{display:block;break-after:page;break-inside:avoid}.artifact-slide:last-child{break-after:auto}.artifact-slide figcaption{display:none}.artifact-slide,.artifact-slides{border:0!important;box-shadow:none!important;outline:0!important}.slide-canvas{box-sizing:border-box;border:1px solid #d6d6d6;border-radius:0;box-shadow:none!important}</style>`,
-          );
-          capture('artifact_action', { kind, location, action: 'print' });
-          return;
-        }
         const response = await fetch(artifact.url, { credentials: 'same-origin' });
         if (!response.ok) throw new Error(`The file could not be read (${response.status}).`);
-        const text = await response.text();
-        if (kind === 'data-page') {
-          const [{ renderToStaticMarkup }, { DataPageView }, { createElement }] = await Promise.all(
-            [import('react-dom/server'), import('./data-page'), import('react')],
-          );
-          printDocument(
-            renderToStaticMarkup(
-              createElement(DataPageView, {
-                text,
-                fallback: createElement('p', null, 'This data page could not be read.'),
-              }),
-            ),
-            `<style>${appStyles()}\n@page{margin:14mm}${printReset}.data-page-scroll{height:auto;overflow:visible}.data-page{max-width:none;padding:0}.data-block-heading button{display:none}.data-block,.data-figure,.data-callout,.data-table tr{break-inside:avoid}</style>`,
-          );
-        } else printDocument(text);
+        printDocument(await response.text());
         capture('artifact_action', { kind, location, action: 'print' });
       } else if (action === 'copy') {
         await copyImage(artifact.url);
@@ -257,7 +222,7 @@ export function FileActions({
                       }
                     }}
                   >
-                    {exportable}
+                    HTML file
                   </ActionMenuItem>
                   <ActionMenuItem
                     onClick={() => {

@@ -279,15 +279,10 @@ function ArtifactDrawer({
   }, [current.id, current.presentation, kind, visible]);
   const vector = kind === 'image' && vectorImage(current.mimeType ?? '', current.name);
   const modes =
-    kind === 'markdown' ||
-    kind === 'html' ||
-    kind === 'csv' ||
-    kind === 'n8n-workflow' ||
-    kind === 'data-page' ||
-    vector;
+    kind === 'markdown' || kind === 'html' || kind === 'csv' || kind === 'n8n-workflow' || vector;
   const copyable =
     Boolean(current.presentation) ||
-    (['markdown', 'html', 'csv', 'text', 'n8n-workflow', 'data-page'].includes(kind ?? '') &&
+    (['markdown', 'html', 'csv', 'text', 'n8n-workflow'].includes(kind ?? '') &&
       (ownedArtifactUrl(current.url) || localPreviewUrl(current.url)));
 
   const overlay = expanded || (pageWidth > 0 && pageWidth < minimumWidth + minimumChat + 40);

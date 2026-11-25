@@ -390,7 +390,7 @@ Start every page from this document. It has a light and a dark theme, and the pa
 - A headline figure in `.figure` also appears in a table on the page, so the reader can see where it comes from.
 - State a change with its direction, its amount and the period it is compared with, in `.delta` beside the figure.
 - Compare a few values with `.bars`: a label, a `.track` holding a `.bar` whose `style="width: N%"` is the value's share of the largest value, then the number. Mark at most one bar `hi`.
-- Do not draw a chart in a page. A result that needs a chart, a dashboard or a report built on figures is a data page: read [references/data-pages.md](references/data-pages.md).
+- Do not draw a chart in a page. Show a comparison with `.bars` and the numbers in a table.
 
 ## Content
 

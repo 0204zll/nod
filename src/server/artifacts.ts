@@ -5,9 +5,7 @@ import { basename, dirname, extname, join, posix, resolve } from 'node:path';
 import { pool } from './db.ts';
 import { dataRoot, ownerId } from './config.ts';
 import { transaction } from './transaction.ts';
-import { pageTypes } from '../shared/contracts.ts';
-import { dataPageMimeType, dataPageName, parseDataPage } from '../shared/data-page.ts';
-import type { Artifact, Page, PageType, PageVersion } from '../shared/contracts.ts';
+import type { Artifact, Page, PageVersion } from '../shared/contracts.ts';
 import { fileBytes, fileMimeType, fileName } from '../shared/files.ts';
 import type { MessagingAttachment } from '../ports/messaging.ts';
 import { z } from 'zod';
@@ -63,7 +61,6 @@ export function artifactView(row: Record<string, any>): Artifact {
             id: row.page_id,
             version: row.page_version,
             title: row.page_title ?? row.name,
-            type: storedType(row.page_type),
           },
         }
       : {}),
@@ -79,20 +76,12 @@ function pageVersion(row: Record<string, any>): PageVersion {
 function storedName(name: string) {
   return fileName(basename(name).replace(/[\r\n\x00-\x1f]/g, '')) || 'file';
 }
-const slidesMimeType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
-function storedType(value: unknown): PageType {
-  return pageTypes.find((type) => type === value) ?? 'docs';
-}
-function pageType(mimeType: string): PageType {
-  if (mimeType === slidesMimeType) return 'slides';
-  return mimeType === dataPageMimeType ? 'data' : 'docs';
-}
 function pageTitle(bytes: Buffer, fallback: string) {
   const title = /<title[^>]*>([^<]{1,300})<\/title>/i
     .exec(bytes.subarray(0, 8192).toString('utf8'))?.[1]
     ?.replace(/\s+/g, ' ')
     .trim();
-  return (title || storedName(fallback).replace(/\.(?:html?|pptx|data\.json)$/i, '')).slice(0, 200);
+  return (title || storedName(fallback).replace(/\.html?$/i, '')).slice(0, 200);
 }
 async function readLocal(path: string, size: number) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -197,7 +186,7 @@ export function createArtifactService(options: {
     database?: Pick<PoolClient, 'query'>,
     onCreated?: (cleanup: () => Promise<void>) => void,
     temporary = false,
-    page?: { id: string; version: number; title: string; sourcePath: string; type: PageType },
+    page?: { id: string; version: number; title: string; sourcePath: string },
   ): Promise<Artifact> {
     if (!bytes.length || bytes.length > fileBytes)
       throw Object.assign(
@@ -224,8 +213,8 @@ export function createArtifactService(options: {
       try {
         await writeFile(location(id), bytes, { mode: 0o600, flag: 'wx' });
         const result = await client.query(
-          `INSERT INTO artifacts(id,owner_id,thread_id,name,mime_type,size,storage_path,expires_at,page_id,page_version,page_title,source_path,page_type)
-           VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $8 THEN clock_timestamp()+interval '24 hours' END,$9,$10,$11,$12,$13) RETURNING *`,
+          `INSERT INTO artifacts(id,owner_id,thread_id,name,mime_type,size,storage_path,expires_at,page_id,page_version,page_title,source_path)
+           VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $8 THEN clock_timestamp()+interval '24 hours' END,$9,$10,$11,$12) RETURNING *`,
           [
             id,
             options.ownerId,
@@ -239,7 +228,6 @@ export function createArtifactService(options: {
             page?.version ?? null,
             page?.title ?? null,
             page?.sourcePath ?? null,
-            page?.type ?? null,
           ],
         );
         onCreated?.(async () => {
@@ -325,12 +313,10 @@ export function createArtifactService(options: {
     if (!actual.startsWith(base + '/'))
       throw new Error('Only files inside this workspace can be published.');
     const file = posix.basename(actual);
-    const suffix = /\.(?:n8n\.json|data\.json|tar\.gz)$/i.exec(file)?.[0] ?? extname(file);
-    const mimeType = dataPageName.test(file) ? dataPageMimeType : fileMimeType(actual);
-    const kept =
-      mimeType === 'text/html' || mimeType === slidesMimeType || mimeType === dataPageMimeType;
-    if (page !== undefined && !kept)
-      throw new Error('Only an HTML file, a data page or a presentation can update a page.');
+    const suffix = /\.(?:n8n\.json|tar\.gz)$/i.exec(file)?.[0] ?? extname(file);
+    const mimeType = fileMimeType(actual);
+    const kept = mimeType === 'text/html';
+    if (page !== undefined && !kept) throw new Error('Only an HTML file can update a page.');
     const bytes = Buffer.from(
       await read(threadId, posix.relative(base, actual), fileBytes, 'publication'),
     );
@@ -339,9 +325,6 @@ export function createArtifactService(options: {
         ? `${name}${suffix}`
         : name || file;
     if (!kept) return storeArtifact(bytes, label, mimeType, threadId, database, onCreated);
-    const data = mimeType === dataPageMimeType ? parseDataPage(bytes.toString('utf8')) : undefined;
-    if (data && 'error' in data) throw new Error(data.error);
-    const type = pageType(mimeType);
     const publish = async (client: Pick<PoolClient, 'query'>) => {
       let pageId = page === undefined ? undefined : z.uuid().parse(page).toLowerCase();
       if (pageId) {
@@ -368,10 +351,6 @@ export function createArtifactService(options: {
           [options.ownerId, pageId],
         )
       ).rows[0];
-      if (latest && storedType(latest.page_type) !== type)
-        throw new Error(
-          `This page is ${storedType(latest.page_type)}, so a ${type} file cannot replace it.`,
-        );
       if (
         latest &&
         !latest.deleting_at &&
@@ -383,29 +362,21 @@ export function createArtifactService(options: {
       return storeArtifact(bytes, label, mimeType, threadId, client, onCreated, false, {
         id: pageId!,
         version: (latest?.page_version ?? 0) + 1,
-        title: data
-          ? data.page.title
-          : pageTitle(mimeType === 'text/html' ? bytes : Buffer.alloc(0), label),
+        title: pageTitle(bytes, label),
         sourcePath: actual,
-        type,
       });
     };
     return database ? publish(database) : transact(publish);
   }
-  async function listPages(
-    before?: string,
-    type?: PageType,
-    limit = 50,
-  ): Promise<{ pages: Page[]; next?: string }> {
+  async function listPages(before?: string, limit = 50): Promise<{ pages: Page[]; next?: string }> {
     const rows = (
       await options.database.query(
         `SELECT * FROM (SELECT DISTINCT ON (page_id) * FROM artifacts
            WHERE owner_id=$1 AND page_id IS NOT NULL AND deleting_at IS NULL
            ORDER BY page_id,page_version DESC) latest
          WHERE ($2::timestamptz IS NULL OR created_at<$2)
-           AND ($4::text IS NULL OR COALESCE(page_type,'docs')=$4)
          ORDER BY created_at DESC,id LIMIT $3`,
-        [options.ownerId, before ?? null, limit + 1, type ?? null],
+        [options.ownerId, before ?? null, limit + 1],
       )
     ).rows;
     const shown = rows.slice(0, limit);
@@ -413,7 +384,6 @@ export function createArtifactService(options: {
       pages: shown.map((row) => ({
         id: row.page_id,
         title: row.page_title ?? row.name,
-        type: storedType(row.page_type),
         ...pageVersion(row),
       })),
       ...(rows.length > limit ? { next: pageVersion(shown.at(-1)!).createdAt } : {}),
@@ -427,6 +397,31 @@ export function createArtifactService(options: {
         [options.ownerId, z.uuid().parse(id)],
       )
     ).rows.map(pageVersion);
+  }
+  async function deletePage(id: string) {
+    const pageId = z.uuid().parse(id).toLowerCase();
+    const removed = await transact(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
+        `page:${options.ownerId}:${pageId}`,
+      ]);
+      const ids: string[] = (
+        await client.query(
+          `UPDATE artifacts SET deleting_at=clock_timestamp(),thread_id=NULL
+           WHERE owner_id=$1 AND page_id=$2 AND deleting_at IS NULL RETURNING id`,
+          [options.ownerId, pageId],
+        )
+      ).rows.map((row) => row.id);
+      if (ids.length)
+        await client.query(
+          `UPDATE messages SET attachments=COALESCE((SELECT jsonb_agg(item) FROM jsonb_array_elements(attachments) item
+             WHERE NOT (item->>'id'=ANY($2::text[]))),'[]'::jsonb)
+           WHERE owner_id=$1 AND attachments @> ANY($3::jsonb[])`,
+          [options.ownerId, ids, ids.map((item) => JSON.stringify([{ id: item }]))],
+        );
+      return ids.length;
+    });
+    if (removed) await sweep();
+    return removed;
   }
   async function readThreadArtifacts(
     threadId: string,
@@ -585,6 +580,7 @@ export function createArtifactService(options: {
     publishArtifact,
     listPages,
     readPage,
+    deletePage,
     readArtifact,
     readThreadArtifacts,
     renewUploads,

@@ -33,7 +33,6 @@ import './components/emoji-picker.css';
 import './components/attachment-images.css';
 import './components/attachment-card.css';
 import './components/artifact-drawer.css';
-import './components/data-page.css';
 import './components/n8n-canvas.css';
 import './components/vault-details.css';
 import './pages/browser.css';

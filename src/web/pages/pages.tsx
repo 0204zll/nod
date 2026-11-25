@@ -1,25 +1,18 @@
 import { useEffect, useState, type ComponentProps } from 'react';
-import { pageTypes } from '../../shared/contracts';
-import type { Page, PageType, PageVersion } from '../../shared/contracts';
+import type { Page, PageVersion } from '../../shared/contracts';
 import { useArtifactDrawer } from '../components/artifact-context';
 import { ArtifactWorkspace } from '../components/artifact-drawer';
 import { DataThumbnail } from '../components/attachment-card';
 import type { ImagePreview } from '../components/attachment-images';
-import { ChartColumn, FileText, Presentation } from '../components/icons';
+import { FileText, Trash2 } from '../components/icons';
 import { PageTitle } from '../components/page-title';
-import { Button, Loading, Notice } from '../components/ui';
+import { Button, Dialog, DialogContent, DialogTitle, Loading, Notice } from '../components/ui';
 import { usePageData } from '../hooks/use-page-data';
-import { api } from '../lib/api';
+import { api, errorMessage } from '../lib/api';
 import { attachmentKind } from '../lib/attachment-kind';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
 import { navigate } from '../lib/navigation';
 import './pages.css';
-
-const types = {
-  docs: { label: 'Docs', icon: FileText },
-  data: { label: 'Data', icon: ChartColumn },
-  slides: { label: 'Slides', icon: Presentation },
-} satisfies Record<PageType, { label: string; icon: typeof FileText }>;
 
 type ThumbnailKind = ComponentProps<typeof DataThumbnail>['kind'];
 
@@ -28,17 +21,14 @@ interface PageList {
   next?: string;
 }
 
-function Icon({ type, size = 16 }: { type: PageType; size?: number }) {
-  const Glyph = types[type].icon;
-  return <Glyph size={size} />;
-}
-
-function PageRows({
+function PageCards({
   pages,
   onVersions,
+  onDelete,
 }: {
   pages: Page[];
   onVersions(page: Page, versions: PageVersion[]): void;
+  onDelete(page: Page): void;
 }) {
   const drawer = useArtifactDrawer();
   const format = useDateFormat();
@@ -59,24 +49,33 @@ function PageRows({
       {pages.map((page) => {
         const kind = attachmentKind(page.artifact.mimeType, page.artifact.name);
         return (
-          <li key={page.id}>
-            <button type="button" className="pages-card" onClick={() => void open(page)}>
+          <li key={page.id} className="pages-card">
+            <button type="button" className="pages-card-open" onClick={() => void open(page)}>
               {kind ? (
                 <DataThumbnail item={page.artifact} kind={kind as ThumbnailKind} wide />
               ) : (
                 <span className="pages-card-blank" aria-hidden="true">
-                  <Icon type={page.type} size={32} />
+                  <FileText size={32} />
                 </span>
               )}
               <span className="pages-card-details">
                 <span className="pages-card-title">{page.title}</span>
                 <span className="pages-card-meta">
-                  <Icon type={page.type} size={14} />
-                  {types[page.type].label} · Version {page.version} ·{' '}
+                  Version {page.version} ·{' '}
                   <time dateTime={page.createdAt}>{formatDateTime(page.createdAt, format)}</time>
                 </span>
               </span>
             </button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="pages-card-delete"
+              aria-label={`Delete ${page.title}`}
+              title="Delete"
+              onClick={() => onDelete(page)}
+            >
+              <Trash2 size={15} />
+            </Button>
             {failed === page.id && <Notice>This page could not be opened. Try again.</Notice>}
           </li>
         );
@@ -86,15 +85,31 @@ function PageRows({
 }
 
 export function Pages() {
-  const [type, setType] = useState<PageType | null>(null);
-  const { data, error, refresh } = usePageData<PageList>(
-    `/api/pages${type ? `?type=${type}` : ''}`,
-  );
+  const { data, error, refresh } = usePageData<PageList>('/api/pages');
   const [older, setOlder] = useState<Page[]>([]);
   const [next, setNext] = useState<string | undefined>();
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [olderFailed, setOlderFailed] = useState(false);
   const [opened, setOpened] = useState<{ page: Page; versions: PageVersion[] } | null>(null);
+  const [deleting, setDeleting] = useState<Page | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+  const remove = async () => {
+    if (!deleting) return;
+    setBusy(true);
+    setDeleteError('');
+    try {
+      await api(`/api/pages/${deleting.id}`, { method: 'DELETE' });
+      if (opened?.page.id === deleting.id) setOpened(null);
+      setOlder((current) => current.filter((page) => page.id !== deleting.id));
+      setDeleting(null);
+      await refresh();
+    } catch (error) {
+      setDeleteError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
   useEffect(() => {
     setOlder([]);
     setNext(data?.next);
@@ -120,9 +135,7 @@ export function Pages() {
     setLoadingOlder(true);
     setOlderFailed(false);
     try {
-      const more = await api<PageList>(
-        `/api/pages?before=${encodeURIComponent(next)}${type ? `&type=${type}` : ''}`,
-      );
+      const more = await api<PageList>(`/api/pages?before=${encodeURIComponent(next)}`);
       setOlder((current) => [...current, ...more.pages]);
       setNext(more.next);
     } catch {
@@ -138,25 +151,6 @@ export function Pages() {
           <header className="page-heading secondary-heading">
             <PageTitle path="/pages" />
           </header>
-          <div className="pages-types" role="group" aria-label="Show one type">
-            {pageTypes.map((item) => (
-              <button
-                type="button"
-                key={item}
-                className="pages-type"
-                aria-pressed={type === item}
-                onClick={() => setType(type === item ? null : item)}
-              >
-                <Icon type={item} size={20} />
-                {types[item].label}
-              </button>
-            ))}
-            {type && (
-              <Button variant="ghost" onClick={() => setType(null)}>
-                Show all types
-              </Button>
-            )}
-          </div>
           <div data-analytics-private>
             {error ? (
               <>
@@ -174,19 +168,21 @@ export function Pages() {
                 <span className="pages-empty-icon" aria-hidden="true">
                   <FileText size={32} />
                 </span>
-                <h2 id="pages-empty-title">
-                  {type ? `Nothing in ${types[type].label} yet` : 'No pages yet'}
-                </h2>
+                <h2 id="pages-empty-title">No pages yet</h2>
                 <p>
-                  Ask Nod for a report, a dashboard, a specification, meeting notes or a
-                  presentation. Each one is kept here, with every version.
+                  Ask Nod for a specification, a runbook, a weekly update or meeting notes as a
+                  page. Each one is kept here, with every version.
                 </p>
               </section>
             ) : (
               <>
-                <PageRows
+                <PageCards
                   pages={shown}
                   onVersions={(page, versions) => setOpened({ page, versions })}
+                  onDelete={(page) => {
+                    setDeleteError('');
+                    setDeleting(page);
+                  }}
                 />
                 {olderFailed && <Notice>Older pages could not be loaded.</Notice>}
                 {next && (
@@ -203,6 +199,29 @@ export function Pages() {
           </div>
         </div>
       </div>
+      <Dialog
+        open={deleting !== null}
+        onOpenChange={(open) => {
+          if (!open && !busy) setDeleting(null);
+        }}
+      >
+        <DialogContent aria-describedby={undefined}>
+          <DialogTitle>Delete {deleting?.title}?</DialogTitle>
+          <p className="field-hint">
+            Every version is deleted and the page is removed from the chat it was made in. This
+            cannot be undone.
+          </p>
+          {deleteError && <Notice>{deleteError}</Notice>}
+          <div className="dialog-actions">
+            <Button variant="ghost" disabled={busy} onClick={() => setDeleting(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" disabled={busy} onClick={() => void remove()}>
+              Delete
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </ArtifactWorkspace>
   );
 }

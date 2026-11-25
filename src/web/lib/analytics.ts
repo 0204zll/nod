@@ -167,7 +167,6 @@ const artifactKinds = [
   'presentation',
   'archive',
   'n8n-workflow',
-  'data-page',
   'text',
   'file',
 ];

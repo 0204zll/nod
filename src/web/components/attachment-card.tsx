@@ -35,7 +35,6 @@ const thumbnailKinds = new Set([
   'html',
   'archive',
   'n8n-workflow',
-  'data-page',
 ]);
 
 export function DataThumbnail({
@@ -91,8 +90,6 @@ export function DataThumbnail({
     </div>
   );
 }
-
-const pageTypeLabels = { docs: 'Docs', data: 'Data', slides: 'Slides' };
 
 function CardDetails({ name, mimeType, meta }: { name: string; mimeType: string; meta: string }) {
   return (
@@ -201,9 +198,9 @@ function DocumentCard({
   const [pages, setPages] = useState<number | null>(null);
   const [thumbnail, setThumbnail] = useState(kind === 'pdf');
   const dataThumbnail = thumbnailKinds.has(kind ?? '');
-  const wide = kind === 'html' || kind === 'data-page';
+  const wide = kind === 'html';
   const meta = [
-    item.page ? pageTypeLabels[item.page.type] : fileType(item.name),
+    item.page ? 'Page' : fileType(item.name),
     item.page ? `Version ${item.page.version}` : '',
     pages ? `${pages} ${pages === 1 ? 'page' : 'pages'}` : '',
     fileSize(item.size),

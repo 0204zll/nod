@@ -24,16 +24,25 @@
   list-style: none;
 }
 .pages-card {
-  display: grid;
-  width: 100%;
+  position: relative;
   overflow: hidden;
-  text-align: left;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--surface);
 }
-.pages-card:hover {
+.pages-card:hover,
+.pages-card:focus-within {
   border-color: var(--foreground);
+}
+.pages-card-open {
+  display: grid;
+  width: 100%;
+  text-align: left;
+}
+.pages-card-delete {
+  position: absolute;
+  right: 8px;
+  bottom: 10px;
 }
 .pages-card-blank {
   display: grid;
@@ -46,7 +55,7 @@
 .pages-card-details {
   display: grid;
   gap: 4px;
-  padding: 12px;
+  padding: 12px 48px 12px 12px;
 }
 .pages-card-title {
   overflow: hidden;
@@ -81,29 +90,4 @@
 }
 .pages-empty p {
   color: var(--muted-foreground);
-}
-.pages-types {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 24px;
-}
-.pages-type {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 16px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
-  font-size: var(--text-control);
-  font-weight: 500;
-}
-.pages-type:hover {
-  background: var(--hover);
-}
-.pages-type[aria-pressed='true'] {
-  border-color: var(--foreground);
-  background: var(--surface-inset);
 }

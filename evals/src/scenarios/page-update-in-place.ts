@@ -11,7 +11,7 @@ const data = [
 async function pages(run: Run) {
   const listed = (await run.api('GET', '/api/pages')).body?.pages ?? [];
   return Promise.all(
-    listed.map(async (page: { id: string; type: string; version: number; title: string }) => ({
+    listed.map(async (page: { id: string; version: number; title: string }) => ({
       ...page,
       versions: (await run.api('GET', `/api/pages/${page.id}`)).body?.versions ?? [],
     })),
@@ -47,9 +47,7 @@ export default scenario({
           const found = await pages(run);
           return {
             pass: found.length === 1,
-            evidence: JSON.stringify(
-              found.map(({ title, type, version }) => ({ title, type, version })),
-            ),
+            evidence: JSON.stringify(found.map(({ title, version }) => ({ title, version }))),
           };
         },
         { failure: 'format' },
@@ -67,23 +65,12 @@ export default scenario({
         { failure: 'incomplete' },
       ),
       check(
-        'lists-it-as-data',
-        async (run) => {
-          const found = await pages(run);
-          return {
-            pass: found.length > 0 && found.every((page) => page.type === 'data'),
-            evidence: found.map((page) => page.type).join(', ') || 'no page',
-          };
-        },
-        { failure: 'format' },
-      ),
-      check(
         'latest-version-has-the-change',
         async (run) => {
           const shared = run.tools
             .filter((call) => call.name === 'share_file' && !call.isError)
             .map((call) => String(call.input?.path ?? '').replace(/^(\.\/)+/, ''))
-            .filter((path) => /\.(?:html?|data\.json)$/i.test(path));
+            .filter((path) => /\.html?$/i.test(path));
           const file = run.files.find(
             (item) => item === shared.at(-1) || item.endsWith(`/${shared.at(-1)}`),
           );

@@ -86,15 +86,7 @@ File actions appear over previews in chat and in the panel's toolbar. Videos pla
 
 ## Find a page again
 
-Every page, data page and presentation Nod makes is kept on **Pages**, outside the conversation it came from. Select one to open it in the panel.
-
-Each page has one of three types. Select a type at the top of **Pages** to show only that type, and select it again to show everything.
-
-| Type       | What it holds                                                                                                                                       |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Docs**   | Pages you read: specifications, runbooks, reference pages, notes, updates                                                                           |
-| **Data**   | Pages you scan: dashboards and reports built on figures. Nod draws these itself, with charts, tables you can sort and a CSV download for each table |
-| **Slides** | PowerPoint presentations                                                                                                                            |
+Every HTML page Nod makes is kept on **Pages**, outside the conversation it came from. Each one shows a small preview, its title, its version and when it was last saved. Select one to open it in the panel.
 
 When you ask Nod to change a page, it saves a new version of the same page instead of a new file. Use the picker in the panel's title to open an earlier version. To ask for a change from **Pages**, select **Use in message** in the panel: Nod opens the chat with that page attached.
 
@@ -105,19 +97,15 @@ When you ask Nod to change a page, it saves a new version of the same page inste
 
 ### Export a page
 
-Select **Download** in the panel's toolbar and choose a format.
+Select **Download** in the panel's toolbar and choose **HTML file** or **PDF**.
 
-| Type       | Formats                                                        |
-| ---------- | -------------------------------------------------------------- |
-| **Docs**   | **HTML file** or **PDF**                                       |
-| **Data**   | **Data file** or **PDF**. Each table also has **Download CSV** |
-| **Slides** | **PowerPoint file** or **PDF**, with one slide on each page    |
-
-**PDF** opens your system's print window. Choose **Save as PDF** there. The page prints in the light theme. Nod prints a page in a separate locked frame where the page's own scripts do not run, so a printed page shows what is on it before any script changes it. Slides print as Nod draws them, which is close to PowerPoint but not exact.
+**PDF** opens your system's print window. Choose **Save as PDF** there. The page prints in the light theme. Nod prints a page in a separate locked frame where the page's own scripts do not run, so a printed page shows what is on it before any script changes it.
 
 Pages are private to you. Nod has no link that another person can open. To give someone a page, download it and send the file. A page is one file that needs no internet connection, so it opens the same way on their computer.
 
-A page keeps every version. Versions are removed only when you [remove all data](/trust/privacy/#delete-your-data).
+### Delete a page
+
+A page keeps every version until you delete it. Select the bin on a page in **Pages**, then **Delete**. This removes every version and also takes the page out of the chat it was made in. It cannot be undone. The file Nod wrote in its workspace stays there, so Nod can share it again if you ask. [Remove all data](/trust/privacy/#delete-your-data) deletes every page.
 
 The panel remembers reading state for up to eight recently viewed files, with a total retention limit of 90 MB. Use the filename selector to jump between files during this conversation visit.
 
@@ -140,7 +128,7 @@ Native opening is limited to supported document and raster image types. Save oth
 | Code, JSON and text                     | With syntax highlighting                                           |
 | ZIP                                     | The list of files inside                                           |
 
-Ask for a page, a specification, a runbook, a reference page, a weekly update or meeting notes to view on screen, and Nod writes one HTML file that follows your light or dark theme and prints cleanly. Ask for a dashboard or a report built on figures, and Nod makes a data page instead. Ask for PowerPoint, Word or PDF when you plan to edit or forward the file. Slides come as PowerPoint.
+Ask for a page, a specification, a runbook, a reference page, a weekly update or meeting notes to view on screen, and Nod writes one HTML file that follows your light or dark theme and prints cleanly. Ask for PowerPoint, Word or PDF when you plan to edit or forward the file. Slides come as PowerPoint.
 
 HTML files run in a sandbox, apart from Nod. Their scripts work, but they can't reach Nod or your accounts, load anything from the internet, send forms or open windows. If a page navigates to a website, its preview closes. Other files open without running any code.
 
