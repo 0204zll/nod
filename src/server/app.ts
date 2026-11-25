@@ -682,7 +682,9 @@ export async function createApp(dependencies: AppDependencies = {}) {
                   streamId: event.streamId,
                   done: event.done,
                 }
-              : undefined;
+              : event.type === 'trace' && event.ownerId === ownerId
+                ? { type: 'trace', turnId: event.turnId }
+                : undefined;
       if (payload && !reply.raw.destroyed) reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
     send({ type: 'refresh' });

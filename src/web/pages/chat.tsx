@@ -9,7 +9,9 @@ import {
   type SetStateAction,
 } from 'react';
 import { createPortal, flushSync } from 'react-dom';
-import { ArrowDown, Check, CornerUpLeft, LoaderCircle, Repeat } from '../components/icons';
+import { ArrowDown, Check, CornerUpLeft, LoaderCircle, Repeat, Route } from '../components/icons';
+import { TraceDrawer } from '../components/trace-drawer';
+import { readUiPreference, writeUiPreference } from '../lib/ui-preferences';
 import type {
   Activity,
   AppState,
@@ -332,7 +334,9 @@ export function Chat({
   onFeedback,
   onDismissFeedbackDiscovery,
   onReturnToMemory,
+  turnTraces = false,
 }: {
+  turnTraces?: boolean;
   ownerId: string;
   state: AppState;
   streams: Record<string, string>;
@@ -351,6 +355,12 @@ export function Chat({
   onReturnToMemory?(): void;
 }) {
   const dateFormat = useDateFormat();
+  const [traceOpen, setTraceOpen] = useState(() => readUiPreference('nod.trace-open') === 'true');
+  const tracing = turnTraces && traceOpen;
+  function toggleTrace(open: boolean) {
+    setTraceOpen(open);
+    writeUiPreference('nod.trace-open', String(open));
+  }
   const { data: connections } = usePageData<Connection[]>('/api/apps');
   const { data: trust, refresh: refreshTrust } = usePageData<TrustView>('/api/trust');
   const trustRefreshKey = state.turns.map((turn) => `${turn.id}:${turn.status}`).join(',');
@@ -2196,6 +2206,19 @@ export function Chat({
   const chatActions = (
     <>
       <ChatTools files={files} tasks={state.tasks} />
+      {turnTraces && (
+        <Tooltip content={tracing ? 'Hide trace' : 'Show trace'}>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={tracing ? 'Hide trace' : 'Show trace'}
+            aria-pressed={tracing}
+            onClick={() => toggleTrace(!tracing)}
+          >
+            <Route size={16} />
+          </Button>
+        </Tooltip>
+      )}
       {onFeedback && (
         <FeedbackLauncher
           onFeedback={onFeedback}
@@ -2206,7 +2229,11 @@ export function Chat({
   );
   return (
     <PrivateEntryWorkspace key={`${ownerId}.${threadId}`} active={visible}>
-      <ArtifactWorkspace className="chat-page" files={files}>
+      <ArtifactWorkspace
+        className="chat-page"
+        files={files}
+        aside={tracing && <TraceDrawer changed={state.turns} onClose={() => toggleTrace(false)} />}
+      >
         {toolbarActions || desktopSettingsAvailable() ? (
           <>
             <h1 className="sr-only">Chat</h1>

@@ -9893,3 +9893,84 @@ test('startup facts keep only structured bounded codes and do not call getters o
     undefined,
   );
 });
+
+test(
+  'developer turn traces stay owner-scoped and keep provider keys out',
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 30_000 },
+  async (t) => {
+    const schema = `test_turn_traces_${randomUUID().replaceAll('-', '')}`;
+    const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = new pg.Pool({
+      connectionString: process.env.TEST_DATABASE_URL,
+      options: `-c search_path=${schema}`,
+    });
+    t.after(async () => {
+      await pool.end();
+      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+      await admin.end();
+    });
+    await pool.query(`
+      CREATE TABLE turns(id uuid PRIMARY KEY, owner_id text NOT NULL, thread_id uuid, source text, status text,
+        background boolean, parent_turn_id uuid, prompt text, created_at timestamptz DEFAULT now(),
+        started_at timestamptz, finished_at timestamptz);
+      CREATE TABLE turn_events(id uuid PRIMARY KEY, turn_id uuid, type text, summary text, detail text,
+        run_id uuid, parent_run_id uuid, call_id uuid, created_at timestamptz DEFAULT now());
+      CREATE TABLE model_call_traces(id uuid PRIMARY KEY, owner_id text NOT NULL,
+        turn_id uuid NOT NULL REFERENCES turns(id) ON DELETE CASCADE, call jsonb NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now());
+    `);
+    const { createTurnTraces } = await import('../src/server/turn-traces.ts');
+    const mine = randomUUID();
+    const theirs = randomUUID();
+    await pool.query(
+      "INSERT INTO turns(id, owner_id, source, status, prompt) VALUES ($1,'owner-a','user','done','hi'), ($2,'owner-b','user','done','hi')",
+      [mine, theirs],
+    );
+    const ownerA = createTurnTraces({ pool, ownerId: 'owner-a' });
+    const ownerB = createTurnTraces({ pool, ownerId: 'owner-b' });
+    const traces = createModelTraces();
+    traces.configure({ secrets: ['fixture-model-key-5d21'], capture: ownerA.record });
+    const call = (turnId: string) => ({
+      id: randomUUID(),
+      source: 'agent',
+      turnId,
+      provider: 'fixture',
+      model: 'fixture-model',
+      startedAt: '2026-11-25T10:00:00.000Z',
+      endedAt: '2026-11-25T10:00:01.000Z',
+      systemPrompt: 'You are Nod. Key fixture-model-key-5d21',
+      tools: [{ name: 'read', description: 'Read a file', parameters: {} }],
+      messages: [
+        { role: 'user', content: 'use fixture-model-key-5d21', apiKey: 'fixture-model-key-5d21' },
+      ],
+      output: { content: [{ type: 'text', text: 'done' }], stopReason: 'stop' },
+      usage: {
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        costUsd: null,
+      },
+      stopReason: 'stop',
+    });
+    traces.capture(call(mine));
+    traces.capture(call(theirs));
+    let found;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      found = await ownerA.read(mine);
+      if (found?.calls.length) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(found?.calls.length, 1);
+    assert.equal(found?.calls[0]?.tools[0]?.name, 'read');
+    assert.ok(!JSON.stringify(found).includes('fixture-model-key-5d21'));
+    assert.equal(await ownerA.read(theirs), undefined);
+    assert.equal((await ownerB.read(theirs))?.calls.length, 0);
+    assert.equal(
+      (await pool.query('SELECT count(*)::int AS n FROM model_call_traces')).rows[0].n,
+      1,
+    );
+  },
+);

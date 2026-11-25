@@ -1,7 +1,12 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { ModelTrace, ModelTraceDelivery, ModelTraces } from '../ports/traces.ts';
+import type {
+  ModelCallTrace,
+  ModelTrace,
+  ModelTraceDelivery,
+  ModelTraces,
+} from '../ports/traces.ts';
 import { analyticsVersion } from './analytics-events.ts';
 import {
   createPersonalDataRedactor,
@@ -40,6 +45,7 @@ export function createModelTraces(deliver?: ModelTraceDelivery, appVersion?: str
   }>();
   let secrets: string[] = [];
   let secretText = createTextRedactor(secrets);
+  let sink: ((trace: ModelCallTrace & { turnId: string }) => void) | undefined;
   let profile: () => Promise<PersonalProfile> = async () => ({ names: [] });
   let loaded: { profile: string; text: (value: string) => string } | undefined;
   let seen = -1;
@@ -131,7 +137,9 @@ export function createModelTraces(deliver?: ModelTraceDelivery, appVersion?: str
       profile?: () => Promise<PersonalProfile>;
       userId?: string;
       conversationKey?: Uint8Array;
+      capture?: ((trace: ModelCallTrace & { turnId: string }) => void) | null;
     }) {
+      if (options.capture !== undefined) sink = options.capture ?? undefined;
       if (options.conversationKey) {
         if (options.conversationKey.byteLength !== 32)
           throw new Error('The trace conversation key must contain 32 bytes.');
@@ -163,6 +171,26 @@ export function createModelTraces(deliver?: ModelTraceDelivery, appVersion?: str
     },
     available: deliver !== undefined,
     active: () => enabled && deliver !== undefined,
+    capturing: () => sink !== undefined,
+    capture(trace: ModelCallTrace) {
+      const turnId = trace.turnId ?? turns.getStore()?.turnId;
+      if (!sink || !turnId) return;
+      const text = (value: string) =>
+        secretText(homes.reduce((result, path) => result.replaceAll(path, '~'), value));
+      sink(
+        JSON.parse(
+          JSON.stringify(
+            {
+              ...trace,
+              messages: withoutSecretKeys(trace.messages),
+              output: withoutSecretKeys(trace.output),
+              turnId,
+            },
+            (_key, item) => (typeof item === 'string' ? text(item) : item),
+          ),
+        ),
+      );
+    },
     withTurn<T>(
       context: { sessionId: string; turnId: string },
       run: (ids: { thread_id: string; turn_id: string }) => T,

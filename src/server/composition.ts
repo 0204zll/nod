@@ -161,9 +161,17 @@ import { createChannels } from './channels.ts';
 import { createChannelSettings, managedChannelEnvironment } from './channel-settings.ts';
 import { createChannelMedia } from './channel-media.ts';
 import { createChannelSessionStore } from './channel-session.ts';
-import { configuration, dataRoot, desktopMode, ownerId, publicOrigin } from './config.ts';
+import {
+  configuration,
+  dataRoot,
+  desktopMode,
+  developmentMode,
+  ownerId,
+  publicOrigin,
+} from './config.ts';
 import { createAccountStore } from './account-store.ts';
 import { createModelTraces, type ModelTraceGate } from './traces.ts';
+import { createTurnTraces } from './turn-traces.ts';
 import { runtimeAccount } from './account-profile.ts';
 import { createAccountSession } from './account.ts';
 import { connectedGmail } from '../shared/onboarding.ts';
@@ -401,6 +409,12 @@ export function createDefaultAdapters(
     }),
     env.NOD_APP_VERSION,
   );
+  const captureOnly = {
+    active: () => false,
+    record: () => {},
+    capturing: () => traces.capturing(),
+    capture: (trace: Parameters<typeof traces.capture>[0]) => traces.capture(trace),
+  };
   const modelCurator = createPiMemoryCurator({
     get provider() {
       return models.current.provider;
@@ -632,6 +646,7 @@ export function createDefaultAdapters(
       },
       resolve: () => models.resolveClassification(true),
       configured: () => models.hasClassificationModel(true),
+      traces: captureOnly,
     }),
     classificationCurator: createPiMemoryCurator({
       get provider() {
@@ -639,6 +654,7 @@ export function createDefaultAdapters(
       },
       resolve: () => models.resolveClassification(),
       configured: () => models.hasClassificationModel(),
+      traces: captureOnly,
     }),
     imageCurator: createPiMemoryCurator({
       get provider() {
@@ -3395,12 +3411,20 @@ async function initializeApplication(
     analytics: captureAnalytics,
   });
   registerPrivacyNotice(app, privacyNotice);
+  const developerIds = desktopMode ? new Set<string>() : new Set([ownerId]);
+  const turnTraceIds = developmentMode ? developerIds : new Set<string>();
+  if (turnTraceIds.has(ownerId)) {
+    const turnTraces = createTurnTraces({ pool, ownerId });
+    turnTraces.registerRoutes(app);
+    adapters.traces?.configure({ capture: turnTraces.record });
+  }
   createAccountSession({
     analytics,
     model: () => adapters.model,
     accounts: localAccounts,
     localUser: { id: ownerId, name: 'You', email: null, avatarUrl: null },
-    developerIds: desktopMode ? new Set() : new Set([ownerId]),
+    developerIds,
+    turnTraceIds,
     start: welcome,
     prepare: prepareRuntime,
     onboardingMissing: async () => (adapters.model.configured ? null : 'brain'),

@@ -226,6 +226,7 @@ function Workspace({
             <div className="chat-route" hidden={path !== '/'}>
               {state ? (
                 <Chat
+                  turnTraces={session.capabilities.turnTraces === true}
                   ownerId={session.user!.id}
                   state={state}
                   streams={streams}

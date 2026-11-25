@@ -25,6 +25,8 @@ if (
 )
   throw new Error('Desktop runtime configuration is incomplete.');
 const runtimeEnvironment = process.env.NOD_ENVIRONMENT || 'development';
+export const developmentMode =
+  runtimeEnvironment === 'development' && process.env.NODE_ENV !== 'production';
 export function configuration(overrides: Partial<Configuration> = {}): Configuration {
   return {
     provider: 'unconfigured',
@@ -32,8 +34,7 @@ export function configuration(overrides: Partial<Configuration> = {}): Configura
     llmReady: false,
     modelReconnect: false,
     integrationsReady: false,
-    conversationResetEnabled:
-      runtimeEnvironment === 'development' && process.env.NODE_ENV !== 'production',
+    conversationResetEnabled: developmentMode,
     ...overrides,
   };
 }

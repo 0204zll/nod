@@ -172,6 +172,8 @@ export function useAppState(accountId?: string) {
               pageDataCache.revalidateActive('/api/tasks');
             }
           }
+          if (data.type === 'trace' && typeof data.turnId === 'string')
+            window.dispatchEvent(new CustomEvent('nod:trace', { detail: { turnId: data.turnId } }));
           if (data.type === 'refresh') {
             pageDataCache.revalidateActive();
             void refresh();
