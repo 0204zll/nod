@@ -19,8 +19,7 @@ function validSession(value: unknown): value is SessionResponse {
   const session = value as Partial<SessionResponse>;
   if (
     typeof session.capabilities?.developer !== 'boolean' ||
-    typeof session.capabilities.traces !== 'boolean' ||
-    typeof session.capabilities.turnTraces !== 'boolean'
+    typeof session.capabilities.traces !== 'boolean'
   )
     return false;
   if (session.user === null) return session.settings === null && !session.capabilities.developer;

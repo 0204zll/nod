@@ -404,6 +404,17 @@ export function TraceDrawer({ changed, onClose }: { changed: unknown; onClose():
   const [selectedId, setSelectedId] = useState<string>();
   const [width, setWidth] = useState(storedWidth);
   const [expanded, setExpanded] = useState(false);
+  const [pageWidth, setPageWidth] = useState(0);
+  const widest = (page: number) => Math.max(minimumWidth, page - minimumWidth);
+  useEffect(() => {
+    const page = root.current?.parentElement;
+    if (!page) return;
+    const measure = () => setPageWidth(page.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(page);
+    return () => observer.disconnect();
+  }, []);
   const [messagesOpen, setMessagesOpen] = useState(true);
   useEffect(() => {
     if (!expanded) return;
@@ -583,6 +594,7 @@ export function TraceDrawer({ changed, onClose }: { changed: unknown; onClose():
         aria-orientation="vertical"
         aria-label="Resize trace"
         aria-valuemin={minimumWidth}
+        aria-valuemax={widest(pageWidth)}
         aria-valuenow={width}
         tabIndex={0}
         onKeyDown={(event) => {
@@ -592,7 +604,7 @@ export function TraceDrawer({ changed, onClose }: { changed: unknown; onClose():
           event.preventDefault();
           const next = Math.min(
             Math.max(width + (event.key === 'ArrowLeft' ? 24 : -24), minimumWidth),
-            page.clientWidth - minimumWidth,
+            widest(page.clientWidth),
           );
           setWidth(next);
           writeUiPreference('nod.trace-width', String(next));
@@ -608,10 +620,7 @@ export function TraceDrawer({ changed, onClose }: { changed: unknown; onClose():
           page.classList.add('is-resizing-artifact');
           const follow = (move: PointerEvent) => {
             latest = Math.round(
-              Math.min(
-                Math.max(right - move.clientX, minimumWidth),
-                page.clientWidth - minimumWidth,
-              ),
+              Math.min(Math.max(right - move.clientX, minimumWidth), widest(page.clientWidth)),
             );
             setWidth(latest);
           };
