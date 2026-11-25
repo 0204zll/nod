@@ -9824,7 +9824,7 @@ test(
     let failed = false;
     const provider = createComposioProvider({
       proxy: composioProxyFixture(client, 'local-development', {
-        authorize: async (service, callbackUrl, reconnectAccountId) => {
+        authorize: async (service, callbackUrl, { reconnectAccountId } = {}) => {
           assert.equal(service, 'gmail');
           assert.equal(reconnectAccountId, undefined);
           if (failed) throw new Error('synthetic-private-provider-detail');
@@ -12608,7 +12608,7 @@ test('Composio catalog failures preserve owned accounts', async (t) => {
   await assert.rejects(session.authorize('outlook', callback));
   const authorization = await provider.createSession('fixture-owner', {});
   await authorization.authorize('outlook', callback);
-  assert.deepEqual(authorize.mock.calls[0]!.arguments, ['outlook', callback]);
+  assert.deepEqual(authorize.mock.calls[0]!.arguments, ['outlook', callback, { app: 'Outlook' }]);
   assert.equal(listing.mock.callCount(), 1);
   await session.execute('RETIRED_MCP_LIST', {}, 'owned-account');
   assert.equal(execute.mock.callCount(), 1);
