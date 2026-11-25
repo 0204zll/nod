@@ -260,7 +260,7 @@ test('answer choices remain ordinary questions with runtime-owned IDs and bounde
       { choices: Array.from({ length: 7 }, () => ({ label: 'Extra account' })) },
       { choices: [{ label: 'Account', action: 'send_email' }] },
       { choices: [{ label: 'Account', id: randomUUID() }] },
-      { choices: [{ label: 'Account', description: 'The shared project mailbox' }] },
+      { choices: [{ label: 'Account', description: 'x'.repeat(201) }] },
     ])
       await assert.rejects(call(tools, 'ask_user', { question: 'Which account?', ...invalid }));
     await call(tools, 'ask_user', {
