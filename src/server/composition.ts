@@ -1468,6 +1468,17 @@ async function initializeApplication(
       expectTarget: _expectTarget,
       ...command
     } = step as BrowserAction;
+    const upload =
+      step.action === 'upload'
+        ? (() => {
+            const source = posix.basename(step.path);
+            const file = step.name ?? source;
+            return {
+              file,
+              ...(source && file !== source ? { sourceFile: source } : {}),
+            };
+          })()
+        : undefined;
     return {
       website: page.origin,
       page: page.url,
@@ -1477,7 +1488,7 @@ async function initializeApplication(
       ...(page.submits ? { submits: page.submits } : {}),
       ...(page.dropTarget?.length ? { dropTarget: page.dropTarget } : {}),
       ...(page.dialog !== undefined ? { dialog: page.dialog } : {}),
-      ...(step.action === 'upload' ? { file: step.name ?? posix.basename(step.path) } : {}),
+      ...(upload ?? {}),
       ...(typed.length ? { typedOnPage: typed } : {}),
       command,
     };

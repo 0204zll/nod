@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -32,7 +32,7 @@ import { createDocumentation } from '../src/server/documentation.ts';
 import { coreSkills } from '../src/runtime/prompt.ts';
 import { localResultTimes } from '../src/runtime/time-context.ts';
 import { memoryActions, nodActions, toolDefinitions } from '../src/runtime/tools.ts';
-import { createAgentRuntime } from '../src/runtime/index.ts';
+import { createAgentRuntime, workspaceRelativePath } from '../src/runtime/index.ts';
 import {
   inlineAppResult,
   privateEmailResult,
@@ -2616,6 +2616,70 @@ test('browser upload preserves staged filenames, supports an explicit name and r
       bytes: 'Synthetic staged upload',
     },
   ]);
+
+  assert.equal(
+    workspaceRelativePath(
+      'C:\\data\\workspaces\\thread',
+      `C:\\data\\workspaces\\thread\\${attachmentId}\\photo.png`,
+      win32,
+    ),
+    `${attachmentId}/photo.png`,
+  );
+  assert.equal(
+    workspaceRelativePath(
+      'C:\\data\\workspaces\\thread',
+      'C:\\data\\workspaces\\other\\photo.png',
+      win32,
+    ),
+    undefined,
+  );
+  const analyzedPrompts: string[] = [];
+  await fixture(
+    async () => {},
+    {
+      workspacePath: directory,
+      attachments: [
+        {
+          id: attachmentId,
+          path: attachmentPath,
+          mimeType: 'image/png',
+          workspaceFile: `/workspace/synthetic/${attachmentId}/photo.png`,
+        },
+      ],
+    },
+    {
+      workspace: fakeWorkspace({
+        readArtifact: async (_thread, path) => {
+          assert.equal(path, `${attachmentId}/photo.png`);
+          return imageBytes;
+        },
+      }),
+      analyzeImages: async () => 'A synthetic site photo.',
+      agent: {
+        open: async (options) => ({
+          resumed: false,
+          readsImages: false,
+          abort() {},
+          dispose() {},
+          prompt: async (text) => {
+            analyzedPrompts.push(text);
+            options.onEvent({ type: 'final', text: 'Described.' });
+          },
+        }),
+        dispose() {},
+      },
+    },
+  );
+  const analyzedData = JSON.parse(
+    analyzedPrompts[0]!.split('Request data (JSON):\n')[1]!.split('\n\n')[0]!,
+  );
+  const analysisPayload = JSON.parse(
+    analyzedData.imageAnalysis.split('\n\n')[1]!.split('\n</untrusted_tool_result>')[0]!,
+  );
+  assert.deepEqual(analysisPayload, {
+    files: [`${attachmentId}/photo.png`],
+    description: 'A synthetic site photo.',
+  });
 });
 
 test('browser handoff requires a live page, binds its session and stops further work without a link', async () => {
