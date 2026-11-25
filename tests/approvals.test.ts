@@ -5916,6 +5916,12 @@ test(
         await assert.rejects(share('copy.html', randomUUID()), /page is unavailable/);
         await assert.rejects(share('alert.n8n.json', page), /Only an HTML file can update a page/);
         const listed = JSON.parse((await request('GET', '/api/pages')).body).pages;
+        const found = async (q: string) =>
+          JSON.parse((await request('GET', `/api/pages?q=${q}`)).body).pages.map(
+            (item: { id: string }) => item.id,
+          );
+        assert.deepEqual((await found('FIXTURE%20rep')).sort(), [page, copy.page!.id].sort());
+        assert.deepEqual(await found('100%25'), []);
         assert.equal(listed.find((item: { id: string }) => item.id === page).version, 3);
         const versions = JSON.parse((await request('GET', `/api/pages/${page}`)).body).versions;
         assert.deepEqual(

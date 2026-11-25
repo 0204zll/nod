@@ -368,15 +368,20 @@ export function createArtifactService(options: {
     };
     return database ? publish(database) : transact(publish);
   }
-  async function listPages(before?: string, limit = 50): Promise<{ pages: Page[]; next?: string }> {
+  async function listPages(
+    before?: string,
+    query?: string,
+    limit = 50,
+  ): Promise<{ pages: Page[]; next?: string }> {
     const rows = (
       await options.database.query(
         `SELECT * FROM (SELECT DISTINCT ON (page_id) * FROM artifacts
            WHERE owner_id=$1 AND page_id IS NOT NULL AND deleting_at IS NULL
            ORDER BY page_id,page_version DESC) latest
          WHERE ($2::timestamptz IS NULL OR created_at<$2)
+           AND ($4::text IS NULL OR strpos(lower(COALESCE(page_title,name)),lower($4))>0)
          ORDER BY created_at DESC,id LIMIT $3`,
-        [options.ownerId, before ?? null, limit + 1],
+        [options.ownerId, before ?? null, limit + 1, query ?? null],
       )
     ).rows;
     const shown = rows.slice(0, limit);

@@ -86,7 +86,7 @@ File actions appear over previews in chat and in the panel's toolbar. Videos pla
 
 ## Find a page again
 
-Every HTML page Nod makes is kept on **Pages**, outside the conversation it came from. Each one shows a small preview, its title, its version and when it was last saved. Select one to open it in the panel.
+Every HTML page Nod makes is kept on **Pages**, outside the conversation it came from. Each one shows a small preview, its title, its version and when it was last saved. Select one to open it in the panel. Pages are listed with the most recently changed first. Type in **Search** to show only the pages whose title contains those words.
 
 When you ask Nod to change a page, it saves a new version of the same page instead of a new file. Use the picker in the panel's title to open an earlier version. To ask for a change from **Pages**, select **Use in message** in the panel: Nod opens the chat with that page attached.
 

@@ -6,7 +6,15 @@ import { DataThumbnail } from '../components/attachment-card';
 import type { ImagePreview } from '../components/attachment-images';
 import { FileText, Trash2 } from '../components/icons';
 import { PageTitle } from '../components/page-title';
-import { Button, Dialog, DialogContent, DialogTitle, Loading, Notice } from '../components/ui';
+import {
+  Button,
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  Loading,
+  Notice,
+  SearchField,
+} from '../components/ui';
 import { usePageData } from '../hooks/use-page-data';
 import { api, errorMessage } from '../lib/api';
 import { attachmentKind } from '../lib/attachment-kind';
@@ -85,7 +93,14 @@ function PageCards({
 }
 
 export function Pages() {
-  const { data, error, refresh } = usePageData<PageList>('/api/pages');
+  const [query, setQuery] = useState('');
+  const [search, setSearch] = useState('');
+  useEffect(() => {
+    const timer = setTimeout(() => setSearch(query.trim()), 200);
+    return () => clearTimeout(timer);
+  }, [query]);
+  const filter = search ? `q=${encodeURIComponent(search)}` : '';
+  const { data, error, refresh } = usePageData<PageList>(`/api/pages${filter && `?${filter}`}`);
   const [older, setOlder] = useState<Page[]>([]);
   const [next, setNext] = useState<string | undefined>();
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -135,7 +150,9 @@ export function Pages() {
     setLoadingOlder(true);
     setOlderFailed(false);
     try {
-      const more = await api<PageList>(`/api/pages?before=${encodeURIComponent(next)}`);
+      const more = await api<PageList>(
+        `/api/pages?before=${encodeURIComponent(next)}${filter && `&${filter}`}`,
+      );
       setOlder((current) => [...current, ...more.pages]);
       setNext(more.next);
     } catch {
@@ -151,6 +168,14 @@ export function Pages() {
           <header className="page-heading secondary-heading">
             <PageTitle path="/pages" />
           </header>
+          <SearchField
+            className="pages-search"
+            type="search"
+            value={query}
+            placeholder="Search"
+            aria-label="Search pages by title"
+            onChange={(event) => setQuery(event.target.value)}
+          />
           <div data-analytics-private>
             {error ? (
               <>
@@ -163,6 +188,8 @@ export function Pages() {
               <div role="status">
                 <Loading label="Loading pages" />
               </div>
+            ) : !shown.length && search ? (
+              <p className="pages-no-results">No pages match “{search}”.</p>
             ) : !shown.length ? (
               <section className="pages-empty" aria-labelledby="pages-empty-title">
                 <span className="pages-empty-icon" aria-hidden="true">

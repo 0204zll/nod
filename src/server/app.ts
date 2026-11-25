@@ -706,8 +706,11 @@ export async function createApp(dependencies: AppDependencies = {}) {
       .parse(request.body);
     return artifacts.renewUploads(ids);
   });
-  app.get<{ Querystring: { before?: string } }>('/api/pages', async (request) =>
-    artifacts.listPages(z.iso.datetime().optional().parse(request.query.before)),
+  app.get<{ Querystring: { before?: string; q?: string } }>('/api/pages', async (request) =>
+    artifacts.listPages(
+      z.iso.datetime().optional().parse(request.query.before),
+      z.string().trim().min(1).max(200).optional().parse(request.query.q),
+    ),
   );
   app.get<{ Params: { id: string } }>('/api/pages/:id', async (request, reply) => {
     const versions = await artifacts.readPage(request.params.id);
