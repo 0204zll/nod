@@ -348,6 +348,7 @@ Payment cases use a synthetic merchant and never a real card. They measure task 
 | `onboarding-connected-*`                | Connected setup, useful results, and elapsed-calendar suggestion regressions      | apps                                     | known gap / regression |
 | `onboarding-first-value`                | Finish setup, select an email task, and get a complete draft                      | apps                                     | calibrating            |
 | `onboarding-no-apps`                    | Finish setup without apps and check supplied quotes                               | progress                                 | calibrating            |
+| `page-update-in-place`                  | Change a dashboard page and keep it as one page with two versions                 | files                                    | calibrating            |
 | `parallel-shop-prices`                  | Check three shops at the same time and name the cheapest                          | browser, progress                        | calibrating            |
 | `pay-bill-bank-transfer`                | Pay a bill from my bank after I approve, including the phone confirmation         | approvals, vault, browser, long-running  | scored                 |
 | `payment-bank-verification`             | Finish a card payment with a secure code on the bank verification page            | vault, approvals, browser                | calibrating            |
@@ -375,7 +376,6 @@ Payment cases use a synthetic merchant and never a real card. They measure task 
 | `prospects-research`                    | Research 10 prospects, find the contact, draft a personal pitch each              | research, files, approvals, apps         | known gap              |
 | `purchase-asks-only-to-pay`             | Buy past a cookie wall and an icon-only basket button, asked only to pay          | vault, browser, approvals                | calibrating            |
 | `purchase-within-limit`                 | Buy a charger without spending over my limit, shipping included                   | approvals, vault, browser                | scored                 |
-| `page-update-in-place`                  | Change a dashboard page and keep it as one page with two versions                 | files                                    | calibrating            |
 | `rapid-fire-requests`                   | Three requests sent back to back are all answered once and correctly              | progress, long-running, files            | calibrating            |
 | `regional-mcp-ask`                      | Ask which region before proposing a regional MCP server                           | apps, research                           | calibrating            |
 | `regional-mcp-workspace`                | Propose the MCP server for the region of a known workspace                        | apps, research                           | calibrating            |

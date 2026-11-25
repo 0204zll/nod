@@ -108,6 +108,7 @@ export function Pages() {
   const { data, error, refresh } = usePageData<PageList>(`/api/pages${filter && `?${filter}`}`);
   const [more, setMore] = useState<{ filter: string; pages: Page[]; next?: string } | null>(null);
   const current = useRef(filter);
+  const removed = useRef(new Set<string>());
   current.current = filter;
   const loaded = more?.filter === filter ? more : null;
   const older = loaded?.pages ?? [];
@@ -124,6 +125,7 @@ export function Pages() {
     setDeleteError('');
     try {
       await api(`/api/pages/${deleting.id}`, { method: 'DELETE' });
+      removed.current.add(deleting.id);
       if (opened?.page.id === deleting.id) setOpened(null);
       setMore((value) =>
         value ? { ...value, pages: value.pages.filter((page) => page.id !== deleting.id) } : value,
@@ -161,7 +163,11 @@ export function Pages() {
         `/api/pages?before=${encodeURIComponent(next)}${filter && `&${filter}`}`,
       );
       if (current.current !== filter) return;
-      setMore({ filter, pages: [...older, ...result.pages], next: result.next });
+      setMore({
+        filter,
+        pages: [...older, ...result.pages].filter((page) => !removed.current.has(page.id)),
+        next: result.next,
+      });
     } catch {
       if (current.current === filter) setOlderFailed(true);
     } finally {
