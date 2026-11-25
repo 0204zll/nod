@@ -3180,6 +3180,221 @@ test('waiting scheduled runs open their pending question without starting anothe
   assert.equal(inactive.open, true);
 });
 
+test('expanded waiting schedule run detail opens its pending question in chat (LAB-1215)', async (t) => {
+  const { JSDOM } = await import('jsdom');
+  const dom = new JSDOM('<!doctype html><div id="root"></div>', {
+    url: 'https://nod.example.test/tasks',
+    pretendToBeVisual: true,
+  });
+  const globals = {
+    window: dom.window,
+    document: dom.window.document,
+    navigator: dom.window.navigator,
+    HTMLElement: dom.window.HTMLElement,
+    Element: dom.window.Element,
+    Node: dom.window.Node,
+    Event: dom.window.Event,
+    CustomEvent: dom.window.CustomEvent,
+    MutationObserver: dom.window.MutationObserver,
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+    IS_REACT_ACT_ENVIRONMENT: true,
+  };
+  const originals = new Map(
+    Object.keys(globals).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
+  );
+  for (const [key, value] of Object.entries(globals))
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const { act, createElement } = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { pageDataCache } = await import('../src/web/lib/page-data-cache.ts');
+  const { Scheduled } = await import('../src/web/pages/tasks.tsx');
+  const root = createRoot(dom.window.document.getElementById('root')!);
+  t.after(async () => {
+    await act(async () => root.unmount());
+    pageDataCache.clear();
+    dom.window.close();
+    for (const [key, value] of originals)
+      if (value) Object.defineProperty(globalThis, key, value);
+      else Reflect.deleteProperty(globalThis, key);
+  });
+  pageDataCache.clear();
+  const scheduleId = randomUUID();
+  const completed: ScheduleRun = {
+    id: randomUUID(),
+    scheduleId,
+    title: 'Synthetic morning brief',
+    turnId: randomUUID(),
+    scheduledFor: '2035-10-25T08:00:00.000Z',
+    timeZone: 'UTC',
+    createdAt: '2035-10-25T08:00:00.000Z',
+    status: 'succeeded',
+    error: null,
+    observation: null,
+    messageId: randomUUID(),
+    messagePreview: 'Synthetic brief completed.',
+    messageText: 'Synthetic brief completed.',
+    attachmentMessageId: null,
+    costUsd: 0.42,
+  };
+  const questionId = randomUUID();
+  const checkInText = 'This work has used $5.28 so far. How should I continue?';
+  const waiting: ScheduleRun = {
+    id: randomUUID(),
+    scheduleId,
+    title: completed.title,
+    turnId: randomUUID(),
+    scheduledFor: '2035-10-26T08:00:00.000Z',
+    timeZone: 'UTC',
+    createdAt: '2035-10-26T08:00:00.000Z',
+    status: 'waiting',
+    error: null,
+    observation: null,
+    messageId: questionId,
+    messagePreview: checkInText,
+    messageText: checkInText,
+    attachmentMessageId: null,
+    costUsd: 5.28,
+  };
+  let schedule: Schedule = {
+    id: scheduleId,
+    title: completed.title,
+    prompt:
+      'Read the synthetic morning sources at https://reports.example.test and summarize them.',
+    kind: 'recurring',
+    cron: '0 8 * * *',
+    runAt: null,
+    timeZone: 'UTC',
+    enabled: true,
+    revision: 1,
+    nextRun: '2035-10-27T08:00:00.000Z',
+    lastRun: waiting,
+    activeRun: { turnId: waiting.turnId, status: 'waiting', questionMessageId: questionId },
+    baselineObservation: null,
+    watch: null,
+    monthlyUsd: null,
+    model: null,
+  };
+  const historyPath = `/api/schedule-runs?scheduleId=${schedule.id}&limit=10`;
+  let history: ScheduleHistory = { runs: [waiting, completed], nextCursor: null };
+  const mutations: string[] = [];
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, options?: RequestInit) => {
+    const path = String(input);
+    const method = options?.method ?? 'GET';
+    if (method !== 'GET') {
+      mutations.push(`${method} ${path}`);
+      return Response.json({ ok: true });
+    }
+    if (path === '/api/schedules') return Response.json([schedule]);
+    if (path === '/api/tasks') return Response.json([]);
+    if (path === '/api/apps') return Response.json([]);
+    if (path === '/api/schedules/ideas') return Response.json({ ideas: [] });
+    if (path === '/api/models')
+      return Response.json({ connections: [], selection: null, light: null, routes: {} });
+    if (path === '/api/usage/work') return Response.json({ schedules: {}, tasks: {} });
+    assert.equal(path, historyPath);
+    return Response.json(history);
+  });
+  const asked: string[] = [];
+  const focused: unknown[] = [];
+  dom.window.addEventListener('nod:focus-message', (event) =>
+    focused.push((event as CustomEvent).detail),
+  );
+  await act(async () =>
+    root.render(createElement(Scheduled, { onAsk: (text) => asked.push(text) })),
+  );
+  await act(async () => {
+    await pageDataCache.refresh('/api/schedules', true);
+    await pageDataCache.refresh(historyPath, true);
+  });
+
+  const detail = dom.window.document.querySelector<HTMLElement>('.schedule-run-detail');
+  assert.ok(detail, 'Expanded schedule must render the selected run detail.');
+  assert.match(detail.textContent ?? '', /Needs your input/);
+  assert.match(detail.textContent ?? '', /How should I continue\?/);
+
+  const openQuestion = detail.querySelector<HTMLButtonElement>('button:not(:disabled)');
+  assert.ok(
+    openQuestion,
+    'Expanded run detail for a waiting scheduled run must offer a clickable control to open its pending question in Chat.',
+  );
+  await act(async () => openQuestion.click());
+  assert.deepEqual(
+    mutations,
+    [],
+    'Opening the waiting question from run detail must not start another run.',
+  );
+  assert.deepEqual(
+    asked,
+    [],
+    'Opening the waiting question from run detail must not post a new chat request.',
+  );
+  assert.deepEqual(
+    focused,
+    [{ messageId: questionId }],
+    'Expanded run detail must focus the waiting run’s pending question in Chat.',
+  );
+
+  const resumedQuestionId = randomUUID();
+  const resumedQuestionText = 'Enter the synthetic verification code to finish the brief.';
+  const resumedWaiting: ScheduleRun = {
+    ...waiting,
+    messageId: resumedQuestionId,
+    messagePreview: resumedQuestionText,
+    messageText: resumedQuestionText,
+  };
+  schedule = {
+    ...schedule,
+    lastRun: resumedWaiting,
+    activeRun: {
+      turnId: randomUUID(),
+      status: 'waiting',
+      questionMessageId: resumedQuestionId,
+    },
+  };
+  history = { runs: [resumedWaiting, completed], nextCursor: null };
+  await act(async () => {
+    await pageDataCache.refresh('/api/schedules', true);
+    await pageDataCache.refresh(historyPath, true);
+  });
+  const resumedDetail = dom.window.document.querySelector<HTMLElement>('.schedule-run-detail');
+  assert.ok(resumedDetail);
+  const openResumedQuestion =
+    resumedDetail.querySelector<HTMLButtonElement>('button:not(:disabled)');
+  assert.ok(
+    openResumedQuestion,
+    'Expanded run detail must still open the newer question after a resumed turn pauses again.',
+  );
+  await act(async () => openResumedQuestion.click());
+  assert.deepEqual(focused, [{ messageId: questionId }, { messageId: resumedQuestionId }]);
+  assert.deepEqual(mutations, []);
+  assert.deepEqual(asked, []);
+
+  schedule = {
+    ...schedule,
+    activeRun: {
+      turnId: schedule.activeRun!.turnId,
+      status: 'waiting',
+      questionMessageId: null,
+    },
+  };
+  history = {
+    runs: [{ ...waiting, messageId: null, messagePreview: null, messageText: null }, completed],
+    nextCursor: null,
+  };
+  await act(async () => {
+    await pageDataCache.refresh('/api/schedules', true);
+    await pageDataCache.refresh(historyPath, true);
+  });
+  const unavailableDetail = dom.window.document.querySelector<HTMLElement>('.schedule-run-detail');
+  assert.ok(unavailableDetail);
+  assert.equal(
+    unavailableDetail.querySelector<HTMLButtonElement>('button:not(:disabled)'),
+    null,
+    'Expanded run detail must not enable a chat jump when no pending question message exists.',
+  );
+  assert.deepEqual(focused, [{ messageId: questionId }, { messageId: resumedQuestionId }]);
+});
+
 test(
   'schedule ideas read only the owner’s eligible messages and refresh at most once a day',
   { skip: !process.env.TEST_DATABASE_URL },
