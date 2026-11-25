@@ -2847,7 +2847,11 @@ async function initializeApplication(
           const verdict = await trust.check(
             turn,
             `NOD_${action}`,
-            { ...target, ...(botName ? { botName } : {}) },
+            {
+              ...target,
+              ...(botName ? { botName } : {}),
+              ...(update && caller ? { askedIn: `${botName}'s own chat` } : {}),
+            },
             signal,
           );
           return approvals.request(turn, `NOD_${action}`, target, {
