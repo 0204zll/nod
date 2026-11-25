@@ -438,17 +438,6 @@ test(
       assert.deepEqual(await nod.violations(), []);
     });
 
-    await t.test("/clear starts a bot's chat fresh", async () => {
-      await nod.send('/clear', { botId: penny.id });
-      const texts = (await chat(penny.id)).map(({ text }) => text);
-      assert.equal(texts[0], '/clear');
-      assert.equal(texts.length, 2);
-      await nod.send('after the fresh start', { botId: penny.id });
-      await nod.settle();
-      assert.match((await chat(penny.id)).at(-1)!.text, /^Pip: after the fresh start/);
-      assert.ok((await nod.state()).messages.every(({ text }) => text !== '/clear'));
-    });
-
     await t.test("Nod's Stop leaves a working bot alone and the bot's Stop ends it", async () => {
       const held = await nod.send('hold: compare bills', { botId: penny.id });
       await nod.running('hold: compare bills');
@@ -509,6 +498,23 @@ test(
       assert.match(
         await reply(`call: task {"action":"stop","id":"${randomUUID()}"}`),
         /belongs to another chat/,
+      );
+      const saved = await nod.api<{ path: string }>('POST', '/api/memory/notes', {
+        area: 'about',
+        text: 'Lives in Barcelona.',
+      });
+      assert.match(
+        await reply('call: memory {"action":"memory_find","args":{"query":"Barcelona"}}'),
+        new RegExp(saved.path),
+      );
+      assert.match(
+        await reply(`call: memory {"action":"memory_forget","args":{"path":"${saved.path}"}}`),
+        /only your own notes/,
+      );
+      assert.ok(
+        (await nod.api<{ notes: Array<{ path: string }> }>('GET', '/api/memory')).notes.some(
+          (note) => note.path === saved.path,
+        ),
       );
     });
 

@@ -204,8 +204,7 @@ export async function recentOwnerWords(
     reply_presentation: unknown;
     reply_withdrawn: boolean | null;
   }>(
-    `WITH cleared AS (SELECT COALESCE(CASE WHEN ${chat} IS NULL THEN (SELECT chat_cleared_at FROM threads WHERE id=$2 AND owner_id=$1)
-       ELSE (SELECT cleared_at FROM bots WHERE id=${chat} AND owner_id=$1) END,'-infinity'::timestamptz) AS at),
+    `WITH cleared AS (SELECT COALESCE((SELECT chat_cleared_at FROM threads WHERE id=$2 AND owner_id=$1),'-infinity'::timestamptz) AS at),
      visible AS NOT MATERIALIZED (SELECT m.id,m.created_at FROM messages m
          WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.hidden_at IS NULL
            AND (m.role='user' OR (m.role='assistant' AND m.turn_id IS NOT NULL))

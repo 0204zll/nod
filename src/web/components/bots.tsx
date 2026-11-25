@@ -16,6 +16,7 @@ import { LockKeyhole, Plus, Settings, X } from './icons';
 import { NodModelName, BotModel } from './model-choices';
 import { NodAvatar, BotAvatar } from './bot-avatar';
 import { Button, Dialog, DialogContent, DialogTitle, Input, Notice } from './ui';
+import { InlineName } from './inline-name';
 
 function plain(event: MouseEvent) {
   return !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0);
@@ -248,9 +249,9 @@ export function BotNav({
       <div className="bot-section">
         <div className="bot-head">
           <span>Bots</span>
-          <button type="button" className="bot-icon-button" aria-label="New bot" onClick={newBot}>
+          <Button variant="ghost" size="icon" aria-label="New bot" onClick={newBot}>
             <Plus size={16} aria-hidden="true" />
-          </button>
+          </Button>
         </div>
         {bots.length ? (
           <ul className="bot-list">
@@ -422,35 +423,6 @@ function resizedImage(file: File) {
   });
 }
 
-const generatedColors: Array<[string, string]> = [
-  ['#ff91ac', '#87003c'],
-  ['#b9a7ff', '#4b2bb3'],
-  ['#8fd3a7', '#1d6b3f'],
-  ['#ffd27a', '#9a5b00'],
-  ['#9ad2ff', '#0b5394'],
-  ['#e6c7a5', '#7a4a21'],
-];
-
-function generatedAvatar(name: string, description: string) {
-  const seed = [...description].reduce((value, char) => (value * 31 + char.charCodeAt(0)) >>> 0, 7);
-  const [from, to] = generatedColors[seed % generatedColors.length]!;
-  const canvas = document.createElement('canvas');
-  canvas.width = 256;
-  canvas.height = 256;
-  const context = canvas.getContext('2d')!;
-  const gradient = context.createLinearGradient(0, 0, 256, 256);
-  gradient.addColorStop(0, from);
-  gradient.addColorStop(1, to);
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, 256, 256);
-  context.fillStyle = 'rgba(255,255,255,0.92)';
-  context.font = '700 104px Geist, system-ui, sans-serif';
-  context.textAlign = 'center';
-  context.textBaseline = 'alphabetic';
-  context.fillText([...name.trim()][0]?.toUpperCase() ?? '?', 128, 164);
-  return canvas.toDataURL('image/webp', 0.92);
-}
-
 function AvatarMenu({
   name,
   avatar,
@@ -462,8 +434,7 @@ function AvatarMenu({
   onPick(next: string): Promise<unknown> | void;
   onClose?(): void;
 }) {
-  const [tab, setTab] = useState<'avatar' | 'generate' | 'upload'>('avatar');
-  const [description, setDescription] = useState('');
+  const [tab, setTab] = useState<'avatar' | 'upload'>('avatar');
   const [busy, setBusy] = useState(false);
   const save = (next: string | Promise<string>, done?: string) => {
     setBusy(true);
@@ -483,7 +454,6 @@ function AvatarMenu({
         {(
           [
             ['avatar', 'Avatar'],
-            ['generate', 'Generate'],
             ['upload', 'Upload'],
           ] as const
         ).map(([key, label]) => (
@@ -513,28 +483,6 @@ function AvatarMenu({
             </button>
           ))}
         </div>
-      ) : tab === 'generate' ? (
-        <div className="avatar-generate">
-          <textarea
-            className="bot-input"
-            rows={2}
-            value={description}
-            placeholder="Describe the avatar, e.g. a friendly robot in pastel colors"
-            onChange={(event) => setDescription(event.target.value)}
-          />
-          <button
-            type="button"
-            className="bot-button"
-            disabled={busy}
-            onClick={() => {
-              const value = description.trim();
-              if (!value) return toast('Describe the avatar first');
-              save(uploadAvatar(generatedAvatar(name, value)), 'Avatar generated');
-            }}
-          >
-            Generate
-          </button>
-        </div>
       ) : (
         <div className="avatar-upload">
           <label>
@@ -548,7 +496,9 @@ function AvatarMenu({
                 if (file) save(resizedImage(file).then(uploadAvatar), 'Avatar updated');
               }}
             />
-            <span className="bot-button">Choose image…</span>
+            <Button asChild variant="secondary" size="sm">
+              <span>Choose image…</span>
+            </Button>
           </label>
           <span className="avatar-hint">PNG or JPG, square works best.</span>
         </div>
@@ -685,47 +635,6 @@ export function NewBotDialog({ bots, onCreated }: { bots: Bot[]; onCreated(bot: 
   );
 }
 
-function NameField({ bot }: { bot: Bot }) {
-  const [value, setValue] = useState(bot.name);
-  const editing = useRef(false);
-  useEffect(() => {
-    if (!editing.current) setValue(bot.name);
-  }, [bot.name]);
-  function commit() {
-    editing.current = false;
-    const next = value.replace(/\s+/g, ' ').trim();
-    if (next === bot.name) return setValue(bot.name);
-    if (!next) {
-      toast('Give the bot a name.');
-      return setValue(bot.name);
-    }
-    void changeBot(bot.id, { name: next }).catch((cause) => {
-      toast(errorMessage(cause));
-      setValue(bot.name);
-    });
-  }
-  return (
-    <input
-      className="bot-name-input"
-      value={value}
-      maxLength={botNameLimit}
-      aria-label="Name"
-      onFocus={() => (editing.current = true)}
-      onChange={(event) => setValue(event.target.value)}
-      onBlur={commit}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter') event.currentTarget.blur();
-        if (event.key === 'Escape') {
-          event.stopPropagation();
-          setValue(bot.name);
-          editing.current = false;
-          requestAnimationFrame(() => event.currentTarget?.blur());
-        }
-      }}
-    />
-  );
-}
-
 function ProfileField({ bot, field }: { bot: Bot; field: 'job' | 'instructions' }) {
   const [value, setValue] = useState(bot[field]);
   const saved = useRef(bot[field]);
@@ -745,7 +654,7 @@ function ProfileField({ bot, field }: { bot: Bot; field: 'job' | 'instructions' 
   }
   useEffect(() => () => clearTimeout(timer.current), []);
   const props = {
-    className: 'bot-input',
+    className: 'input',
     value,
     onFocus: () => (focused.current = true),
     onChange: (event: { target: { value: string } }) => {
@@ -787,9 +696,9 @@ export function BotPanel({ bot, onClose }: { bot?: Bot; onClose(): void }) {
     return () => document.removeEventListener('keydown', key);
   }, [onClose]);
   const close = (
-    <button type="button" className="bot-icon-button" aria-label="Close settings" onClick={onClose}>
+    <Button variant="ghost" size="icon" aria-label="Close settings" onClick={onClose}>
       <X size={16} aria-hidden="true" />
-    </button>
+    </Button>
   );
   return (
     <aside
@@ -812,7 +721,13 @@ export function BotPanel({ bot, onClose }: { bot?: Bot; onClose(): void }) {
           )}
           <div className="panel-identity-text">
             {bot ? (
-              <NameField bot={bot} />
+              <InlineName
+                value={bot.name}
+                label="bot name"
+                save={async (name) => {
+                  await changeBot(bot.id, { name });
+                }}
+              />
             ) : (
               <>
                 <h2>Nod</h2>

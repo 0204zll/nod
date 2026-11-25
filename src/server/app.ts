@@ -38,7 +38,6 @@ import {
   resetThread,
   restartChatContext,
   clearChatContext,
-  clearBotChat,
   resumeAfterHandoff,
   stopSignal,
   messageIntakeSignal,
@@ -565,9 +564,9 @@ export async function createApp(dependencies: AppDependencies = {}) {
       `SELECT ${messageFields} FROM messages m
       LEFT JOIN messages target ON target.id=m.reply_to_message_id AND target.owner_id=m.owner_id AND target.hidden_at IS NULL
       WHERE m.owner_id=$1 AND m.thread_id=$4 AND m.hidden_at IS NULL AND ${chatScopeSql(botId)}
-        AND m.created_at>=COALESCE((SELECT b.cleared_at FROM bots b WHERE b.id=$5 AND b.owner_id=$1),'-infinity') AND ($2::timestamptz IS NULL OR date_trunc('milliseconds',m.created_at) < $2 OR (date_trunc('milliseconds',m.created_at) = $2 AND $3::uuid IS NOT NULL AND m.id < $3))
+        AND ($2::timestamptz IS NULL OR date_trunc('milliseconds',m.created_at) < $2 OR (date_trunc('milliseconds',m.created_at) = $2 AND $3::uuid IS NOT NULL AND m.id < $3))
       ORDER BY date_trunc('milliseconds',m.created_at) DESC,m.id DESC LIMIT 61`,
-      [ownerId, query.before ?? null, query.beforeId ?? null, thread.id, botId],
+      [ownerId, query.before ?? null, query.beforeId ?? null, thread.id],
     );
     const page = rows.rows.slice(0, 60);
     return {
@@ -630,6 +629,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
       .parse(request.body);
     const clientMessageId = input.clientMessageId ?? randomUUID();
     if (
+      !input.botId &&
       input.text.trim().toLowerCase() === '/clear' &&
       (!input.questionAnswer ||
         ('custom' in input.questionAnswer && input.questionAnswer.custom === true)) &&
@@ -640,7 +640,6 @@ export async function createApp(dependencies: AppDependencies = {}) {
         throw Object.assign(new Error('Send /clear as a text message without attachments.'), {
           statusCode: 400,
         });
-      if (input.botId) return clearBotChat(input.botId, clientMessageId);
       return clearChatContext(input.threadId, clientMessageId);
     }
     const signal = await messageIntakeSignal(arrival, input);

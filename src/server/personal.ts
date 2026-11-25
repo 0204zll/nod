@@ -345,13 +345,11 @@ export function createPersonalService(dependencies: PersonalDependencies) {
        docs AS (
          SELECT m.id,m.role,m.text,m.created_at,to_tsvector('english',m.text) AS v FROM messages m CROSS JOIN terms
          WHERE m.owner_id=$1 AND m.role='user' AND m.approval_answer IS NULL AND ${activeThreadSql('m')} AND m.id IS DISTINCT FROM $4::uuid AND NOT ${withdrawnSql('m')}
-           AND m.created_at>COALESCE(CASE WHEN $5::uuid IS NULL THEN (SELECT chat_cleared_at FROM threads WHERE id=m.thread_id AND owner_id=$1)
-           ELSE (SELECT cleared_at FROM bots WHERE id=$5::uuid AND owner_id=$1) END,'-infinity') AND m.bot_id IS NOT DISTINCT FROM $5::uuid
+           AND m.created_at>COALESCE((SELECT chat_cleared_at FROM threads WHERE id=m.thread_id AND owner_id=$1),'-infinity') AND m.bot_id IS NOT DISTINCT FROM $5::uuid
            AND ($3::timestamptz IS NULL OR m.created_at<$3) AND to_tsvector('english',m.text) @@ terms.q),
        weights AS (
          SELECT w,ln(1+((SELECT count(*) FROM messages m WHERE m.owner_id=$1 AND ${activeThreadSql('m')}
-           AND m.created_at>COALESCE(CASE WHEN $5::uuid IS NULL THEN (SELECT chat_cleared_at FROM threads WHERE id=m.thread_id AND owner_id=$1)
-           ELSE (SELECT cleared_at FROM bots WHERE id=$5::uuid AND owner_id=$1) END,'-infinity') AND m.bot_id IS NOT DISTINCT FROM $5::uuid)-count(*)+0.5)/(count(*)+0.5)) AS idf
+           AND m.created_at>COALESCE((SELECT chat_cleared_at FROM threads WHERE id=m.thread_id AND owner_id=$1),'-infinity') AND m.bot_id IS NOT DISTINCT FROM $5::uuid)-count(*)+0.5)/(count(*)+0.5)) AS idf
          FROM (SELECT DISTINCT lexeme AS w FROM unnest(tsvector_to_array(to_tsvector('english',$2))) lexeme) words
          JOIN docs ON docs.v @@ quote_literal(w)::tsquery GROUP BY w),
        best AS (

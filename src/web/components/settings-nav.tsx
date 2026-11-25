@@ -1,10 +1,7 @@
 import type { MouseEvent } from 'react';
 import { settingsSections } from './account-settings';
 import type { AccountControls } from './account-menu';
-import { Users } from './icons';
 import { sidebarItems } from '../lib/navigation';
-
-export const botsSettingsPath = '/settings/bots';
 
 const plain = (event: MouseEvent) =>
   !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0);
@@ -18,10 +15,7 @@ export function SettingsNav({
   account?: AccountControls;
   onNavigate(path: string): void;
 }) {
-  const pages = [
-    { path: botsSettingsPath, label: 'Bots', icon: Users },
-    ...sidebarItems.filter((item) => item.path !== '/'),
-  ];
+  const pages = sidebarItems.filter((item) => item.path !== '/');
   return (
     <nav className="settings-nav" aria-label="Settings sections">
       <h1 className="settings-nav-title">Settings</h1>

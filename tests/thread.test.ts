@@ -5309,16 +5309,6 @@ test(
             assert.doesNotMatch(texts(botWords), /Synthetic main request/);
             assert.match(texts(mainWords), /Synthetic main request/);
             assert.doesNotMatch(texts(mainWords), /Synthetic bot request/);
-            await db.pool.query('UPDATE bots SET cleared_at=now() WHERE id=$1', [bot]);
-            assert.doesNotMatch(
-              texts(await recentOwnerWords(db.pool, ownerId, threadId, [], null, chat.turnId)),
-              /Synthetic bot request/,
-            );
-            assert.match(
-              texts(await recentOwnerWords(db.pool, ownerId, threadId, [], null, next.turnId)),
-              /Synthetic main request/,
-            );
-            await db.pool.query('UPDATE bots SET cleared_at=NULL WHERE id=$1', [bot]);
 
             const scoped = await createApprovals(
               async () => ({}),

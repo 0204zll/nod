@@ -3,9 +3,8 @@ import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState }
 import { ArrowLeft } from './components/icons';
 import { Chat } from './pages/chat';
 import { BotChat } from './pages/bot-chat';
-import { BotsPage } from './pages/bots';
 import { ChatTop, BotNav, BotPanel, NewBotDialog, Toasts } from './components/bots';
-import { SettingsNav, botsSettingsPath } from './components/settings-nav';
+import { SettingsNav } from './components/settings-nav';
 import { chatUnread, readChatCursors, botIdOf, botPath, writeChatCursor } from './lib/bots';
 import { Usage } from './pages/usage';
 import { Vault } from './pages/vault';
@@ -146,16 +145,13 @@ function Workspace({
   const [panelOpen, setPanelOpen] = useState(false);
   const bots = state?.bots ?? [];
   const openBot = bots.find((bot) => bot.id === openBotId);
-  const inSettings =
-    path === botsSettingsPath ||
-    sidebarSection(path) === 'settings' ||
-    sidebarSection(path) === 'scheduled';
+  const inSettings = sidebarSection(path) === 'settings' || sidebarSection(path) === 'scheduled';
   useEffect(() => {
     const changed = () => void refresh();
     window.addEventListener('nod:bots-changed', changed);
     return () => window.removeEventListener('nod:bots-changed', changed);
   }, [refresh]);
-  const lastSettings = useRef(botsSettingsPath);
+  const lastSettings = useRef('/tasks');
   if (inSettings) lastSettings.current = path;
   const botTurns = new Set(
     (state?.activity ?? []).filter((item) => item.botId).map((item) => item.turnId),
@@ -347,16 +343,6 @@ function Workspace({
                 onFeedback={onFeedback}
               />
             )}
-            {path === botsSettingsPath && (
-              <BotsPage
-                bots={bots}
-                onNavigate={navigate}
-                onOpenSettings={(id) => {
-                  navigate(id ? botPath(id) : '/');
-                  setPanelOpen(true);
-                }}
-              />
-            )}
             {(path === '/usage' || path === '/vault') && (
               <>
                 <Usage hidden={path !== '/usage'} />
@@ -374,7 +360,6 @@ function Workspace({
             {settings}
             {!settingsPage(path) &&
               !preparedWorkId(path) &&
-              path !== botsSettingsPath &&
               !(openBotId && (openBot || !state)) &&
               !sidebarItems.some((item) => item.path === path) && (
                 <div className="empty-state">
@@ -786,7 +771,6 @@ function AccountApp({
           : (secure && (path !== '/browser' || session.capabilities.developer)) ||
               settingsPage(path) ||
               sidebarItems.some((item) => item.path === path) ||
-              path === botsSettingsPath ||
               botIdOf(path) ||
               preparedWorkId(path)
             ? path

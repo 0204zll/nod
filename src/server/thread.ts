@@ -1209,54 +1209,6 @@ export async function restartChatContext(threadId: string, turnId: string) {
   return { ok: true };
 }
 
-export async function clearBotChat(botId: string, messageId: string) {
-  const result = await transaction(async (client) => {
-    const thread = await lockThread(client);
-    if (
-      !(
-        await client.query(
-          'SELECT 1 FROM bots WHERE id=$1 AND owner_id=$2 AND archived_at IS NULL FOR UPDATE',
-          [botId, ownerId],
-        )
-      ).rowCount
-    )
-      throw httpError('This bot was removed.', 404);
-    const previous = (
-      await client.query<{ turn_id: string; owner_id: string; bot_id: string | null }>(
-        'SELECT turn_id,owner_id,bot_id FROM messages WHERE id=$1',
-        [messageId],
-      )
-    ).rows[0];
-    if (previous) {
-      if (previous.owner_id !== ownerId || previous.bot_id !== botId) throw messageIdInUse();
-      return { threadId: thread.id, turnId: previous.turn_id, messageId };
-    }
-    await cancelTurns(client, thread.id, { sessionId: botId, withdrawRequest: false });
-    const turnId = randomUUID();
-    await client.query(
-      `INSERT INTO turns(id,owner_id,thread_id,session_id,bot_id,source,source_id,message_id,prompt,channel,status,finished_at)
-       VALUES($1,$2,$3,$4,$4,'user',$5,$6,'/clear','web','succeeded',now())`,
-      [turnId, ownerId, thread.id, botId, `clear:${messageId}`, messageId],
-    );
-    await client.query(
-      'UPDATE bots SET cleared_at=clock_timestamp(),updated_at=now() WHERE id=$1 AND owner_id=$2',
-      [botId, ownerId],
-    );
-    await client.query(
-      "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,created_at) VALUES($1,$2,$3,$4,'user','/clear',clock_timestamp())",
-      [messageId, ownerId, thread.id, turnId],
-    );
-    await client.query(
-      `INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,created_at)
-       SELECT $1,$2,$3,$4,'assistant',$5,created_at+interval '1 millisecond' FROM messages WHERE id=$6`,
-      [randomUUID(), ownerId, thread.id, turnId, chatClearedMessage, messageId],
-    );
-    return { threadId: thread.id, turnId, messageId };
-  }, pool);
-  refresh();
-  return result;
-}
-
 export const chatClearedMessage =
   'Started a fresh chat. Your tasks, files, accounts and memory are still here. Previous messages are available in search.';
 
@@ -2067,7 +2019,6 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
          (u.id IS NULL OR u.session_id=$6
           OR (u.status IN ('succeeded','failed','cancelled') AND u.finished_at<=boundary.at))))
        AND m.bot_id IS NOT DISTINCT FROM (SELECT cur.bot_id FROM turns cur WHERE cur.id=$4 AND cur.owner_id=$1)
-       AND m.created_at>COALESCE((SELECT b.cleared_at FROM bots b WHERE b.id=m.bot_id AND b.owner_id=$1),'-infinity')
        ORDER BY m.created_at DESC,m.id DESC LIMIT 30) m ORDER BY created_at,id`,
       [ownerId, threadId, sourceMessageId, turn.id, Boolean(turn.background), turn.session_id],
     ),
@@ -2094,12 +2045,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
           'SELECT chat_restarted_at AS at FROM threads WHERE id=$1 AND owner_id=$2',
           [threadId, ownerId],
         )
-      : turn.bot_id && turn.session_id === turn.bot_id
-        ? pool.query<{ at: Date | null }>(
-            'SELECT cleared_at AS at FROM bots WHERE id=$1 AND owner_id=$2',
-            [turn.bot_id, ownerId],
-          )
-        : undefined,
+      : undefined,
     loadConversationLanguage(pool, ownerId, threadId),
     pool.query<{ id: string; uid: number; name: string; job: string; instructions: string }>(
       'SELECT id,uid,name,job,instructions FROM bots WHERE owner_id=$1 AND archived_at IS NULL ORDER BY created_at,id',

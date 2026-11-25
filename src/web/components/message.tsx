@@ -52,13 +52,7 @@ import { TelegramChatLink, useTelegramChatUrl } from './telegram-chat-link';
 import { BrowserHandoff } from './browser-handoff';
 import { MessageAttachments } from './attachment-card';
 import { AudioPlayer } from './audio-player';
-import {
-  AnswerChoices,
-  ChoiceAnswer,
-  QuickChoices,
-  quickChoices,
-  type AnswerChoicesProps,
-} from './answer-choices';
+import { AnswerChoices, ChoiceAnswer, type AnswerChoicesProps } from './answer-choices';
 import { ApprovalCard, ApprovalChoiceCard, ApprovalFields, CodeRequestCard } from './action-card';
 import { MessageLinkTooltip } from './message-link-tooltip';
 import { Tooltip } from './tooltip';
@@ -371,7 +365,6 @@ export function MessageBubble({
   replyFrom,
   avatar,
   speakerName = 'Nod',
-  replyPills = false,
 }: {
   message: Message;
   work?: MessageWork;
@@ -379,7 +372,6 @@ export function MessageBubble({
   replyFrom?: string;
   avatar?: ReactNode;
   speakerName?: string;
-  replyPills?: boolean;
   pendingAudio?: ImagePreview;
   connectedAppIds?: ReadonlySet<string>;
   grouped?: boolean;
@@ -404,14 +396,8 @@ export function MessageBubble({
     (message.role === 'user' ? message.displayText : undefined) ??
     message.audioCaption ??
     message.text;
-  const quick =
-    replyPills &&
-    message.role === 'assistant' &&
-    !streaming &&
-    !message.approval &&
-    quickChoices(message.answerChoices);
   const card =
-    message.role !== 'assistant' || streaming || quick
+    message.role !== 'assistant' || streaming
       ? null
       : message.approval && !message.approval.fields
         ? 'approval'
@@ -1002,15 +988,6 @@ export function MessageBubble({
             )}
           </div>
         </div>
-        {quick && (
-          <QuickChoices
-            key={message.id}
-            choices={message.answerChoices!}
-            answer={message.choiceAnswer}
-            disabled={answersDisabled}
-            onAnswer={message.answerChoicesPending ? onAnswer : undefined}
-          />
-        )}
         {task && <div className="message-task">{task}</div>}
         {message.role === 'assistant' && !streaming && message.presentation?.type === 'apps' && (
           <MessagePresentation value={message.presentation} messageId={message.id} />

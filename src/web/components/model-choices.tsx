@@ -411,7 +411,7 @@ export function BotModel({ bot, onError }: { bot: Bot; onError(message: string):
   const data = models.data;
   if (!data)
     return (
-      <select className="inp selr" disabled aria-label="Model">
+      <select className="input" disabled aria-label="Model">
         <option>…</option>
       </select>
     );
@@ -432,7 +432,7 @@ export function BotModel({ bot, onError }: { bot: Bot; onError(message: string):
   const value = own ? `${own.connectionId}/${own.modelId}` : '';
   return (
     <select
-      className="inp selr"
+      className="input"
       aria-label="Model"
       value={value}
       onChange={(event) => {
