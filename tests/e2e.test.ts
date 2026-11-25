@@ -526,6 +526,8 @@ test(
         ['Pip', 'Quill'],
       );
       await assert.rejects(nod.send('are you there?', { botId: scout.id }), /404/);
+      await assert.rejects(nod.api('DELETE', '/api/bots/nod'), /400/);
+      await assert.rejects(nod.api('POST', '/api/bots', { name: ' NOD ', model }), /409/);
       for (let i = 0; i < 50; i++) {
         const [row] = await nod.query<{ retired: boolean }>(
           'SELECT retired_at IS NOT NULL AS retired FROM bots WHERE id=$1',
