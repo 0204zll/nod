@@ -660,7 +660,7 @@ export function NewBotDialog({ bots, onCreated }: { bots: Bot[]; onCreated(bot: 
           }}
         >
           <div className="new-bot-identity">
-            <BotAvatar name={name || '?'} avatar={avatar} size="lg" />
+            <BotAvatar name={name.trim() || 'A'} avatar={avatar} size="lg" />
             <Input
               autoFocus
               aria-label="Name"
@@ -674,7 +674,7 @@ export function NewBotDialog({ bots, onCreated }: { bots: Bot[]; onCreated(bot: 
               }}
             />
           </div>
-          <AvatarMenu name={name || '?'} avatar={avatar} onPick={setAvatar} />
+          <AvatarMenu name={name.trim() || 'A'} avatar={avatar} onPick={setAvatar} />
           {error && <Notice kind="error">{error}</Notice>}
           <Button type="submit" disabled={busy || !name.trim()}>
             {busy ? 'Creating…' : 'Create'}

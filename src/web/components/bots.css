@@ -584,6 +584,10 @@
   font: inherit;
   font-size: 12.5px;
   cursor: pointer;
+  transition:
+    background-color 150ms ease,
+    color 150ms ease,
+    box-shadow 150ms ease;
 }
 .avatar-tabs button[aria-selected='true'] {
   background: var(--surface);
@@ -602,10 +606,15 @@
   border-radius: 50%;
   background: none;
   cursor: pointer;
-  transition: transform 160ms var(--ease-enter);
+  transition:
+    transform 160ms var(--ease-enter),
+    border-color 150ms ease;
 }
 .avatar-pick button:hover {
   transform: scale(1.08);
+}
+.avatar-pick button:active:not(:disabled) {
+  transform: scale(0.94);
 }
 .avatar-pick button[aria-pressed='true'] {
   border-color: var(--accent);
@@ -1428,6 +1437,12 @@ input.bot-input {
 .new-bot-dialog form > .button {
   align-self: flex-end;
 }
+.avatar-menu-inline .avatar-pick {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  justify-items: center;
+  row-gap: 8px;
+}
 .avatar-menu-inline {
   position: static;
   width: auto;
@@ -1436,4 +1451,62 @@ input.bot-input {
   background: none;
   box-shadow: none;
   animation: none;
+}
+.av-changed {
+  animation: bot-pop 220ms var(--ease-enter);
+}
+.dialog-overlay:has(+ .new-bot-dialog) {
+  animation: bot-fade 200ms ease;
+}
+.new-bot-dialog[data-state='open'] {
+  animation: new-bot-in 240ms var(--ease-enter);
+}
+.new-bot-dialog[data-state='closed'] {
+  animation: new-bot-out 150ms var(--ease-enter);
+}
+.new-bot-dialog .notice {
+  animation: bot-rise 200ms var(--ease-enter);
+}
+.new-bot-dialog form > .button {
+  transition:
+    transform 160ms var(--ease-enter),
+    opacity 150ms ease,
+    background-color 150ms ease;
+}
+.new-bot-dialog form > .button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+@keyframes new-bot-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.96);
+  }
+}
+@keyframes new-bot-out {
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.98);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .av-changed,
+  .new-bot-dialog .notice {
+    animation: none;
+  }
+  .new-bot-dialog[data-state='open'] {
+    animation-name: bot-fade;
+  }
+  .new-bot-dialog[data-state='closed'] {
+    animation-name: new-bot-fade-out;
+  }
+  .avatar-pick button:hover,
+  .avatar-pick button:active:not(:disabled),
+  .new-bot-dialog form > .button:active:not(:disabled) {
+    transform: none;
+  }
+}
+@keyframes new-bot-fade-out {
+  to {
+    opacity: 0;
+  }
 }
