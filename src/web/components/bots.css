@@ -470,7 +470,8 @@
   flex-direction: column;
   min-width: 0;
 }
-.panel-identity-text h2 {
+.panel-identity-text h2,
+.panel-identity-text .inline-name {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
