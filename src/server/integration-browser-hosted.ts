@@ -21,12 +21,11 @@ export const integrationPageStyle = `:root{color-scheme:light dark;--ink:light-d
 export function integrationNotice(brokerOrigin: string, app?: string) {
   const label = app?.trim();
   const name = label ? escapeHtml(label) : undefined;
-  const service =
-    brokerOrigin === defaultConnectionService ? 'n8n' : escapeHtml(new URL(brokerOrigin).host);
-  const kept =
-    service === 'n8n'
-      ? 'Composio can keep a copy for up to a year.'
-      : 'That service sets what Composio keeps.';
+  const managed = brokerOrigin === defaultConnectionService;
+  const service = managed ? 'n8n' : escapeHtml(new URL(brokerOrigin).host);
+  const kept = managed
+    ? 'Composio can keep a copy for up to a year.'
+    : 'That service sets what Composio keeps.';
   return {
     title: name ? `Connect ${name}` : 'Connect your app',
     button: name ? `Continue to ${name}` : 'Continue to sign in',
