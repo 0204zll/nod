@@ -50,7 +50,7 @@ import { createSandbox } from '../src/providers/pi/sandbox.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createLocalFiles, localFileRules } from '../src/server/local-files.ts';
 import { computerAppRule, createComputerUse, systemShortcut } from '../src/server/computer-use.ts';
-import { fileBytes } from '../src/shared/files.ts';
+import { fileBytes, stagedWorkspaceFile, uploadFileName } from '../src/shared/files.ts';
 import type { Pool } from 'pg';
 
 if (process.env.NOD_TEST_WORKSPACE_IMAGE)
@@ -807,6 +807,39 @@ test('workspace uploads transfer binary chunks atomically and reject symlink dir
       workspace.readArtifact('fixture', 'nested/file.bin', bytes.length - 1),
       /workspace file operation failed/,
     );
+    const firstStaged = stagedWorkspaceFile(randomUUID(), '2026_11_12_Synthetic Site Photos_Test');
+    const secondStaged = stagedWorkspaceFile(randomUUID(), '2026_11_12_Synthetic Site Photos_Test');
+    assert.notEqual(firstStaged, secondStaged);
+    assert.equal(basename(firstStaged), '2026_11_12_Synthetic Site Photos_Test');
+    await workspace.writeArtifact('fixture', firstStaged, Buffer.from('first staged copy'));
+    await workspace.writeArtifact('fixture', secondStaged, Buffer.from('second staged copy'));
+    assert.equal(
+      Buffer.from(await workspace.readArtifact('fixture', firstStaged, 1024)).toString('utf8'),
+      'first staged copy',
+    );
+    assert.equal(
+      Buffer.from(await workspace.readArtifact('fixture', secondStaged, 1024)).toString('utf8'),
+      'second staged copy',
+    );
+    assert.equal(
+      stagedWorkspaceFile('id-1', 'C:\\Users\\synthetic\\report.pdf'),
+      'id-1/report.pdf',
+    );
+    for (const unsafe of ['', '   ', '.', '..', '/', 'folder/..', '.\x00.'])
+      assert.equal(stagedWorkspaceFile('id-1', unsafe), 'id-1/file');
+    assert.throws(() => stagedWorkspaceFile('../escape', 'report.pdf'), /identifier/);
+    assert.equal(uploadFileName('Custom Report.pdf'), 'Custom Report.pdf');
+    for (const invalid of [
+      '',
+      '   ',
+      '.',
+      '..',
+      'a/b.txt',
+      'a\\b.txt',
+      'a\nb.txt',
+      'x'.repeat(201),
+    ])
+      assert.throws(() => uploadFileName(invalid), /plain upload filename/);
   } finally {
     await workspace.dispose();
     await f.close();

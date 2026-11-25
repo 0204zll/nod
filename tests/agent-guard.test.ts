@@ -2490,6 +2490,128 @@ test('links navigate without a check unless they send a known form', async () =>
   assert.deepEqual(seen, ['@form-link', '@button']);
 });
 
+test('browser upload preserves staged filenames, supports an explicit name and rejects invalid names', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-upload-runtime-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const attachmentId = randomUUID();
+  const attachmentPath = join(directory, attachmentId, 'photo.png');
+  const stagedPath = `${randomUUID()}/2026_11_12_Synthetic Site Photos_Test.txt`;
+  const bytes = Buffer.from('Synthetic staged upload');
+  const imageBytes = Buffer.from('synthetic-png');
+  const readPaths: string[] = [];
+  const checkedSteps: Array<Record<string, unknown>> = [];
+  const uploads: Array<{ selector: string; name: string; bytes: string }> = [];
+  const prompts: string[] = [];
+  let workspaceReads = 0;
+  await fixture(
+    async () => {},
+    {
+      workspacePath: directory,
+      attachments: [
+        {
+          id: attachmentId,
+          path: attachmentPath,
+          mimeType: 'image/png',
+          workspaceFile: `/workspace/synthetic/${attachmentId}/photo.png`,
+        },
+      ],
+      readWorkspaceFile: async (path) => {
+        workspaceReads++;
+        assert.equal(path, stagedPath);
+        return bytes;
+      },
+      browserStep: async ({ step }) => {
+        checkedSteps.push({ ...step });
+        return 'run';
+      },
+    },
+    {
+      workspace: fakeWorkspace({
+        readArtifact: async (_thread, path) => {
+          readPaths.push(path);
+          return imageBytes;
+        },
+      }),
+      computer: fakeComputer({
+        currentPage: async () => ({
+          origin: 'https://projects.example.test',
+          url: 'https://projects.example.test/files',
+          controls: [{ role: 'button', name: 'Upload Files' }],
+        }),
+        upload: async (_id, input) => {
+          uploads.push({
+            selector: input.selector,
+            name: input.name,
+            bytes: Buffer.from(input.bytes).toString('utf8'),
+          });
+          return { url: 'https://projects.example.test/files', text: `Uploaded ${input.name}` };
+        },
+      }),
+      agent: {
+        open: async (options) => ({
+          resumed: false,
+          abort() {},
+          dispose() {},
+          prompt: async (text) => {
+            prompts.push(text);
+            const tools = new Map(options.tools.map((item) => [item.name, item]));
+            await call(tools, 'browser', {
+              action: 'upload',
+              selector: '@e4',
+              path: stagedPath,
+            });
+            await call(tools, 'browser', {
+              action: 'upload',
+              selector: '@e4',
+              path: stagedPath,
+              name: 'Custom Report.txt',
+            });
+            const readsBeforeInvalid = workspaceReads;
+            for (const invalid of ['../escape.txt', 'dir/file.txt', '..', '   '])
+              await assert.rejects(
+                call(tools, 'browser', {
+                  action: 'upload',
+                  selector: '@e4',
+                  path: stagedPath,
+                  name: invalid,
+                }),
+                /plain upload filename/,
+              );
+            assert.equal(workspaceReads, readsBeforeInvalid);
+            options.onEvent({ type: 'final', text: 'Uploaded.' });
+          },
+        }),
+        dispose() {},
+      },
+    },
+  );
+  assert.deepEqual(readPaths, [`${attachmentId}/photo.png`]);
+  const data = JSON.parse(prompts[0]!.split('Request data (JSON):\n')[1]!.split('\n\n')[0]!);
+  assert.deepEqual(data.workspaceAttachments, [
+    {
+      name: 'photo.png',
+      mimeType: 'image/png',
+      workspaceFile: `/workspace/synthetic/${attachmentId}/photo.png`,
+    },
+  ]);
+  assert.deepEqual(checkedSteps, [
+    { action: 'upload', selector: '@e4', path: stagedPath },
+    { action: 'upload', selector: '@e4', path: stagedPath, name: 'Custom Report.txt' },
+  ]);
+  assert.deepEqual(uploads, [
+    {
+      selector: '@e4',
+      name: '2026_11_12_Synthetic Site Photos_Test.txt',
+      bytes: 'Synthetic staged upload',
+    },
+    {
+      selector: '@e4',
+      name: 'Custom Report.txt',
+      bytes: 'Synthetic staged upload',
+    },
+  ]);
+});
+
 test('browser handoff requires a live page, binds its session and stops further work without a link', async () => {
   const sessionId = randomUUID();
   let opened = false;

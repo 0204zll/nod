@@ -731,6 +731,40 @@ test('browser upload wording omits the private workspace path', async () => {
   assert.doesNotMatch(result.question, /\/workspace\/private/);
   assert.equal(proposal.args.target, 'synthetic-opaque-page-id');
   assert.deepEqual(proposal.args.command, command);
+
+  const renamedCommand = {
+    action: 'upload',
+    selector: '@e3',
+    path: `${randomUUID()}/report.pdf`,
+    name: 'Renamed Report.pdf',
+  };
+  const renamedProposal: ApprovalDescription = {
+    ...proposal,
+    args: {
+      ...proposal.args,
+      file: 'Renamed Report.pdf',
+      command: renamedCommand,
+    },
+  };
+  const renamedCommunication = createCommunication({
+    pool: { query: async () => ({ rows: [] }) } as unknown as pg.Pool,
+    ownerId: 'synthetic-owner',
+    review: async (_instructions, input) => {
+      const request = input as Record<string, any>;
+      assert.equal(request.data.args.file, 'Renamed Report.pdf');
+      assert.equal(request.data.args.command.path, undefined);
+      assert.equal(request.data.args.command.name, undefined);
+      assert.equal(request.data.args.command.action, 'upload');
+      if (request.purpose === 'confirmation_review') return { valid: true };
+      return {
+        text: 'Can I upload Renamed Report.pdf to files.example.test?',
+        action: 'Upload report',
+      };
+    },
+  });
+  const renamedResult = await renamedCommunication.describe(renamedProposal);
+  assert.match(visibleMarkdownText(renamedResult.question), /Renamed Report\.pdf/);
+  assert.deepEqual(renamedProposal.args.command, renamedCommand);
 });
 
 test('confirmation reviews the text after private links and direction controls are removed', async () => {

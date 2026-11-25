@@ -1081,7 +1081,7 @@ export function createAgentRuntime(dependencies: {
                 ? Buffer.from(
                     await dependencies.workspace.readArtifact(
                       threadId,
-                      relative(root, path),
+                      relative(root, path).split(sep).join('/'),
                       limit,
                       'attachment',
                     ),

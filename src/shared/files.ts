@@ -17,6 +17,31 @@ export function fileName(name: string) {
   return stem + extension;
 }
 
+export function stagedWorkspaceFile(id: string, name: string) {
+  if (!id || /[/\\\u0000-\u001f\u007f]/.test(id) || id === '.' || id === '..')
+    throw new Error('A staged file identifier is required.');
+  const clean = name
+    .replaceAll('\\', '/')
+    .replace(/\/+$/, '')
+    .split('/')
+    .at(-1)!
+    .replace(/[\u0000-\u001f\u007f]/g, '');
+  const safe = !clean.trim() || clean === '.' || clean === '..' ? 'file' : fileName(clean);
+  return `${id}/${safe}`;
+}
+
+export function uploadFileName(name: string) {
+  if (
+    !name.trim() ||
+    /[/\\\u0000-\u001f\u007f]/.test(name) ||
+    name === '.' ||
+    name === '..' ||
+    name.length > 200
+  )
+    throw new Error('A plain upload filename is required.');
+  return name;
+}
+
 const mimeTypes: Record<string, string> = {
   '.txt': 'text/plain',
   '.md': 'text/markdown',
