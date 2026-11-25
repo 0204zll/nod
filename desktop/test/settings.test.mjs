@@ -258,6 +258,12 @@ test('artifact filenames cannot escape Downloads and ordinary names keep their e
     ['Résumé 2026.pdf', 'Résumé 2026.pdf'],
     ['archive.tar.gz', 'archive.tar.gz'],
     ['archive.tar.gz', 'archive.tar (1).gz'],
+    [`${'a'.repeat(251)}.pdf`, `${'a'.repeat(251)}.pdf`],
+    [`${'a'.repeat(251)}.pdf`, `${'a'.repeat(247)} (1).pdf`],
+    [`${'ä'.repeat(125)}a.pdf`, `${'ä'.repeat(125)}a.pdf`],
+    [`${'ä'.repeat(125)}a.pdf`, `${'ä'.repeat(123)} (1).pdf`],
+    [`a.${'b'.repeat(253)}`, `a.${'b'.repeat(253)}`],
+    [`a.${'b'.repeat(253)}`, `a.${'b'.repeat(249)} (1)`],
   ]) {
     const { item } = f.start({ getFilename: () => input });
     await writeFile(item.savedPath, 'synthetic artifact');
@@ -9107,6 +9113,45 @@ test('artifact exports keep owned bytes, safe names, separate saves and restrict
     assert.equal((await files.prepare(randomUUID())).name, 'report_Q4_.pdf');
     filename = 'CON.pdf';
     assert.equal((await files.prepare(randomUUID())).name, '_CON.pdf');
+    filename = `${'a'.repeat(251)}.pdf`;
+    const maxAsciiId = randomUUID();
+    await files.save(maxAsciiId);
+    await files.save(maxAsciiId);
+    assert.equal(
+      await readFile(join(root, 'Downloads', `${'a'.repeat(251)}.pdf`), 'utf8'),
+      'synthetic PDF bytes',
+    );
+    assert.equal(
+      await readFile(join(root, 'Downloads', `${'a'.repeat(247)} (1).pdf`), 'utf8'),
+      'synthetic PDF bytes',
+    );
+    filename = `${'ä'.repeat(125)}a.pdf`;
+    const maxUtf8Id = randomUUID();
+    await files.save(maxUtf8Id);
+    await files.save(maxUtf8Id);
+    assert.equal(
+      await readFile(join(root, 'Downloads', `${'ä'.repeat(125)}a.pdf`), 'utf8'),
+      'synthetic PDF bytes',
+    );
+    assert.equal(
+      await readFile(join(root, 'Downloads', `${'ä'.repeat(123)} (1).pdf`), 'utf8'),
+      'synthetic PDF bytes',
+    );
+    filename = `CON.${'a'.repeat(247)}.pdf`;
+    const maxReservedId = randomUUID();
+    const maxReserved = await files.prepare(maxReservedId);
+    assert.equal(maxReserved.name, `_CON.${'a'.repeat(246)}.pdf`);
+    assert.equal(canOpenArtifact(maxReserved), true);
+    await files.save(maxReservedId);
+    await files.save(maxReservedId);
+    assert.equal(
+      await readFile(join(root, 'Downloads', `_CON.${'a'.repeat(246)}.pdf`), 'utf8'),
+      'synthetic PDF bytes',
+    );
+    assert.equal(
+      await readFile(join(root, 'Downloads', `_CON.${'a'.repeat(242)} (1).pdf`), 'utf8'),
+      'synthetic PDF bytes',
+    );
     const pinnedId = randomUUID();
     const pinned = await files.path(pinnedId);
     const evicted = await files.prepare(randomUUID());

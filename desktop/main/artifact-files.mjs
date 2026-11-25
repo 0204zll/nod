@@ -3,6 +3,31 @@ import { copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 
+const maxNameBytes = 255;
+const utf8 = new TextEncoder();
+
+export function downloadFileName(name, suffix = 0) {
+  const tag = suffix ? ` (${suffix})` : '';
+  const tagBytes = utf8.encode(tag).byteLength;
+  const rawExtension = extname(name);
+  if (utf8.encode(name).byteLength + tagBytes <= maxNameBytes) {
+    if (!tag) return name;
+    return `${name.slice(0, name.length - rawExtension.length)}${tag}${rawExtension}`;
+  }
+  const extension =
+    rawExtension.length <= 16 && utf8.encode(rawExtension).byteLength + tagBytes < maxNameBytes
+      ? rawExtension
+      : '';
+  let room = maxNameBytes - utf8.encode(extension).byteLength - tagBytes;
+  let stem = '';
+  for (const character of name.slice(0, name.length - extension.length)) {
+    room -= utf8.encode(character).byteLength;
+    if (room < 0) break;
+    stem += character;
+  }
+  return `${stem}${tag}${extension}`;
+}
+
 export function createArtifactFiles({ temporary, downloads, fetchArtifact }) {
   let root;
   const shutdown = new AbortController();
@@ -54,7 +79,9 @@ export function createArtifactFiles({ temporary, downloads, fetchArtifact }) {
         } catch {}
         name = basename(name.replaceAll('\\', '/')).replace(/[\x00-\x1f\x7f]/g, '');
         name = name.replace(/[<>:"|?*]/g, '_').replace(/[. ]+$/g, '');
-        if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) name = `_${name}`;
+        name = downloadFileName(name).replace(/[. ]+$/g, '');
+        if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name))
+          name = downloadFileName(`_${name}`).replace(/[. ]+$/g, '');
         if (!name || name === '.' || name === '..') name = 'download';
         let directory;
         try {
@@ -109,10 +136,8 @@ export function createArtifactFiles({ temporary, downloads, fetchArtifact }) {
       try {
         const file = await pending;
         await mkdir(downloads, { recursive: true });
-        const extension = extname(file.name);
-        const stem = file.name.slice(0, file.name.length - extension.length);
         for (let suffix = 0; ; suffix++) {
-          const path = join(downloads, suffix ? `${stem} (${suffix})${extension}` : file.name);
+          const path = join(downloads, downloadFileName(file.name, suffix));
           try {
             await copyFile(file.path, path, constants.COPYFILE_EXCL);
             saved.set(id, path);
