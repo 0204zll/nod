@@ -1,4 +1,5 @@
 import {
+  Suspense,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -15,7 +16,8 @@ import { botActivity, botLine, botPath, type Bot } from '../lib/bots';
 import { LockKeyhole, Plus, Settings, X } from './icons';
 import { NodModelName, BotModel } from './model-choices';
 import { NodAvatar, BotAvatar } from './bot-avatar';
-import { Button, Dialog, DialogContent, DialogTitle, Input, Notice } from './ui';
+import { Button, Dialog, DialogContent, DialogTitle, Input, Loading, Notice } from './ui';
+import { EmojiCatalog } from './emoji-picker';
 import { InlineName } from './inline-name';
 
 function plain(event: MouseEvent) {
@@ -424,17 +426,13 @@ function resizedImage(file: File) {
 }
 
 function AvatarMenu({
-  name,
-  avatar,
   onPick,
   onClose,
 }: {
-  name: string;
-  avatar: string;
   onPick(next: string): Promise<unknown> | void;
   onClose?(): void;
 }) {
-  const [tab, setTab] = useState<'avatar' | 'upload'>('avatar');
+  const [tab, setTab] = useState<'emoji' | 'upload'>('emoji');
   const [busy, setBusy] = useState(false);
   const save = (next: string | Promise<string>, done?: string) => {
     setBusy(true);
@@ -453,7 +451,7 @@ function AvatarMenu({
       <div className="avatar-tabs" role="tablist">
         {(
           [
-            ['avatar', 'Avatar'],
+            ['emoji', 'Emoji'],
             ['upload', 'Upload'],
           ] as const
         ).map(([key, label]) => (
@@ -468,20 +466,11 @@ function AvatarMenu({
           </button>
         ))}
       </div>
-      {tab === 'avatar' ? (
-        <div className="avatar-pick">
-          {(['', ...botEmojis] as const).map((emoji) => (
-            <button
-              key={emoji || 'initial'}
-              type="button"
-              aria-pressed={avatar === emoji}
-              aria-label={emoji || 'First letter'}
-              disabled={busy}
-              onClick={() => save(emoji)}
-            >
-              <BotAvatar name={name} avatar={emoji} />
-            </button>
-          ))}
+      {tab === 'emoji' ? (
+        <div className="avatar-catalog">
+          <Suspense fallback={<Loading />}>
+            <EmojiCatalog autoFocus={false} onSelect={(emoji) => !busy && save(emoji)} />
+          </Suspense>
         </div>
       ) : (
         <div className="avatar-upload">
@@ -552,9 +541,7 @@ function AvatarField({
       >
         <BotAvatar name={name} avatar={avatar} size="lg" />
       </button>
-      {open && (
-        <AvatarMenu name={name} avatar={avatar} onPick={onPick} onClose={() => setOpen(false)} />
-      )}
+      {open && <AvatarMenu onPick={onPick} onClose={() => setOpen(false)} />}
     </span>
   );
 }
@@ -624,7 +611,7 @@ export function NewBotDialog({ bots, onCreated }: { bots: Bot[]; onCreated(bot: 
               }}
             />
           </div>
-          <AvatarMenu name={name.trim() || 'A'} avatar={avatar} onPick={setAvatar} />
+          <AvatarMenu onPick={setAvatar} />
           {error && <Notice kind="error">{error}</Notice>}
           <Button type="submit" disabled={busy || !name.trim()}>
             {busy ? 'Creating…' : 'Create'}

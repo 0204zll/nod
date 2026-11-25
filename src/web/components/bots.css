@@ -510,7 +510,7 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  width: 276px;
+  width: 320px;
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -545,30 +545,6 @@
   box-shadow: var(--shadow-sm);
   color: var(--foreground);
   font-weight: 500;
-}
-.avatar-pick {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.avatar-pick button {
-  padding: 2px;
-  border: 2px solid transparent;
-  border-radius: 50%;
-  background: none;
-  cursor: pointer;
-  transition:
-    transform 160ms var(--ease-enter),
-    border-color 150ms ease;
-}
-.avatar-pick button:hover {
-  transform: scale(1.08);
-}
-.avatar-pick button:active:not(:disabled) {
-  transform: scale(0.94);
-}
-.avatar-pick button[aria-pressed='true'] {
-  border-color: var(--accent);
 }
 .avatar-upload {
   display: flex;
@@ -1062,12 +1038,6 @@ button.panel-row-head {
 .new-bot-dialog form > .button {
   align-self: flex-end;
 }
-.avatar-menu-inline .avatar-pick {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  justify-items: center;
-  row-gap: 8px;
-}
 .avatar-menu-inline {
   position: static;
   width: auto;
@@ -1124,8 +1094,6 @@ button.panel-row-head {
   .new-bot-dialog[data-state='closed'] {
     animation-name: new-bot-fade-out;
   }
-  .avatar-pick button:hover,
-  .avatar-pick button:active:not(:disabled),
   .new-bot-dialog form > .button:active:not(:disabled) {
     transform: none;
   }
@@ -1134,4 +1102,9 @@ button.panel-row-head {
   to {
     opacity: 0;
   }
+}
+.avatar-catalog {
+  height: 280px;
+  overflow: hidden;
+  border-radius: 10px;
 }
