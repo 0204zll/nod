@@ -38,7 +38,15 @@ const thumbnailKinds = new Set([
   'data-page',
 ]);
 
-function DataThumbnail({ item, kind }: { item: ImagePreview; kind: DataKind }) {
+export function DataThumbnail({
+  item,
+  kind,
+  wide = false,
+}: {
+  item: ImagePreview;
+  kind: DataKind;
+  wide?: boolean;
+}) {
   const element = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   useEffect(() => {
@@ -60,7 +68,12 @@ function DataThumbnail({ item, kind }: { item: ImagePreview; kind: DataKind }) {
     return () => observer.disconnect();
   }, []);
   return (
-    <div className="attachment-card-preview is-data" ref={element} aria-hidden="true" inert>
+    <div
+      className={`attachment-card-preview is-data${wide ? ' is-wide' : ''}`}
+      ref={element}
+      aria-hidden="true"
+      inert
+    >
       {visible && (
         <div className="attachment-card-preview-content">
           <Suspense fallback={null}>
@@ -212,7 +225,7 @@ function DocumentCard({
           onThumbnail={setThumbnail}
         />
       )}
-      {dataThumbnail && <DataThumbnail item={item} kind={kind as DataKind} />}
+      {dataThumbnail && <DataThumbnail item={item} kind={kind as DataKind} wide={wide} />}
       <button
         type="button"
         className="attachment-card-open"

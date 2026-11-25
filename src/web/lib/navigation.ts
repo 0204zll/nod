@@ -10,12 +10,12 @@ import {
 
 export const sidebarItems = [
   { path: '/', label: 'Chat', key: '1', icon: MessageCircle },
+  { path: '/pages', label: 'Pages', key: '7', icon: FileText },
   { path: '/tasks', label: 'Scheduled', key: '2', icon: CalendarClock },
   { path: '/apps', label: 'Apps', key: '3', icon: Blocks },
   { path: '/channels', label: 'Channels', key: '4', icon: Send },
   { path: '/usage', label: 'Usage', key: '5', icon: Gauge },
   { path: '/vault', label: 'Vault', key: '6', icon: Vault },
-  { path: '/pages', label: 'Pages', key: '7', icon: FileText },
 ] as const;
 
 type NavigationGuard = (path: string, proceed: () => void) => boolean;

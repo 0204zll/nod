@@ -1,14 +1,16 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ComponentProps } from 'react';
 import { pageTypes } from '../../shared/contracts';
 import type { Page, PageType, PageVersion } from '../../shared/contracts';
 import { useArtifactDrawer } from '../components/artifact-context';
 import { ArtifactWorkspace } from '../components/artifact-drawer';
+import { DataThumbnail } from '../components/attachment-card';
 import type { ImagePreview } from '../components/attachment-images';
 import { ChartColumn, FileText, Presentation } from '../components/icons';
 import { PageTitle } from '../components/page-title';
 import { Button, Loading, Notice } from '../components/ui';
 import { usePageData } from '../hooks/use-page-data';
 import { api } from '../lib/api';
+import { attachmentKind } from '../lib/attachment-kind';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
 import { navigate } from '../lib/navigation';
 import './pages.css';
@@ -18,6 +20,8 @@ const types = {
   data: { label: 'Data', icon: ChartColumn },
   slides: { label: 'Slides', icon: Presentation },
 } satisfies Record<PageType, { label: string; icon: typeof FileText }>;
+
+type ThumbnailKind = ComponentProps<typeof DataThumbnail>['kind'];
 
 interface PageList {
   pages: Page[];
@@ -51,22 +55,32 @@ function PageRows({
     }
   };
   return (
-    <ul className="pages-list">
-      {pages.map((page) => (
-        <li key={page.id}>
-          <button type="button" className="pages-row" onClick={() => void open(page)}>
-            <span className="pages-row-type" aria-hidden="true">
-              <Icon type={page.type} />
-            </span>
-            <span className="pages-row-title">{page.title}</span>
-            <span className="pages-row-meta">
-              {types[page.type].label} · Version {page.version} ·{' '}
-              <time dateTime={page.createdAt}>{formatDateTime(page.createdAt, format)}</time>
-            </span>
-          </button>
-          {failed === page.id && <Notice>This page could not be opened. Try again.</Notice>}
-        </li>
-      ))}
+    <ul className="pages-grid">
+      {pages.map((page) => {
+        const kind = attachmentKind(page.artifact.mimeType, page.artifact.name);
+        return (
+          <li key={page.id}>
+            <button type="button" className="pages-card" onClick={() => void open(page)}>
+              {kind ? (
+                <DataThumbnail item={page.artifact} kind={kind as ThumbnailKind} wide />
+              ) : (
+                <span className="pages-card-blank" aria-hidden="true">
+                  <Icon type={page.type} size={32} />
+                </span>
+              )}
+              <span className="pages-card-details">
+                <span className="pages-card-title">{page.title}</span>
+                <span className="pages-card-meta">
+                  <Icon type={page.type} size={14} />
+                  {types[page.type].label} · Version {page.version} ·{' '}
+                  <time dateTime={page.createdAt}>{formatDateTime(page.createdAt, format)}</time>
+                </span>
+              </span>
+            </button>
+            {failed === page.id && <Notice>This page could not be opened. Try again.</Notice>}
+          </li>
+        );
+      })}
     </ul>
   );
 }

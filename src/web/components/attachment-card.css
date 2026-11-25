@@ -191,7 +191,7 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
-.attachment-card.is-page .attachment-card-preview {
+.attachment-card-preview.is-wide {
   width: 100%;
   min-height: 0;
   aspect-ratio: 16 / 10;
@@ -200,7 +200,7 @@
   container-type: inline-size;
 }
 
-.attachment-card.is-page .attachment-card-preview-content {
+.attachment-card-preview.is-wide .attachment-card-preview-content {
   width: 250cqw;
   height: 156.25cqw;
   transform: scale(0.4);
