@@ -1410,7 +1410,6 @@ input.bot-input {
 }
 .new-bot-dialog {
   width: min(400px, calc(100vw - 32px));
-  overflow: visible;
 }
 .new-bot-dialog form {
   display: flex;
@@ -1428,4 +1427,13 @@ input.bot-input {
 }
 .new-bot-dialog form > .button {
   align-self: flex-end;
+}
+.avatar-menu-inline {
+  position: static;
+  width: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  animation: none;
 }

@@ -460,7 +460,7 @@ function AvatarMenu({
   name: string;
   avatar: string;
   onPick(next: string): Promise<unknown> | void;
-  onClose(): void;
+  onClose?(): void;
 }) {
   const [tab, setTab] = useState<'avatar' | 'generate' | 'upload'>('avatar');
   const [description, setDescription] = useState('');
@@ -474,7 +474,11 @@ function AvatarMenu({
       .finally(() => setBusy(false));
   };
   return (
-    <div className="avatar-menu" role="dialog" aria-label="Change avatar">
+    <div
+      className={onClose ? 'avatar-menu' : 'avatar-menu avatar-menu-inline'}
+      role={onClose ? 'dialog' : 'group'}
+      aria-label={onClose ? 'Change avatar' : 'Avatar'}
+    >
       <div className="avatar-tabs" role="tablist">
         {(
           [
@@ -549,9 +553,11 @@ function AvatarMenu({
           <span className="avatar-hint">PNG or JPG, square works best.</span>
         </div>
       )}
-      <button type="button" className="sr-only" onClick={onClose}>
-        Close
-      </button>
+      {onClose && (
+        <button type="button" className="sr-only" onClick={onClose}>
+          Close
+        </button>
+      )}
     </div>
   );
 }
@@ -654,7 +660,7 @@ export function NewBotDialog({ bots, onCreated }: { bots: Bot[]; onCreated(bot: 
           }}
         >
           <div className="new-bot-identity">
-            <AvatarField name={name || '?'} avatar={avatar} onPick={setAvatar} />
+            <BotAvatar name={name || '?'} avatar={avatar} size="lg" />
             <Input
               autoFocus
               aria-label="Name"
@@ -668,6 +674,7 @@ export function NewBotDialog({ bots, onCreated }: { bots: Bot[]; onCreated(bot: 
               }}
             />
           </div>
+          <AvatarMenu name={name || '?'} avatar={avatar} onPick={setAvatar} />
           {error && <Notice kind="error">{error}</Notice>}
           <Button type="submit" disabled={busy || !name.trim()}>
             {busy ? 'Creating…' : 'Create'}
