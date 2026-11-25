@@ -488,8 +488,12 @@ function ScheduleRuns({
         (run) => run.status === 'waiting' && run.turnId === schedule.activeRun?.turnId,
       ) ??
       history.runs.find((run) => run.status === 'waiting' && run.messageId === questionMessageId) ??
-      history.runs.find((run) => run.status === 'waiting' && run.id === schedule.lastRun?.id) ??
-      history.runs.find((run) => run.status === 'waiting'))
+      history.runs.find(
+        (run) =>
+          run.status === 'waiting' &&
+          schedule.lastRun?.status === 'waiting' &&
+          run.id === schedule.lastRun.id,
+      ))
     : undefined;
   return (
     <section className="schedule-runs" aria-label={`Runs for ${schedule.title}`}>

@@ -3307,17 +3307,27 @@ test('expanded waiting schedule run detail opens its pending question in chat (L
     await pageDataCache.refresh(historyPath, true);
   });
 
-  const detail = dom.window.document.querySelector<HTMLElement>('.schedule-run-detail');
-  assert.ok(detail, 'Expanded schedule must render the selected run detail.');
-  assert.match(detail.textContent ?? '', /Needs your input/);
-  assert.match(detail.textContent ?? '', /How should I continue\?/);
+  const detailStatus = () => {
+    const detail = dom.window.document.querySelector<HTMLElement>('.schedule-run-detail');
+    assert.ok(detail, 'Expanded schedule must render the selected run detail.');
+    const status = detail.querySelector<HTMLElement>('.schedule-run-detail-heading .task-status');
+    assert.ok(status, 'Expanded run detail must render its status control.');
+    return { detail, status };
+  };
 
-  const openQuestion = detail.querySelector<HTMLButtonElement>('button:not(:disabled)');
-  assert.ok(
-    openQuestion,
+  const initial = detailStatus();
+  assert.equal(
+    initial.detail.querySelector('time')?.getAttribute('datetime'),
+    waiting.scheduledFor,
+  );
+  assert.equal(initial.status.dataset.status, 'waiting');
+  assert.equal(
+    initial.status.tagName,
+    'BUTTON',
     'Expanded run detail for a waiting scheduled run must offer a clickable control to open its pending question in Chat.',
   );
-  await act(async () => openQuestion.click());
+  assert.equal((initial.status as HTMLButtonElement).disabled, false);
+  await act(async () => initial.status.click());
   assert.deepEqual(
     mutations,
     [],
@@ -3339,12 +3349,22 @@ test('expanded waiting schedule run detail opens its pending question in chat (L
   ];
   assert.equal(runLines.length, 2);
   await act(async () => runLines[1]!.click());
-  const completedDetail = dom.window.document.querySelector<HTMLElement>('.schedule-run-detail');
-  assert.ok(completedDetail);
-  assert.match(completedDetail.textContent ?? '', /Synthetic brief completed\./);
+  const earlier = detailStatus();
   assert.equal(
-    completedDetail.querySelector<HTMLButtonElement>('button:not(:disabled)'),
-    null,
+    earlier.detail.querySelector('time')?.getAttribute('datetime'),
+    completed.scheduledFor,
+  );
+  assert.equal(earlier.status.dataset.status, 'succeeded');
+  assert.equal(
+    earlier.status.tagName,
+    'SPAN',
+    'Selecting an earlier finished run must keep its status badge non-interactive.',
+  );
+  assert.equal(earlier.detail.querySelector('button'), null);
+  await act(async () => earlier.status.click());
+  assert.deepEqual(
+    focused,
+    [{ messageId: questionId }],
     'Selecting an earlier finished run must not open the active run’s pending question.',
   );
   await act(async () => runLines[0]!.click());
@@ -3369,27 +3389,26 @@ test('expanded waiting schedule run detail opens its pending question in chat (L
   await act(async () => {
     await pageDataCache.refresh('/api/schedules', true);
   });
-  const staleHistoryDetail = dom.window.document.querySelector<HTMLElement>('.schedule-run-detail');
-  assert.ok(staleHistoryDetail);
-  const openBeforeHistoryRefresh =
-    staleHistoryDetail.querySelector<HTMLButtonElement>('button:not(:disabled)');
-  assert.ok(openBeforeHistoryRefresh);
-  await act(async () => openBeforeHistoryRefresh.click());
+  const staleHistory = detailStatus();
+  assert.equal(staleHistory.status.dataset.status, 'waiting');
+  assert.equal(staleHistory.status.tagName, 'BUTTON');
+  assert.equal((staleHistory.status as HTMLButtonElement).disabled, false);
+  await act(async () => staleHistory.status.click());
   assert.deepEqual(focused, [{ messageId: questionId }, { messageId: resumedQuestionId }]);
 
   history = { runs: [resumedWaiting, completed], nextCursor: null };
   await act(async () => {
     await pageDataCache.refresh(historyPath, true);
   });
-  const resumedDetail = dom.window.document.querySelector<HTMLElement>('.schedule-run-detail');
-  assert.ok(resumedDetail);
-  const openResumedQuestion =
-    resumedDetail.querySelector<HTMLButtonElement>('button:not(:disabled)');
-  assert.ok(
-    openResumedQuestion,
+  const resumed = detailStatus();
+  assert.equal(resumed.status.dataset.status, 'waiting');
+  assert.equal(
+    resumed.status.tagName,
+    'BUTTON',
     'Expanded run detail must still open the newer question after a resumed turn pauses again.',
   );
-  await act(async () => openResumedQuestion.click());
+  assert.equal((resumed.status as HTMLButtonElement).disabled, false);
+  await act(async () => resumed.status.click());
   assert.deepEqual(focused, [
     { messageId: questionId },
     { messageId: resumedQuestionId },
@@ -3398,10 +3417,51 @@ test('expanded waiting schedule run detail opens its pending question in chat (L
   assert.deepEqual(mutations, []);
   assert.deepEqual(asked, []);
 
+  const newerQuestionId = randomUUID();
+  const newerWaiting: ScheduleRun = {
+    ...resumedWaiting,
+    id: randomUUID(),
+    turnId: randomUUID(),
+    scheduledFor: '2035-10-27T08:00:00.000Z',
+    createdAt: '2035-10-27T08:00:00.000Z',
+    messageId: newerQuestionId,
+  };
   schedule = {
     ...schedule,
+    lastRun: newerWaiting,
     activeRun: {
-      turnId: schedule.activeRun!.turnId,
+      turnId: newerWaiting.turnId,
+      status: 'waiting',
+      questionMessageId: newerQuestionId,
+    },
+  };
+  await act(async () => {
+    await pageDataCache.refresh('/api/schedules', true);
+  });
+  const unrelatedWaiting = detailStatus();
+  assert.equal(
+    unrelatedWaiting.detail.querySelector('time')?.getAttribute('datetime'),
+    resumedWaiting.scheduledFor,
+  );
+  assert.equal(unrelatedWaiting.status.dataset.status, 'waiting');
+  assert.equal(
+    unrelatedWaiting.status.tagName,
+    'SPAN',
+    'An unrelated historical waiting run must stay non-interactive instead of opening another run’s question.',
+  );
+  assert.equal(unrelatedWaiting.detail.querySelector('button'), null);
+  await act(async () => unrelatedWaiting.status.click());
+  assert.deepEqual(focused, [
+    { messageId: questionId },
+    { messageId: resumedQuestionId },
+    { messageId: resumedQuestionId },
+  ]);
+
+  schedule = {
+    ...schedule,
+    lastRun: waiting,
+    activeRun: {
+      turnId: waiting.turnId,
       status: 'waiting',
       questionMessageId: null,
     },
@@ -3414,13 +3474,20 @@ test('expanded waiting schedule run detail opens its pending question in chat (L
     await pageDataCache.refresh('/api/schedules', true);
     await pageDataCache.refresh(historyPath, true);
   });
-  const unavailableDetail = dom.window.document.querySelector<HTMLElement>('.schedule-run-detail');
-  assert.ok(unavailableDetail);
+  const unavailable = detailStatus();
+  assert.equal(unavailable.status.dataset.status, 'waiting');
   assert.equal(
-    unavailableDetail.querySelector<HTMLButtonElement>('button:not(:disabled)'),
-    null,
-    'Expanded run detail must not enable a chat jump when no pending question message exists.',
+    unavailable.status.tagName,
+    'SPAN',
+    'Expanded run detail must render a non-interactive waiting badge when no pending question message exists.',
   );
+  assert.equal(unavailable.detail.querySelector('button'), null);
+  await act(async () => unavailable.status.click());
+  assert.deepEqual(focused, [
+    { messageId: questionId },
+    { messageId: resumedQuestionId },
+    { messageId: resumedQuestionId },
+  ]);
 
   const finished: ScheduleRun = {
     ...waiting,
@@ -3439,15 +3506,15 @@ test('expanded waiting schedule run detail opens its pending question in chat (L
     await pageDataCache.refresh('/api/schedules', true);
     await pageDataCache.refresh(historyPath, true);
   });
-  const finishedDetail = dom.window.document.querySelector<HTMLElement>('.schedule-run-detail');
-  assert.ok(finishedDetail);
-  assert.match(finishedDetail.textContent ?? '', /Done/);
-  assert.doesNotMatch(finishedDetail.textContent ?? '', /Needs your input/);
+  const finishedState = detailStatus();
+  assert.equal(finishedState.status.dataset.status, 'succeeded');
   assert.equal(
-    finishedDetail.querySelector<HTMLButtonElement>('button:not(:disabled)'),
-    null,
+    finishedState.status.tagName,
+    'SPAN',
     'Finished run detail must not expose a pending-question chat jump.',
   );
+  assert.equal(finishedState.detail.querySelector('button'), null);
+  await act(async () => finishedState.status.click());
   assert.deepEqual(focused, [
     { messageId: questionId },
     { messageId: resumedQuestionId },
