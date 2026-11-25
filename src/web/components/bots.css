@@ -470,11 +470,40 @@
   flex-direction: column;
   min-width: 0;
 }
-.panel-identity-text h2,
-.panel-identity-text .inline-name {
+.panel-identity-text h2 {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
+}
+.panel-name,
+.panel-role {
+  width: 100%;
+  min-width: 0;
+  margin-left: -6px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 600;
+}
+.panel-role {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 400;
+}
+.panel-role::placeholder {
+  color: var(--muted-foreground);
+  opacity: 0.7;
+}
+.panel-name:hover,
+.panel-name:focus,
+.panel-role:hover,
+.panel-role:focus {
+  background: var(--surface-inset);
+  outline: none;
 }
 .panel-identity-text p {
   margin: 2px 0 0;

@@ -18,7 +18,6 @@ import { NodModelName, BotModel } from './model-choices';
 import { NodAvatar, BotAvatar } from './bot-avatar';
 import { Button, Dialog, DialogContent, DialogTitle, Input, Loading, Notice } from './ui';
 import { EmojiCatalog } from './emoji-picker';
-import { InlineName } from './inline-name';
 
 function plain(event: MouseEvent) {
   return !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0);
@@ -622,6 +621,42 @@ export function NewBotDialog({ bots, onCreated }: { bots: Bot[]; onCreated(bot: 
   );
 }
 
+function NameField({ bot }: { bot: Bot }) {
+  const [value, setValue] = useState(bot.name);
+  const editing = useRef(false);
+  useEffect(() => {
+    if (!editing.current) setValue(bot.name);
+  }, [bot.name]);
+  function commit() {
+    editing.current = false;
+    const next = value.replace(/\s+/g, ' ').trim();
+    if (!next || next === bot.name) return setValue(bot.name);
+    void changeBot(bot.id, { name: next }).catch((cause) => {
+      toast(errorMessage(cause));
+      setValue(bot.name);
+    });
+  }
+  return (
+    <input
+      className="panel-name"
+      value={value}
+      maxLength={botNameLimit}
+      aria-label="Name"
+      onFocus={() => (editing.current = true)}
+      onChange={(event) => setValue(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') event.currentTarget.blur();
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        editing.current = false;
+        setValue(bot.name);
+        event.currentTarget.blur();
+      }}
+    />
+  );
+}
+
 function ProfileField({ bot, field }: { bot: Bot; field: 'job' | 'instructions' }) {
   const [value, setValue] = useState(bot[field]);
   const saved = useRef(bot[field]);
@@ -641,7 +676,7 @@ function ProfileField({ bot, field }: { bot: Bot; field: 'job' | 'instructions' 
   }
   useEffect(() => () => clearTimeout(timer.current), []);
   const props = {
-    className: 'input',
+    className: field === 'job' ? 'panel-role' : 'input',
     value,
     onFocus: () => (focused.current = true),
     onChange: (event: { target: { value: string } }) => {
@@ -656,12 +691,7 @@ function ProfileField({ bot, field }: { bot: Bot; field: 'job' | 'instructions' 
     },
   };
   return field === 'job' ? (
-    <input
-      {...props}
-      aria-label="Job"
-      placeholder="What should it do for you?"
-      maxLength={botJobLimit}
-    />
+    <input {...props} aria-label="Job" placeholder="What it’s for" maxLength={botJobLimit} />
   ) : (
     <textarea
       {...props}
@@ -708,13 +738,10 @@ export function BotPanel({ bot, onClose }: { bot?: Bot; onClose(): void }) {
           )}
           <div className="panel-identity-text">
             {bot ? (
-              <InlineName
-                value={bot.name}
-                label="bot name"
-                save={async (name) => {
-                  await changeBot(bot.id, { name });
-                }}
-              />
+              <>
+                <NameField bot={bot} />
+                <ProfileField bot={bot} field="job" />
+              </>
             ) : (
               <>
                 <h2>Nod</h2>
@@ -738,14 +765,6 @@ export function BotPanel({ bot, onClose }: { bot?: Bot; onClose(): void }) {
                 <div className="panel-row-head panel-row-still">
                   <span>Memory</span>
                   <span className="panel-row-value">Its own</span>
-                </div>
-              </div>
-              <div className="panel-row">
-                <div className="panel-row-head panel-row-still">
-                  <span>Job</span>
-                </div>
-                <div className="panel-row-body">
-                  <ProfileField bot={bot} field="job" />
                 </div>
               </div>
               <div className="panel-row">
