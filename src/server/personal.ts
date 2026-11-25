@@ -55,6 +55,34 @@ export function createPersonalService(dependencies: PersonalDependencies) {
   const memory = memories?.nod;
   const own = (value?: string | null) => (value && value !== 'nod' ? value : null);
   const chatOf = (turnId?: string | null) => memories?.chatOf(turnId) ?? Promise.resolve(null);
+  async function assertOwnTarget(action: string, args: Record<string, unknown>, turnId?: string) {
+    const kind = ['schedule_update', 'schedule_pause', 'schedule_cancel'].includes(action)
+      ? 'schedules'
+      : action === 'model_select' && args.scope === 'schedule'
+        ? 'schedules'
+        : action === 'model_select' && args.scope === 'task'
+          ? 'tasks'
+          : undefined;
+    if (!kind || !turnId) return;
+    const id = z.uuid().safeParse(args.id);
+    if (!id.success)
+      throw Object.assign(
+        new Error(`Choose a ${kind === 'schedules' ? 'schedule' : 'task'} by its id.`),
+        {
+          statusCode: 400,
+        },
+      );
+    const { rows } = await pool.query(
+      `SELECT 1 FROM ${kind} t JOIN turns u ON u.id=$3 AND u.owner_id=t.owner_id
+       WHERE t.owner_id=$1 AND t.id=$2::uuid AND t.bot_id IS NOT DISTINCT FROM u.bot_id`,
+      [ownerId, id.data, turnId],
+    );
+    if (!rows.length)
+      throw Object.assign(
+        new Error(`That ${kind === 'schedules' ? 'schedule' : 'task'} belongs to another chat.`),
+        { statusCode: 403 },
+      );
+  }
   const searchHistory = createHistorySearch({ pool, ownerId });
   const learnedSkills = dependencies.learnedSkills;
   const remembered = (
@@ -262,7 +290,11 @@ export function createPersonalService(dependencies: PersonalDependencies) {
       afterCommit(options?.client ?? pool, refresh);
       return result;
     }
-    if (action === 'schedule_list') return schedules.list();
+    await assertOwnTarget(action, args, provenance?.turnId);
+    if (action === 'schedule_list') {
+      const chat = await chatOf(provenance?.turnId);
+      return (await schedules.list()).filter((schedule) => (schedule.botId ?? null) === chat);
+    }
     if (action === 'schedule_record_observation')
       return schedules.recordObservation(provenance?.turnId ?? '', args, options?.client);
     if (action === 'schedule_create') return schedules.create(args, provenance, options?.client);
@@ -304,17 +336,24 @@ export function createPersonalService(dependencies: PersonalDependencies) {
     throw new Error('This personal-data action is not available.');
   }
 
-  async function recall(text: string, before: Date | undefined, exclude: string | null) {
+  async function recall(
+    text: string,
+    before: Date | undefined,
+    exclude: string | null,
+    bot: string | null = null,
+  ) {
     const { rows } = await pool.query(
       `WITH terms AS (SELECT replace(plainto_tsquery('english',$2)::text,'&','|')::tsquery AS q),
        docs AS (
          SELECT m.id,m.role,m.text,m.created_at,to_tsvector('english',m.text) AS v FROM messages m CROSS JOIN terms
          WHERE m.owner_id=$1 AND m.role='user' AND m.approval_answer IS NULL AND ${activeThreadSql('m')} AND m.id IS DISTINCT FROM $4::uuid AND NOT ${withdrawnSql('m')}
-           AND m.created_at>COALESCE((SELECT chat_cleared_at FROM threads WHERE id=m.thread_id AND owner_id=$1),'-infinity')
+           AND m.created_at>COALESCE(CASE WHEN $5::uuid IS NULL THEN (SELECT chat_cleared_at FROM threads WHERE id=m.thread_id AND owner_id=$1)
+           ELSE (SELECT cleared_at FROM bots WHERE id=$5::uuid AND owner_id=$1) END,'-infinity') AND m.bot_id IS NOT DISTINCT FROM $5::uuid
            AND ($3::timestamptz IS NULL OR m.created_at<$3) AND to_tsvector('english',m.text) @@ terms.q),
        weights AS (
          SELECT w,ln(1+((SELECT count(*) FROM messages m WHERE m.owner_id=$1 AND ${activeThreadSql('m')}
-           AND m.created_at>COALESCE((SELECT chat_cleared_at FROM threads WHERE id=m.thread_id AND owner_id=$1),'-infinity'))-count(*)+0.5)/(count(*)+0.5)) AS idf
+           AND m.created_at>COALESCE(CASE WHEN $5::uuid IS NULL THEN (SELECT chat_cleared_at FROM threads WHERE id=m.thread_id AND owner_id=$1)
+           ELSE (SELECT cleared_at FROM bots WHERE id=$5::uuid AND owner_id=$1) END,'-infinity') AND m.bot_id IS NOT DISTINCT FROM $5::uuid)-count(*)+0.5)/(count(*)+0.5)) AS idf
          FROM (SELECT DISTINCT lexeme AS w FROM unnest(tsvector_to_array(to_tsvector('english',$2))) lexeme) words
          JOIN docs ON docs.v @@ quote_literal(w)::tsquery GROUP BY w),
        best AS (
@@ -324,7 +363,7 @@ export function createPersonalService(dependencies: PersonalDependencies) {
            ELSE ts_headline('english',best.text,terms.q,'StartSel="",StopSel="",MaxWords=50,MinWords=15,MaxFragments=2,FragmentDelimiter=" … "') END AS text,
          best.created_at AS "createdAt"
        FROM best CROSS JOIN terms ORDER BY best.created_at`,
-      [ownerId, text, before ?? null, exclude],
+      [ownerId, text, before ?? null, exclude, bot],
     );
     return rows as Array<{
       id: string;
@@ -429,6 +468,7 @@ export function createPersonalService(dependencies: PersonalDependencies) {
     validateReview,
     prepareScheduleChange: schedules.prepareChange,
     reviewMemory,
+    assertOwnTarget,
     memoryView,
     registerRoutes,
   };

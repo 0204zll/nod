@@ -1227,6 +1227,13 @@ async function initializeApplication(
     clearBrowser: (id) => adapters.computer.clear(id),
     removeSchedule: (id) => personal.removeSchedule(id),
     removeMemory: (id) => memories.remove(id),
+    retireWorkspace: async (bot) => {
+      const thread = await pool.query<{ id: string }>(
+        'SELECT id FROM threads WHERE owner_id=$1 AND archived_at IS NULL',
+        [ownerId],
+      );
+      if (thread.rows[0]) await workspace.retireBot?.(thread.rows[0].id, bot);
+    },
     ...(adapters.models
       ? { validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice) }
       : {}),
@@ -1299,6 +1306,7 @@ async function initializeApplication(
     },
     sweep: async () => {
       await sweepArtifacts();
+      await bots.retire();
       await tasks.wakeDue().catch((error) => logFailure('task_wake', error));
       await vault.forgetExpiredHolds().catch((error) => logFailure('vault_expiry', error));
     },
@@ -2020,7 +2028,7 @@ async function initializeApplication(
         return;
       if (action === 'NOD_limits_update') limitsInput.parse(args);
       else if (action === 'NOD_bot_create') botCreate.parse(args);
-      else if (action === 'NOD_bot_update') botAction.parse(args);
+      else if (action === 'NOD_bot_update') await bots.get(pool, botAction.parse(args).id);
       else if (action.startsWith('NOD_')) {
         if (
           ['NOD_schedule_update', 'NOD_schedule_pause', 'NOD_schedule_cancel'].includes(action) &&
@@ -2799,15 +2807,23 @@ async function initializeApplication(
       audioReplies: async () => (await speechPreferences.get()).speechReply,
       manage: async (turn, action, args, { admit, signal, ...provenance }) => {
         if (action === 'bot_list') {
+          const caller = await memories.chatOf(turn.turnId);
           const view = adapters.models?.view();
           const team = {
             bots: await (async () => {
               const [owned, live] = await Promise.all([bots.work(), activity.current()]);
               return (await bots.list()).map(
-                ({ avatar: _avatar, latestReply: _latest, lastMessage: _last, ...bot }) => {
+                ({
+                  avatar: _avatar,
+                  latestReply: _latest,
+                  lastMessage: _last,
+                  instructions,
+                  ...bot
+                }) => {
                   const now = live.find((item) => item.botId === bot.id && !item.background);
                   return {
                     ...bot,
+                    ...(!caller || caller === bot.id ? { instructions } : {}),
                     now: now?.step ?? now?.title ?? null,
                     note: `team/${bot.id}.md`,
                     ...owned(bot.id),
@@ -2833,6 +2849,11 @@ async function initializeApplication(
         }
         if (action === 'bot_create' || action === 'bot_update') {
           const update = action === 'bot_update' ? botAction.parse(args) : undefined;
+          const caller = await memories.chatOf(turn.turnId);
+          if (update && caller && update.id !== caller)
+            throw new Error(
+              'A bot can change only itself. Ask Nod, or change the bot in its settings.',
+            );
           const target = update ?? botCreate.parse(args);
           const botName = update ? (await bots.get(pool, update.id)).name : undefined;
           const verdict = await trust.check(
@@ -2920,6 +2941,7 @@ async function initializeApplication(
             throw new Error(
               'A scheduled run cannot create schedules. Do the work this schedule asks for in this run instead.',
             );
+          await personal.assertOwnTarget(action, args, turn.turnId);
           const prepared = action.startsWith('schedule_')
             ? await personal.prepareScheduleChange(action, args)
             : undefined;
@@ -3007,6 +3029,8 @@ async function initializeApplication(
         }
         if (action === 'skill_read') return learnedSkills.read(String(args.name));
         if (action === 'skill_save' || action === 'skill_patch') {
+          if (await memories.chatOf(turn.turnId))
+            throw new Error('Only Nod saves and changes skills. Use the skills you have.');
           const origin = await turnOrigin(turn.turnId);
           if (!origin || !['user', 'schedule', 'task'].includes(origin.source))
             throw new Error(

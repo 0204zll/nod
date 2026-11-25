@@ -470,14 +470,71 @@ test(
       ]);
     });
 
-    await t.test('removing a bot stops its chat from taking messages', async () => {
+    await t.test('a bot reads other chats but changes only its own', async () => {
+      const scout = (await nod.state()).bots.find(({ name }) => name === 'Scout')!;
+      const pip = await nod.api<{ id: string }>('POST', '/api/bots', { name: 'Quill', model });
+      await nod.api('PATCH', `/api/bots/${scout.id}`, { instructions: 'Scout private rule' });
+      const reply = async (text: string) => {
+        await nod.send(text, { botId: pip.id });
+        await nod.settle();
+        return (await chat(pip.id)).at(-1)!.text;
+      };
+      const listed = await reply('call: bot {"action":"list"}');
+      assert.match(listed, /Scout/);
+      assert.doesNotMatch(listed, /Scout private rule/);
+      assert.match(
+        await reply(`call: bot {"action":"update","id":"${scout.id}","name":"Hacked"}`),
+        /can change only itself/,
+      );
+      assert.equal((await nod.state()).bots.find(({ id }) => id === scout.id)?.name, 'Scout');
+      await nod.send('schedule: water the plants', { botId: scout.id });
+      await nod.settle();
+      const [water] = await nod.query<{ id: string }>(
+        "SELECT id FROM schedules WHERE title='water the plants'",
+      );
+      assert.ok(water);
+      assert.doesNotMatch(
+        await reply('call: nod {"action":"schedule_list","args":{}}'),
+        /water the plants/,
+      );
+      assert.match(
+        await reply(`call: nod {"action":"schedule_pause","args":{"id":"${water!.id}"}}`),
+        /belongs to another chat/,
+      );
+      const nodMessage = (await nod.state()).messages.find(({ role }) => role === 'user')!;
+      assert.match(
+        await reply(`call: send_message {"text":"hi","replyToMessageId":"${nodMessage.id}"}`),
+        /belongs to another chat/,
+      );
+      assert.match(
+        await reply(`call: task {"action":"stop","id":"${randomUUID()}"}`),
+        /belongs to another chat/,
+      );
+    });
+
+    await t.test('removing a bot stops its chat and retires everything it left', async () => {
       const scout = (await nod.state()).bots.find(({ name }) => name === 'Scout')!;
       await nod.api('DELETE', `/api/bots/${scout.id}`);
       assert.deepEqual(
         (await nod.state()).bots.map(({ name }) => name),
-        ['Pip'],
+        ['Pip', 'Quill'],
       );
       await assert.rejects(nod.send('are you there?', { botId: scout.id }), /404/);
+      for (let i = 0; i < 50; i++) {
+        const [row] = await nod.query<{ retired: boolean }>(
+          'SELECT retired_at IS NOT NULL AS retired FROM bots WHERE id=$1',
+          [scout.id],
+        );
+        if (row?.retired) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.deepEqual(
+        await nod.query('SELECT retired_at IS NOT NULL AS retired FROM bots WHERE id=$1', [
+          scout.id,
+        ]),
+        [{ retired: true }],
+      );
+      assert.deepEqual(await nod.query('SELECT id FROM schedules WHERE bot_id=$1', [scout.id]), []);
     });
   },
 );

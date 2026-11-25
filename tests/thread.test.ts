@@ -5230,7 +5230,7 @@ test(
           const { recentOwnerWords } = await import('../src/server/owner-instructions.ts');
           try {
             await db.pool.query(
-              `INSERT INTO bots(id,owner_id,name,job,avatar,model) VALUES($1,$2,'Synthetic bot','Synthetic job','{"hue":"sky"}','{"connectionId":"00000000-0000-4000-8000-000000000000","modelId":"synthetic","effort":"medium"}')`,
+              `INSERT INTO bots(id,owner_id,name,job,avatar,model,uid) VALUES($1,$2,'Synthetic bot','Synthetic job','🧾','{"connectionId":"00000000-0000-4000-8000-000000000000","modelId":"synthetic","effort":"medium"}',100000)`,
               [bot, ownerId],
             );
             const main = await thread.submitUserMessage('Synthetic main request');
@@ -5310,6 +5310,16 @@ test(
             assert.doesNotMatch(texts(botWords), /Synthetic main request/);
             assert.match(texts(mainWords), /Synthetic main request/);
             assert.doesNotMatch(texts(mainWords), /Synthetic bot request/);
+            await db.pool.query('UPDATE bots SET cleared_at=now() WHERE id=$1', [bot]);
+            assert.doesNotMatch(
+              texts(await recentOwnerWords(db.pool, ownerId, threadId, [], null, chat.turnId)),
+              /Synthetic bot request/,
+            );
+            assert.match(
+              texts(await recentOwnerWords(db.pool, ownerId, threadId, [], null, next.turnId)),
+              /Synthetic main request/,
+            );
+            await db.pool.query('UPDATE bots SET cleared_at=NULL WHERE id=$1', [bot]);
 
             const scoped = await createApprovals(
               async () => ({}),
@@ -12344,6 +12354,11 @@ test(
       assert.doesNotMatch(await memories.context(null), /Iberdrola/);
       await memories.nod.control({ enabled: false });
       assert.equal(await memories.of(penny).enabled(), false);
+      await pool.query('UPDATE bots SET archived_at=now() WHERE id=$1', [penny]);
+      await assert.rejects(
+        memories.of(penny).add({ area: 'about', text: 'Has a cat.' }),
+        /This bot was removed/,
+      );
       await memories.remove(penny);
       assert.equal(await store.read(`memory/bots/${penny}.md`, 1_000_000), undefined);
     } finally {

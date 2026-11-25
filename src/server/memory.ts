@@ -89,7 +89,7 @@ export function createMemoryService(options: {
   ownerId: string;
   store: PrivateObjectStore;
   analytics?: CaptureAnalytics;
-  bot?: { id: string; owner: MemoryService };
+  bot?: { id: string; owner: MemoryService; active(): Promise<boolean> };
 }) {
   const bot = options.bot;
   const key = bot ? `memory/bots/${bot.id}.md` : nodKey;
@@ -106,6 +106,7 @@ export function createMemoryService(options: {
   }
 
   async function edit<T>(change: (tree: Tree) => T, { allowDisabled = false } = {}): Promise<T> {
+    if (bot && !(await bot.active())) fail('This bot was removed.', 404);
     for (let attempt = 0; ; attempt++) {
       const current = await load();
       if (!current.tree.enabled && !allowDisabled) throw new Error('Memory is turned off.');

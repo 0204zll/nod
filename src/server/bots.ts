@@ -21,6 +21,7 @@ import { afterCommit, transaction } from './transaction.ts';
 import { cancelTurns, lockThread } from './thread.ts';
 import { refresh } from './events.ts';
 import { localArtifacts } from './artifacts.ts';
+import { logFailure } from './failure-log.ts';
 
 type Queryable = Pick<PoolClient, 'query'>;
 
@@ -81,6 +82,7 @@ export function createBots(options: {
   clearBrowser?: (id: string) => Promise<unknown>;
   removeSchedule?: (id: string) => Promise<unknown>;
   removeMemory?: (id: string) => Promise<unknown>;
+  retireWorkspace?: (bot: { id: string; uid: number }) => Promise<unknown>;
 }) {
   const { pool, ownerId } = options;
 
@@ -208,7 +210,8 @@ export function createBots(options: {
     options.validateModel?.(model);
     const id = randomUUID();
     await client.query(
-      'INSERT INTO bots(id,owner_id,name,job,instructions,avatar,model) VALUES($1,$2,$3,$4,$5,$6,$7)',
+      `INSERT INTO bots(id,owner_id,name,job,instructions,avatar,model,uid)
+       VALUES($1,$2,$3,$4,$5,$6,$7,(SELECT COALESCE(max(uid),99999)+1 FROM bots WHERE owner_id=$2))`,
       [
         id,
         ownerId,
@@ -248,28 +251,55 @@ export function createBots(options: {
   }
 
   async function remove(client: PoolClient, threadId: string, id: string) {
-    const removed = await client.query(
-      'UPDATE bots SET archived_at=now(),updated_at=now() WHERE id=$1 AND owner_id=$2 AND archived_at IS NULL',
+    const current = await client.query(
+      'SELECT 1 FROM bots WHERE id=$1 AND owner_id=$2 AND archived_at IS NULL',
       [id, ownerId],
     );
-    if (!removed.rowCount) throw failure('This bot was already removed.', 404);
+    if (!current.rowCount) throw failure('This bot was already removed.', 404);
     const { browsers } = await cancelTurns(client, threadId, { botId: id });
+    await client.query(
+      'UPDATE bots SET archived_at=now(),updated_at=now() WHERE id=$1 AND owner_id=$2',
+      [id, ownerId],
+    );
     await client.query(
       "UPDATE tasks SET state='cancelled',closed_at=now(),updated_at=now() WHERE bot_id=$1 AND owner_id=$2 AND state='open'",
       [id, ownerId],
     );
-    const schedules = (
-      await client.query<{ id: string }>(
-        'UPDATE schedules SET enabled=false,revision=revision+1 WHERE bot_id=$1 AND owner_id=$2 RETURNING id',
-        [id, ownerId],
-      )
-    ).rows;
+    await client.query(
+      'UPDATE schedules SET enabled=false,revision=revision+1 WHERE bot_id=$1 AND owner_id=$2',
+      [id, ownerId],
+    );
     afterCommit(client, () => {
-      for (const browser of new Set([id, ...browsers]))
-        void options.clearBrowser?.(browser)?.catch(() => {});
-      for (const schedule of schedules) void options.removeSchedule?.(schedule.id)?.catch(() => {});
-      void options.removeMemory?.(id)?.catch(() => {});
+      for (const browser of browsers.filter((item) => item !== id))
+        void options
+          .clearBrowser?.(browser)
+          ?.catch((error) => logFailure('bot_retire_failed', error));
+      void retire();
     });
+  }
+
+  async function retire() {
+    const { rows } = await pool.query<{ id: string; uid: number }>(
+      'SELECT id,uid FROM bots WHERE owner_id=$1 AND archived_at IS NOT NULL AND retired_at IS NULL',
+      [ownerId],
+    );
+    for (const bot of rows)
+      try {
+        const schedules = await pool.query<{ id: string }>(
+          'SELECT id FROM schedules WHERE owner_id=$1 AND bot_id=$2',
+          [ownerId, bot.id],
+        );
+        for (const schedule of schedules.rows) await options.removeSchedule?.(schedule.id);
+        await options.retireWorkspace?.(bot);
+        await options.clearBrowser?.(bot.id);
+        await options.removeMemory?.(bot.id);
+        await pool.query('UPDATE bots SET retired_at=now() WHERE id=$1 AND owner_id=$2', [
+          bot.id,
+          ownerId,
+        ]);
+      } catch (error) {
+        logFailure('bot_retire_failed', error);
+      }
   }
 
   function registerRoutes(app: FastifyInstance) {
@@ -302,6 +332,10 @@ export function createBots(options: {
     app.delete<{ Params: { id: string } }>('/api/bots/:id', async (request) => {
       const id = z.uuid().parse(request.params.id);
       await cancellationTransaction(async (client) => {
+        await client.query('SELECT 1 FROM schedules WHERE owner_id=$1 AND bot_id=$2 FOR UPDATE', [
+          ownerId,
+          id,
+        ]);
         await remove(client, (await lockThread(client, ownerId)).id, id);
       }, pool);
       refresh();
@@ -334,5 +368,5 @@ export function createBots(options: {
     });
   }
 
-  return { list, get, create, update, work, registerRoutes };
+  return { list, get, create, update, work, retire, registerRoutes };
 }

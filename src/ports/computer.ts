@@ -244,7 +244,8 @@ export interface Workspace {
     threadId: string;
     workspacePath: string;
     signal: AbortSignal;
-    bot?: { id: string };
+    bot?: { id: string; uid: number };
   }): WorkspaceSession;
+  retireBot?(threadId: string, bot: { id: string; uid: number }): Promise<void>;
   dispose(): void | Promise<void>;
 }

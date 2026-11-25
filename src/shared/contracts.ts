@@ -376,6 +376,7 @@ export interface Schedule {
   watch: string[] | null;
   model: ModelSelection | null;
   monthlyUsd: number | null;
+  botId?: string | null;
 }
 export type ScheduleObservation = {
   sourceUrl: string;

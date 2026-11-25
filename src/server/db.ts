@@ -138,9 +138,10 @@ export async function initializeDatabase() {
       id uuid PRIMARY KEY, owner_id text NOT NULL, name text NOT NULL, job text NOT NULL DEFAULT '',
       instructions text NOT NULL DEFAULT '', avatar text NOT NULL DEFAULT '', model jsonb NOT NULL,
       created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
-      cleared_at timestamptz, archived_at timestamptz
+      uid integer NOT NULL CHECK (uid>=100000), cleared_at timestamptz, archived_at timestamptz, retired_at timestamptz
     );
     CREATE UNIQUE INDEX IF NOT EXISTS bots_name ON bots(owner_id,lower(name)) WHERE archived_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS bots_uid ON bots(owner_id,uid);
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS bot_id uuid;
     CREATE INDEX IF NOT EXISTS messages_bot ON messages(owner_id,bot_id,created_at) WHERE bot_id IS NOT NULL;
     CREATE OR REPLACE FUNCTION messages_bot() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN

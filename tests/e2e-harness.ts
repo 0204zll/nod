@@ -99,6 +99,23 @@ function scriptedReply(messages: Entry[]) {
               .join(' ')}`,
           }
         : { call: tool('task', { action: 'reply', ids: [steer[1]] }) };
+    const direct = /^call: (\w+) (\{.*\})$/.exec(said);
+    if (direct)
+      return calls.some((call) => call.includes(`tools.${direct[1]}(`))
+        ? {
+            text: `Result: ${current
+              .filter((entry) => entry.role === 'toolResult')
+              .map(textOf)
+              .join(' ')}`,
+          }
+        : {
+            call: {
+              name: 'codemode',
+              arguments: {
+                code: `try { console.log(JSON.stringify(await tools.${direct[1]}(${direct[2]}))); } catch (error) { console.log(String(error?.message ?? error)); }`,
+              },
+            },
+          };
     const rename = /^rename yourself: (.+)$/.exec(said);
     if (rename && !usedBotTool)
       return { call: tool('bot', { action: 'update', id: bot.id, name: rename[1] }) };

@@ -32,7 +32,6 @@ import type { WorkspaceSession } from '../src/ports/computer.ts';
 import { threadIdentity } from '../src/ports/thread-identity.ts';
 import { isPublicAddress, publicUrl } from '../src/providers/agent-browser/network.ts';
 import {
-  botUser,
   connectedUser,
   runWorkspaceCommand,
   WorkspaceCommandError,
@@ -407,13 +406,13 @@ async function exists(path: string) {
 }
 
 test('a bot session runs every command as its own user in its own folder', async () => {
-  const bot = randomUUID();
+  const bot = { id: randomUUID(), uid: 100_007 };
   const calls: Array<{ bot?: string; script: string }> = [];
   const workspace = createCommandWorkspace({
     workspaceRoot: '/tmp/nod-bot-root',
     instructions: '',
     runCommand: async (_id, args, input) => {
-      calls.push({ bot: input.bot, script: args.at(-1)! });
+      calls.push({ bot: input.bot?.id, script: args.at(-1)! });
       return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };
     },
   });
@@ -421,17 +420,19 @@ test('a bot session runs every command as its own user in its own folder', async
     threadId: 'thread',
     workspacePath: '/tmp/nod-bot-root/thread',
     signal: new AbortController().signal,
-    bot: { id: bot },
+    bot,
   });
-  assert.equal(session.path, `/workspace/thread/bots/${bot}`);
+  assert.equal(session.path, `/workspace/thread/bots/${bot.id}`);
   await session.exec('echo one');
   await session.exec('echo two');
   assert.deepEqual(
     calls.map((call) => call.bot),
-    [undefined, bot, bot, bot],
+    [undefined, bot.id, bot.id, bot.id],
   );
-  assert.match(calls[0]!.script, /chmod 1777 \/workspace\/thread\/team \/workspace\/thread\/bots$/);
-  assert.match(calls[1]!.script, new RegExp(`mkdir -p /workspace/thread/bots/${bot}/\\.home`));
+  assert.match(calls[0]!.script, /chmod 1777 \/workspace\/thread\/team \/workspace\/thread\/bots /);
+  assert.match(calls[0]!.script, /stat -c %u "\$p"\)" = 100007 \] \|\| mv -- "\$p"/);
+  assert.match(calls[1]!.script, /\[ "\$\(stat -c %u [^)]+\)" = "\$\(id -u\)" \]/);
+  assert.match(calls[1]!.script, new RegExp(`mkdir -p /workspace/thread/bots/${bot.id}/\\.home`));
   const launches: string[][] = [];
   await runWorkspaceCommand({
     container: 'nod-workspace-fixture',
@@ -444,15 +445,15 @@ test('a bot session runs every command as its own user in its own folder', async
     },
   }).catch(() => undefined);
   const launch = launches[0]!;
-  assert.equal(launch[launch.indexOf('--user') + 1], `${botUser(bot)}:1003`);
-  assert.ok(launch.includes(`HOME=/workspace/thread/bots/${bot}/.home`));
+  assert.equal(launch[launch.indexOf('--user') + 1], '100007:1003');
+  assert.ok(launch.includes(`HOME=/workspace/thread/bots/${bot.id}/.home`));
   assert.throws(
     () =>
       workspace.open({
         threadId: 'thread',
         workspacePath: '/tmp/nod-bot-root/thread',
         signal: new AbortController().signal,
-        bot: { id: '../thread' },
+        bot: { id: '../thread', uid: 100_007 },
       }),
     /Invalid bot identifier/,
   );

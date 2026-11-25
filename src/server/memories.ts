@@ -16,11 +16,25 @@ export function createMemories(options: {
   const nod = createMemoryService(options);
   const bots = new Map<string, MemoryService>();
 
+  async function active(bot: string) {
+    const { rowCount } = await options.pool.query(
+      'SELECT 1 FROM bots WHERE id=$1 AND owner_id=$2 AND archived_at IS NULL',
+      [bot, options.ownerId],
+    );
+    return Boolean(rowCount);
+  }
+
   function of(bot?: string | null) {
     if (!bot) return nod;
     let memory = bots.get(bot);
     if (!memory)
-      bots.set(bot, (memory = createMemoryService({ ...options, bot: { id: bot, owner: nod } })));
+      bots.set(
+        bot,
+        (memory = createMemoryService({
+          ...options,
+          bot: { id: bot, owner: nod, active: () => active(bot) },
+        })),
+      );
     return memory;
   }
 

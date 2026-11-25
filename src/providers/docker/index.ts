@@ -1,10 +1,13 @@
 import { posix, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ConnectedCli, Workspace } from '../../ports/computer.ts';
-import { botIdentity, threadIdentity } from '../../ports/thread-identity.ts';
+import { threadIdentity } from '../../ports/thread-identity.ts';
 import {
+  botAccount,
+  retireWorkspaceBot,
   runWorkspaceCommand,
   WorkspaceCommandError,
+  type BotAccount,
   type WorkspaceCommandLauncher,
 } from './command.ts';
 
@@ -120,6 +123,13 @@ export function createDockerWorkspace(options: {
         ...input,
         spawn: options.spawn,
       }),
+    retireBot: (id, bot) =>
+      retireWorkspaceBot({
+        container: options.container,
+        threadId: id,
+        bot,
+        spawn: options.spawn,
+      }),
   });
 }
 
@@ -131,7 +141,7 @@ type CommandInput = {
   maxBytes?: number;
   onData?(chunk: Buffer): void;
   session?: boolean;
-  bot?: string;
+  bot?: BotAccount;
 };
 type CommandResult = { stdout: Buffer; stderr: Buffer; exitCode: number };
 
@@ -144,6 +154,7 @@ export function createCommandWorkspace(options: {
     args: string[],
     input: CommandInput & { environment: Record<string, string>; cli: ConnectedCli },
   ): Promise<CommandResult>;
+  retireBot?(id: string, bot: BotAccount): Promise<void>;
 }): Workspace {
   let unavailable: string | undefined;
   let disposed = false;
@@ -203,6 +214,15 @@ export function createCommandWorkspace(options: {
   }
   return {
     connectedCliAvailable: Boolean(options.runConnectedCommand),
+    ...(options.retireBot
+      ? {
+          retireBot: (threadId: string, bot: BotAccount) =>
+            supervise(async () => {
+              await options.retireBot!(threadIdentity(threadId), botAccount(bot));
+              return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };
+            }).then(() => undefined),
+        }
+      : {}),
     dispose: async () => {
       disposed = true;
       lifecycle.abort();
@@ -283,10 +303,10 @@ export function createCommandWorkspace(options: {
       const id = threadIdentity(input.threadId);
       if (resolve(input.workspacePath) !== resolve(options.workspaceRoot, id))
         throw new Error('The task workspace does not match its configured root.');
-      const bot = input.bot && botIdentity(input.bot.id);
+      const bot = input.bot && botAccount(input.bot);
       const root = `/workspace/${id}`;
-      const path = bot ? `${root}/bots/${bot}` : root;
-      const step = async (script: string, owner?: string) => {
+      const path = bot ? `${root}/bots/${bot.id}` : root;
+      const step = async (script: string, owner?: BotAccount) => {
         const result = await command(id, ['/bin/sh', '-c', script], {
           signal: input.signal,
           timeoutMs: 30_000,
@@ -301,9 +321,12 @@ export function createCommandWorkspace(options: {
       const prepare = () =>
         (ready ??= (async () => {
           await step(
-            `chmod 755 ${root} && mkdir -p ${root}/team ${root}/bots && chmod 1777 ${root}/team ${root}/bots`,
+            `chmod 755 ${root} && mkdir -p ${root}/team ${root}/bots && chmod 1777 ${root}/team ${root}/bots && cd ${root} && for p in bots/${bot!.id} team/${bot!.id}.md; do if [ -e "$p" ] || [ -L "$p" ]; then [ "$(stat -c %u "$p")" = ${bot!.uid} ] || mv -- "$p" "$(dirname "$p")/.taken-$(date +%s%N)-$(basename "$p")"; fi; done`,
           );
-          await step(`mkdir -p ${path}/.home && ln -sfn ../../team ${path}/team`, bot);
+          await step(
+            `mkdir -p ${path}/.home && [ "$(stat -c %u ${path})" = "$(id -u)" ] && ln -sfn ../../team ${path}/team`,
+            bot,
+          );
         })().catch((error) => {
           ready = undefined;
           throw error;

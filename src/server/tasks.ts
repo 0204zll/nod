@@ -333,7 +333,7 @@ export function createTasks(options: {
        LEFT JOIN turns mt ON mt.id=m.turn_id AND mt.owner_id=m.owner_id
        LEFT JOIN messages parent ON parent.id=m.reply_to_message_id AND parent.owner_id=m.owner_id AND parent.thread_id=m.thread_id
        LEFT JOIN turns pt ON pt.id=parent.turn_id AND pt.owner_id=parent.owner_id
-       WHERE t.owner_id=$1 AND u.thread_id=$2 AND m.id=$3
+       WHERE t.owner_id=$1 AND u.thread_id=$2 AND m.id=$3 AND t.bot_id IS NOT DISTINCT FROM m.bot_id
          AND ${taskMessageSql} ORDER BY t.updated_at DESC LIMIT 1`,
         [ownerId, threadId, messageId],
       )
@@ -496,11 +496,11 @@ export function createTasks(options: {
       (task.botId ?? null) === (current.bot_id ?? null);
     if (request.action === 'list') return { tasks: (await read(client)).filter(sameChat) };
     const own = async (ids: string[]) => {
-      const tasks = await read(client, { closed: true });
-      for (const id of ids) {
-        const task = tasks.find((item) => item.id === id);
-        if (task && !sameChat(task)) throw failure('That task belongs to another chat.');
-      }
+      const { rows } = await client.query<{ id: string }>(
+        'SELECT id FROM tasks WHERE owner_id=$1 AND id=ANY($2::uuid[]) AND bot_id IS NOT DISTINCT FROM $3::uuid',
+        [ownerId, ids, current.bot_id ?? null],
+      );
+      if (rows.length !== new Set(ids).size) throw failure('That task belongs to another chat.');
     };
     const chatSession =
       current.session_id === turn.threadId ||

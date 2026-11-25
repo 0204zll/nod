@@ -234,6 +234,7 @@ export interface ThreadDependencies {
     text: string,
     before: Date | undefined,
     exclude: string | null,
+    bot: string | null,
   ) => Promise<NonNullable<RuntimeContext['relatedConversation']>>;
   learnedSkills?: () => Promise<RuntimeContext['learnedSkills']>;
   task?: (
@@ -549,7 +550,19 @@ export async function insertAssistantMessage(
         [ownerId, turn.threadId, turn.turnId],
       )
     ).rows[0]?.id;
-  await assertReplyTarget(client, turn.threadId, replyToMessageId);
+  if (replyToMessageId) {
+    const chat = await client.query<{ bot_id: string | null }>(
+      'SELECT bot_id FROM turns WHERE id=$1 AND owner_id=$2',
+      [turn.turnId, ownerId],
+    );
+    await assertReplyTarget(
+      client,
+      turn.threadId,
+      replyToMessageId,
+      false,
+      chat.rows[0]?.bot_id ?? null,
+    );
+  }
   const id = randomUUID();
   await client.query(
     'INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,attachments,stream_id,reply_to_message_id,presentation,answer_choices) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
@@ -2083,13 +2096,14 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
           )
         : undefined,
     loadConversationLanguage(pool, ownerId, threadId),
-    pool.query<{ id: string; name: string; job: string; instructions: string }>(
-      'SELECT id,name,job,instructions FROM bots WHERE owner_id=$1 AND archived_at IS NULL ORDER BY created_at,id',
+    pool.query<{ id: string; uid: number; name: string; job: string; instructions: string }>(
+      'SELECT id,uid,name,job,instructions FROM bots WHERE owner_id=$1 AND archived_at IS NULL ORDER BY created_at,id',
       [ownerId],
     ),
   ]);
   const preference = preferences.rows[0];
   const bot = team.rows.find((row) => row.id === turn.bot_id);
+  if (turn.bot_id && !bot) throw turnStopped();
   const historyTurnIds = [
     ...new Set<string>(
       history.rows.flatMap((message) =>
@@ -2100,7 +2114,12 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
   const [related, credentialRequests] = await Promise.all([
     !turn.background && sourceMessageId && dependencies.recall
       ? dependencies
-          .recall(String(turn.prompt ?? ''), history.rows[0]?.createdAt, sourceMessageId)
+          .recall(
+            String(turn.prompt ?? ''),
+            history.rows[0]?.createdAt,
+            sourceMessageId,
+            turn.bot_id ?? null,
+          )
           .catch(() => [])
       : [],
     dependencies.credentialRequestStatuses?.(threadId, turn.session_id, historyTurnIds) ?? [],

@@ -179,6 +179,7 @@ export function createMemoryLearning(options: {
          AND r.created_at<=source.created_at
          ORDER BY r.created_at DESC,r.id DESC LIMIT ${recentMessages})
        ${ownerText} AND (m.id=ANY($2::uuid[]) OR m.id IN (SELECT id FROM recent))
+         AND m.bot_id IS NOT DISTINCT FROM (SELECT bot_id FROM source)
        ORDER BY m.created_at,m.id`,
       [options.ownerId, required, sourceMessageId],
     );

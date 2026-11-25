@@ -37,11 +37,11 @@ Your apps, Vault, rules and settings are shared: bots use them with the same [ap
 
 ## Change a bot
 
-Select the name at the top of a bot's chat to open its settings: avatar, name, job, model and instructions. An avatar is an emoji, or an image you upload or generate. You can also ask, for example "Rename Scout to Atlas" or "Tell Penny to keep answers short." Instructions guide a bot. They never approve an action.
+Select the name at the top of a bot's chat to open its settings: avatar, name, job, model and instructions. An avatar is an emoji, or an image you upload or generate. You can also ask Nod, for example "Rename Scout to Atlas" or "Tell Penny to keep answers short." A bot can change only its own settings. Instructions guide a bot. Only that bot and Nod see them, and they never approve an action.
 
 ## Remove a bot
 
-Right-click it in the sidebar and select **Remove**. Removing stops its chat and its tasks, pauses its schedules and deletes its memory. Its files stay in the workspace.
+Right-click it in the sidebar and select **Remove**. Removing stops its chat, tasks and commands, and deletes its schedules, memory, browser data and team note. Its files stay in the workspace. If part of the clean-up fails, Nod retries it.
 
 ## What stays with Nod
 

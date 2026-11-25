@@ -923,6 +923,7 @@ export function createSchedules(dependencies: ScheduleDependencies) {
       watch: row.watch,
       model: row.model,
       monthlyUsd: (monthly ?? (await monthlyCosts([row], turnId))).get(row.id) ?? null,
+      botId: row.botId,
     };
   }
 
