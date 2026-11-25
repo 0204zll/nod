@@ -3334,6 +3334,21 @@ test('expanded waiting schedule run detail opens its pending question in chat (L
     'Expanded run detail must focus the waiting run’s pending question in Chat.',
   );
 
+  const runLines = [
+    ...dom.window.document.querySelectorAll<HTMLButtonElement>('.schedule-run-line'),
+  ];
+  assert.equal(runLines.length, 2);
+  await act(async () => runLines[1]!.click());
+  const completedDetail = dom.window.document.querySelector<HTMLElement>('.schedule-run-detail');
+  assert.ok(completedDetail);
+  assert.match(completedDetail.textContent ?? '', /Synthetic brief completed\./);
+  assert.equal(
+    completedDetail.querySelector<HTMLButtonElement>('button:not(:disabled)'),
+    null,
+    'Selecting an earlier finished run must not open the active run’s pending question.',
+  );
+  await act(async () => runLines[0]!.click());
+
   const resumedQuestionId = randomUUID();
   const resumedQuestionText = 'Enter the synthetic verification code to finish the brief.';
   const resumedWaiting: ScheduleRun = {
@@ -3351,9 +3366,19 @@ test('expanded waiting schedule run detail opens its pending question in chat (L
       questionMessageId: resumedQuestionId,
     },
   };
-  history = { runs: [resumedWaiting, completed], nextCursor: null };
   await act(async () => {
     await pageDataCache.refresh('/api/schedules', true);
+  });
+  const staleHistoryDetail = dom.window.document.querySelector<HTMLElement>('.schedule-run-detail');
+  assert.ok(staleHistoryDetail);
+  const openBeforeHistoryRefresh =
+    staleHistoryDetail.querySelector<HTMLButtonElement>('button:not(:disabled)');
+  assert.ok(openBeforeHistoryRefresh);
+  await act(async () => openBeforeHistoryRefresh.click());
+  assert.deepEqual(focused, [{ messageId: questionId }, { messageId: resumedQuestionId }]);
+
+  history = { runs: [resumedWaiting, completed], nextCursor: null };
+  await act(async () => {
     await pageDataCache.refresh(historyPath, true);
   });
   const resumedDetail = dom.window.document.querySelector<HTMLElement>('.schedule-run-detail');
@@ -3365,7 +3390,11 @@ test('expanded waiting schedule run detail opens its pending question in chat (L
     'Expanded run detail must still open the newer question after a resumed turn pauses again.',
   );
   await act(async () => openResumedQuestion.click());
-  assert.deepEqual(focused, [{ messageId: questionId }, { messageId: resumedQuestionId }]);
+  assert.deepEqual(focused, [
+    { messageId: questionId },
+    { messageId: resumedQuestionId },
+    { messageId: resumedQuestionId },
+  ]);
   assert.deepEqual(mutations, []);
   assert.deepEqual(asked, []);
 
@@ -3392,7 +3421,38 @@ test('expanded waiting schedule run detail opens its pending question in chat (L
     null,
     'Expanded run detail must not enable a chat jump when no pending question message exists.',
   );
-  assert.deepEqual(focused, [{ messageId: questionId }, { messageId: resumedQuestionId }]);
+
+  const finished: ScheduleRun = {
+    ...waiting,
+    status: 'succeeded',
+    messageId: randomUUID(),
+    messagePreview: 'Stopped for today. Synthetic brief finished.',
+    messageText: 'Stopped for today. Synthetic brief finished.',
+  };
+  schedule = {
+    ...schedule,
+    lastRun: finished,
+    activeRun: null,
+  };
+  history = { runs: [finished, completed], nextCursor: null };
+  await act(async () => {
+    await pageDataCache.refresh('/api/schedules', true);
+    await pageDataCache.refresh(historyPath, true);
+  });
+  const finishedDetail = dom.window.document.querySelector<HTMLElement>('.schedule-run-detail');
+  assert.ok(finishedDetail);
+  assert.match(finishedDetail.textContent ?? '', /Done/);
+  assert.doesNotMatch(finishedDetail.textContent ?? '', /Needs your input/);
+  assert.equal(
+    finishedDetail.querySelector<HTMLButtonElement>('button:not(:disabled)'),
+    null,
+    'Finished run detail must not expose a pending-question chat jump.',
+  );
+  assert.deepEqual(focused, [
+    { messageId: questionId },
+    { messageId: resumedQuestionId },
+    { messageId: resumedQuestionId },
+  ]);
 });
 
 test(
