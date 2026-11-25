@@ -1880,9 +1880,10 @@ test('unavailable decisions avoid ledger reads and retain dynamic availability a
     { reads: 1, writes: 1, resolutions: 1, requests: 1 },
   );
   spent = 1;
-  assert.deepEqual(await checkMail([request.input.email]), [
-    'This month’s spending limit is reached.',
-  ]);
+  assert.deepEqual(
+    await checkMail([request.input.email, { ...request.input.email, text: 'Order delivered.' }]),
+    [false, 'This month’s spending limit is reached.'],
+  );
   assert.equal(curatorRequests, 100);
   assert.deepEqual(
     { reads, writes, resolutions, requests },
