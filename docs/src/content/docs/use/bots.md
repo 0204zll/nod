@@ -27,11 +27,11 @@ Bots don't hand work to each other. To ask a bot for something, write in its cha
 
 Each bot writes only its own things and can read everyone's, Nod's included.
 
-| Its own   | What it holds                                                                                                                                                                                                                             |
-| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Memory    | What it learns in its chat goes to its own [memory](/use/memory/). Any bot can look up what Nod and the other bots remember, and says whose memory a fact came from. Only the bot itself, or you in **Settings > Memory**, can change it. |
-| Folder    | Its files in the [workspace](/use/workspace/) live in `bots/<id>`. Other bots can read and copy them, but not change them.                                                                                                                |
-| Team note | A short note in the workspace's `team` folder on what you asked it, what it owns and what it found. Ask any bot "What is Penny working on?" and it checks Penny's live status and note.                                                   |
+| Its own   | What it holds                                                                                                                                                                                                                              |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Memory    | What it learns in its chat is saved in your one [memory](/use/memory/) as its notes. Every bot reads every note, and each note's details show the chat it came from. Only that bot, or you in **Settings > Memory**, can change its notes. |
+| Folder    | Its files in the [workspace](/use/workspace/) live in `bots/<id>`. Other bots can read and copy them, but not change them.                                                                                                                 |
+| Team note | A short note in the workspace's `team` folder on what you asked it, what it owns and what it found. Ask any bot "What is Penny working on?" and it checks Penny's live status and note.                                                    |
 
 Your apps, Vault, rules and settings are shared: bots use them with the same [approvals](/trust/approvals/) as Nod.
 

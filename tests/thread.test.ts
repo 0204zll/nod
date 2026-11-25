@@ -51,7 +51,6 @@ import type {
 } from '../src/shared/contracts.ts';
 import { fakeComputer, fakeWorkspace } from './runtime-fixtures.ts';
 import { createMemoryLearning } from '../src/server/memory-learning.ts';
-import { createMemories } from '../src/server/memories.ts';
 import { createMemoryService } from '../src/server/memory.ts';
 import { memoryObjectStore } from './fixtures/object-store.ts';
 import type { ProductAnalytics } from '../src/ports/analytics.ts';
@@ -12310,57 +12309,43 @@ const memoryFixture = async (tables: string[] = []) => {
 };
 
 test(
-  'each chat writes only its own memory and reads every memory with its owner named',
+  'each chat changes only the notes saved in it and reads every note',
   { skip: !process.env.TEST_DATABASE_URL, timeout: 30_000 },
   async () => {
     const { pool, ownerId, store, close } = await memoryFixture();
     try {
       const penny = randomUUID();
-      await pool.query('INSERT INTO bots(id,owner_id,name) VALUES($1,$2,$3)', [
-        penny,
-        ownerId,
-        'Penny',
-      ]);
-      const memories = createMemories({ pool, ownerId, store });
-      const home = await memories.nod.add({ area: 'about', text: 'Lives in Barcelona.' });
-      const bill = await memories.of(penny).add({
-        area: 'about',
-        text: 'Pays Iberdrola for electricity.',
+      const memory = createMemoryService({ pool, ownerId, store });
+      const owners = async () =>
+        Object.fromEntries(
+          (await memory.load()).entries.map((entry) => [entry.text, entry.bot ?? 'nod']),
+        );
+      const home = await memory.add({ area: 'about', text: 'Lives in Barcelona.' }, null);
+      const bill = { area: 'about', text: 'Pays Iberdrola for electricity.' };
+      let billPath = await memory.add(bill, penny);
+      assert.deepEqual(await owners(), {
+        'Lives in Barcelona.': 'nod',
+        'Pays Iberdrola for electricity.': penny,
       });
+      await memory.edit(
+        (tree) => {
+          tree.entries = [];
+          tree.archive = [];
+        },
+        { chat: penny },
+      );
+      assert.deepEqual(await owners(), { 'Lives in Barcelona.': 'nod' });
+      billPath = await memory.add(bill, penny);
+      await assert.rejects(memory.forget(home, undefined, penny), /only your own notes/);
+      await assert.rejects(memory.forget(billPath, undefined, null), /only your own notes/);
+      assert.equal(await memory.note(home, penny), undefined);
+      assert.equal(await memory.note(billPath, penny), bill.text);
       assert.deepEqual(
-        (await memories.nod.load()).entries.map((entry) => entry.text),
-        ['Lives in Barcelona.'],
+        (await memory.find({ query: 'Iberdrola' })).map((note) => note.bot),
+        [penny],
       );
-      assert.deepEqual(
-        (await memories.of(penny).load()).entries.map((entry) => entry.text),
-        ['Pays Iberdrola for electricity.'],
-      );
-      const found = (query: string, reader: string | null) =>
-        memories
-          .find({ query }, reader)
-          .then((notes) => notes.map((note) => [note.path, note.memory ?? 'own']));
-      assert.deepEqual(await found('Iberdrola', null), [[bill, 'Penny']]);
-      assert.deepEqual(await found('Barcelona', penny), [[home, 'Nod']]);
-      assert.equal(
-        ((await memories.read({ path: bill, memory: 'penny' }, null)) as { text: string }).text,
-        'Pays Iberdrola for electricity.',
-      );
-      await assert.rejects(memories.read({ path: bill }, null), /not found/);
-      await assert.rejects(memories.of(penny).forget(home), /no longer in memory/);
-      assert.match(
-        await memories.context(penny),
-        /Iberdrola[\s\S]*Nod's memory, read only:\n.*Barcelona/,
-      );
-      assert.doesNotMatch(await memories.context(null), /Iberdrola/);
-      await memories.nod.control({ enabled: false });
-      assert.equal(await memories.of(penny).enabled(), false);
-      await pool.query('UPDATE bots SET archived_at=now() WHERE id=$1', [penny]);
-      await assert.rejects(
-        memories.of(penny).add({ area: 'about', text: 'Has a cat.' }),
-        /This bot was removed/,
-      );
-      await memories.remove(penny);
-      assert.equal(await store.read(`memory/bots/${penny}.md`, 1_000_000), undefined);
+      await memory.dropBot(penny);
+      assert.deepEqual(await owners(), { 'Lives in Barcelona.': 'nod' });
     } finally {
       await close();
     }

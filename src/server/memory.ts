@@ -35,6 +35,7 @@ import {
   type Tree,
 } from './memory-tree.ts';
 
+const key = 'memory/MEMORY.md';
 const nilId = '00000000-0000-0000-0000-000000000000';
 const flat = (value: string) => value.replace(/\s+/g, ' ').trim();
 const findInput = z.object({ query: z.string().trim().min(1), area: area.optional() }).strict();
@@ -64,11 +65,7 @@ export const controlInput = z
     message: 'Choose whether to turn memory on, turn it off or clear it.',
   });
 export const forgetInput = z.object({ path }).strict();
-export const forgetReview = z
-  .object({ path, note: z.string(), memory: z.union([z.literal('nod'), z.uuid()]).optional() })
-  .strict();
-const nodKey = 'memory/MEMORY.md';
-
+export const forgetReview = z.object({ path, note: z.string() }).strict();
 function fail(message: string, statusCode = 400): never {
   throw Object.assign(new Error(message), { statusCode });
 }
@@ -78,7 +75,7 @@ export async function importMemoryFile(store: PrivateObjectStore, directory: str
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   });
   if (bytes)
-    await store.write(nodKey, bytes, { expectedVersion: null }).catch((error) => {
+    await store.write(key, bytes, { expectedVersion: null }).catch((error) => {
       if (!(error instanceof ObjectStoreConflict)) throw error;
     });
   await rm(directory, { recursive: true, force: true });
@@ -89,31 +86,21 @@ export function createMemoryService(options: {
   ownerId: string;
   store: PrivateObjectStore;
   analytics?: CaptureAnalytics;
-  bot?: { id: string; owner: MemoryService; active(): Promise<boolean> };
 }) {
-  const bot = options.bot;
-  const key = bot ? `memory/bots/${bot.id}.md` : nodKey;
   async function load() {
     const object = await options.store.read(key, maxBytes);
-    const tree = parse(object?.bytes);
-    if (bot) {
-      const owner = await bot.owner.load();
-      tree.enabled = owner.enabled;
-      tree.sensitive = owner.sensitive;
-      tree.skills = [];
-    }
-    return { tree, bytes: object?.bytes, version: object?.version ?? null };
+    return { tree: parse(object?.bytes), bytes: object?.bytes, version: object?.version ?? null };
   }
 
-  async function edit<T>(change: (tree: Tree) => T, { allowDisabled = false } = {}): Promise<T> {
-    if (bot && !(await bot.active())) fail('This bot was removed.', 404);
+  async function edit<T>(
+    change: (tree: Tree) => T,
+    { allowDisabled = false, chat }: { allowDisabled?: boolean; chat?: string | null } = {},
+  ): Promise<T> {
     for (let attempt = 0; ; attempt++) {
       const current = await load();
       if (!current.tree.enabled && !allowDisabled) throw new Error('Memory is turned off.');
-      const result = change(current.tree);
-      const bytes = render(
-        bot ? { ...current.tree, enabled: true, sensitive: false, skills: [] } : current.tree,
-      );
+      const result = chat === undefined ? change(current.tree) : within(current.tree, chat, change);
+      const bytes = render(current.tree);
       if (current.bytes ? Buffer.from(current.bytes).equals(bytes) : isEmpty(current.tree))
         return result;
       try {
@@ -125,17 +112,39 @@ export function createMemoryService(options: {
     }
   }
 
-  const rows = (tree: Tree) =>
-    Object.entries(indexLayout(tree, { tentative: true })).flatMap(([area, rows]) =>
-      rows.map((row) => `${area}/${row}`.replaceAll('\n', '\n  ')),
-    );
+  function within<T>(tree: Tree, chat: string | null, change: (tree: Tree) => T) {
+    const mine = (entry: Entry) => (entry.bot ?? null) === chat;
+    const others = tree.entries.filter((entry) => !mine(entry));
+    const othersArchived = tree.archive.filter((entry) => !mine(entry));
+    const skills = tree.skills;
+    const known = new Set(tree.entries.map(pathOf));
+    const taken = new Set(others.map(pathOf));
+    const archived = new Set(othersArchived.map((entry) => `${pathOf(entry)}@${entry.archived}`));
+    const result = change(tree);
+    tree.entries = [
+      ...others,
+      ...tree.entries
+        .filter((entry) => !taken.has(pathOf(entry)) && (mine(entry) || !known.has(pathOf(entry))))
+        .map((entry) => (chat && !entry.bot ? { ...entry, bot: chat } : entry)),
+    ];
+    tree.archive = [
+      ...othersArchived,
+      ...tree.archive.filter(
+        (entry) => mine(entry) && !archived.has(`${pathOf(entry)}@${entry.archived}`),
+      ),
+    ];
+    if (chat) tree.skills = skills;
+    return result;
+  }
 
   async function context() {
     const { tree } = await load();
     return [
       ...(tree.enabled ? [] : ['savingEnabled: false']),
       ...(tree.sensitive ? ['sensitiveTopics: allowed'] : []),
-      ...rows(tree),
+      ...Object.entries(indexLayout(tree, { tentative: true })).flatMap(([area, rows]) =>
+        rows.map((row) => `${area}/${row}`.replaceAll('\n', '\n  ')),
+      ),
     ].join('\n');
   }
 
@@ -158,27 +167,8 @@ export function createMemoryService(options: {
       throw new Error('The complete current owned user message is required.');
   }
 
-  async function control(raw: unknown): Promise<{ enabled: boolean; cleared?: boolean }> {
+  async function control(raw: unknown, chat: string | null = null) {
     const input = controlInput.parse(raw);
-    if (bot) {
-      const owner =
-        input.enabled === undefined
-          ? undefined
-          : await bot.owner.control({ enabled: input.enabled });
-      const mark = await watermark();
-      if (input.clear)
-        await edit(
-          (tree) => {
-            tree.entries = [];
-            tree.archive = [];
-            tree.generation++;
-            tree.reflected = mark;
-            tree.retries = 0;
-          },
-          { allowDisabled: true },
-        );
-      return { enabled: owner?.enabled ?? (await load()).tree.enabled, cleared: input.clear };
-    }
     const capture = snapshotAnalytics(options.analytics);
     const mark = await watermark();
     const result = await edit(
@@ -197,7 +187,7 @@ export function createMemoryService(options: {
         tree.retries = 0;
         return { before, after: { enabled: tree.enabled }, cleared: input.clear };
       },
-      { allowDisabled: true },
+      { allowDisabled: true, chat },
     );
     captureSettingChanges(capture, 'agent', result.before, result.after, {
       enabled: 'memory_enabled',
@@ -205,14 +195,17 @@ export function createMemoryService(options: {
     return { ...result.after, cleared: result.cleared };
   }
 
-  function noteText(tree: Tree, target: string) {
-    return (locate(tree, target) ?? tree.archive.find((item) => pathOf(item) === target))?.text;
+  function noteText(tree: Tree, target: string, chat?: string | null) {
+    const entry = locate(tree, target) ?? tree.archive.find((item) => pathOf(item) === target);
+    return chat === undefined || (entry?.bot ?? null) === chat ? entry?.text : undefined;
   }
 
-  async function forget(raw: unknown, expected?: string) {
+  async function forget(raw: unknown, expected?: string, chat?: string | null) {
     const target = path.parse(raw);
     return edit(
       (tree) => {
+        if (noteText(tree, target) !== undefined && noteText(tree, target, chat) === undefined)
+          fail('That note was saved in another chat. You can forget only your own notes.', 403);
         if (expected !== undefined && noteText(tree, target) !== expected)
           fail('The note changed. Review it before asking again.', 409);
         const entry = locate(tree, target);
@@ -229,12 +222,22 @@ export function createMemoryService(options: {
         tree.entries = tree.entries.filter((item) => item !== entry);
         return { ok: true };
       },
+      { allowDisabled: true, chat },
+    );
+  }
+
+  function dropBot(bot: string) {
+    return edit(
+      (tree) => {
+        tree.entries = tree.entries.filter((entry) => entry.bot !== bot);
+        tree.archive = tree.archive.filter((entry) => entry.bot !== bot);
+      },
       { allowDisabled: true },
     );
   }
 
-  function owned<T>(change: (tree: Tree, now: string) => T) {
-    return edit((tree) => change(tree, new Date().toISOString()), { allowDisabled: true });
+  function owned<T>(change: (tree: Tree, now: string) => T, chat?: string | null) {
+    return edit((tree) => change(tree, new Date().toISOString()), { allowDisabled: true, chat });
   }
 
   function safe(text: string | undefined) {
@@ -247,7 +250,7 @@ export function createMemoryService(options: {
       fail('You already have this note.');
   }
 
-  async function add(raw: unknown) {
+  async function add(raw: unknown, chat?: string | null) {
     const input = noteInput.parse(raw);
     safe(input.text);
     return owned((tree, now) => {
@@ -264,7 +267,7 @@ export function createMemoryService(options: {
       };
       tree.entries.push(entry);
       return pathOf(entry);
-    });
+    }, chat);
   }
 
   async function adopt(notes: Array<{ area: Area; text: string }>) {
@@ -432,8 +435,7 @@ export function createMemoryService(options: {
     });
   }
 
-  async function settings(raw: unknown): Promise<void> {
-    if (bot) return bot.owner.settings(raw);
+  async function settings(raw: unknown) {
     const input = settingsInput.parse(raw);
     const capture = snapshotAnalytics(options.analytics);
     const mark = await watermark();
@@ -506,8 +508,6 @@ export function createMemoryService(options: {
 
   return {
     context,
-    index: async () => rows((await load()).tree).join('\n'),
-    remove: () => options.store.remove(key),
     enabled: async () => (await load()).tree.enabled,
     currentSource,
     control,
@@ -549,7 +549,9 @@ export function createMemoryService(options: {
         }),
       };
     },
-    note: async (raw: unknown) => noteText((await load()).tree, path.parse(raw)),
+    note: async (raw: unknown, chat?: string | null) =>
+      noteText((await load()).tree, path.parse(raw), chat),
+    dropBot,
   };
 }
 

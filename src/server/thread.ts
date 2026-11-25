@@ -117,6 +117,16 @@ export interface TurnRef {
   turnId: string;
   browserId?: string;
   taskMessageId?: string;
+  chat?: string | null;
+}
+
+export async function turnChat(turnId?: string | null, database: Pool | PoolClient = pool) {
+  if (!turnId) return null;
+  const { rows } = await database.query<{ bot_id: string | null }>(
+    'SELECT bot_id FROM turns WHERE id=$1 AND owner_id=$2',
+    [turnId, ownerId],
+  );
+  return rows[0]?.bot_id ?? null;
 }
 interface EnqueueTurnOptions {
   source: Exclude<TurnSource, 'user'>;
@@ -229,7 +239,7 @@ export interface ThreadDependencies {
   localFiles?: boolean;
   computerUse?: boolean;
   mcpServers?: () => Promise<NonNullable<RuntimeContext['mcpServers']>>;
-  memoryContext?: (bot?: string | null) => Promise<RuntimeContext['memory']>;
+  memoryContext?: () => Promise<RuntimeContext['memory']>;
   recall?: (
     text: string,
     before: Date | undefined,
@@ -550,19 +560,14 @@ export async function insertAssistantMessage(
         [ownerId, turn.threadId, turn.turnId],
       )
     ).rows[0]?.id;
-  if (replyToMessageId) {
-    const chat = await client.query<{ bot_id: string | null }>(
-      'SELECT bot_id FROM turns WHERE id=$1 AND owner_id=$2',
-      [turn.turnId, ownerId],
-    );
+  if (replyToMessageId)
     await assertReplyTarget(
       client,
       turn.threadId,
       replyToMessageId,
       false,
-      chat.rows[0]?.bot_id ?? null,
+      turn.chat !== undefined ? turn.chat : await turnChat(turn.turnId, client),
     );
-  }
   const id = randomUUID();
   await client.query(
     'INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id,attachments,stream_id,reply_to_message_id,presentation,answer_choices) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
@@ -2077,7 +2082,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       [ownerId],
     ),
     dependencies.accountProfile?.().catch(() => undefined),
-    dependencies.memoryContext?.(turn.bot_id).catch(() => ''),
+    dependencies.memoryContext?.().catch(() => ''),
     dependencies.learnedSkills?.().catch(() => undefined),
     turn.background
       ? dependencies.connectedApps?.()
@@ -2245,7 +2250,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
     });
   const turnId = turn.id as string;
   const threadId = turn.thread_id as string;
-  const ref: TurnRef = { threadId, turnId, browserId: turn.session_id };
+  const ref: TurnRef = { threadId, turnId, browserId: turn.session_id, chat: turn.bot_id ?? null };
   const artifacts = dependencies.artifacts ?? localArtifacts;
   const controller = new AbortController();
   const { signal } = controller;

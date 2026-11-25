@@ -1,6 +1,5 @@
 import { focusMessage } from '../lib/bots';
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
-import { Tabs } from '../components/tabs';
 import {
   CalendarClock,
   Check,
@@ -1210,17 +1209,7 @@ export function Memory({
   onOpenSource?(messageId: string, view: MemoryNavigationState, botId?: string): void;
   initialView?: MemoryNavigationState;
 }) {
-  const [chat, setChat] = useState('nod');
-  const scope = chat === 'nod' ? '' : `?bot=${chat}`;
-  const known = useRef<NonNullable<MemoryView['memories']>>([]);
-  const {
-    data: view,
-    error: loadError,
-    loading,
-    update,
-  } = usePageData<MemoryView>(`/api/memory${scope}`);
-  if (view?.memories) known.current = view.memories;
-  const memories = known.current;
+  const { data: view, error: loadError, loading, update } = usePageData<MemoryView>('/api/memory');
   const format = useDateFormat();
   const [compact, panelRef, panel] = useCompact();
   const [restoredView] = useState(initialView);
@@ -1276,7 +1265,7 @@ export function Memory({
     requests.current.add(request);
     setSaving((count) => count + 1);
     try {
-      const next = await api<MemoryUpdate>(`${path}${scope}`, {
+      const next = await api<MemoryUpdate>(path, {
         method,
         signal: request.signal,
         ...(body ? { body: JSON.stringify(body) } : {}),
@@ -1564,20 +1553,6 @@ export function Memory({
         </div>
       )}
       {settingError && <Notice>{settingError}</Notice>}
-      {memories.length > 1 && (
-        <Tabs
-          id="memory-chats"
-          panelId="memory-chat-panel"
-          label="Whose memory"
-          size="compact"
-          items={memories.map((item) => ({ value: item.id, label: item.name }))}
-          value={chat}
-          onValueChange={(next) => {
-            setChosen(undefined);
-            setChat(next);
-          }}
-        />
-      )}
       {loadError && !view && <Notice>Could not load your memory.</Notice>}
       {!view ? (
         loading && <Loading label="Loading memory…" />
@@ -1585,7 +1560,7 @@ export function Memory({
         detail
       ) : (
         <>
-          <div className="memory-bar" id="memory-chat-panel">
+          <div className="memory-bar">
             <SearchField
               className="memory-search"
               type="search"
@@ -1616,10 +1591,7 @@ export function Memory({
               onClick={() => {
                 setExporting(true);
                 setSettingError('');
-                downloadExport(
-                  `/api/memory/export${scope}`,
-                  `${(view.memories?.find((item) => item.id === chat)?.name ?? 'nod').toLowerCase().replace(/[^a-z0-9]+/g, '-')}-memory.md`,
-                )
+                downloadExport('/api/memory/export', 'nod-memory.md')
                   .catch((cause) => setSettingError(errorMessage(cause)))
                   .finally(() => setExporting(false));
               }}

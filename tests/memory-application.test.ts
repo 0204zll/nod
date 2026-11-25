@@ -1872,10 +1872,7 @@ test(
     const recall = createMemoryRecall({
       pool,
       ownerId: 'owner-a',
-      memories: {
-        views: async () => [{ label: {}, view: await memory.view() }],
-        find: (raw) => memory.find(raw),
-      },
+      memory,
       curator: {
         id: 'fixture',
         configured: true,

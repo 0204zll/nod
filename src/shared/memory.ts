@@ -51,7 +51,7 @@ export interface MemoryNote {
   learnedFrom: 'email' | null;
   sources: MemorySource[];
   fact?: MemoryFact;
-  memory?: string;
+  bot?: string;
 }
 
 export interface MemoryArchived {
@@ -81,7 +81,6 @@ export interface MemoryView {
   notes: MemoryNote[];
   archive: MemoryArchived[];
   skills: LearnedSkill[];
-  memories?: Array<{ id: string; name: string }>;
 }
 
 export interface MemoryImported {

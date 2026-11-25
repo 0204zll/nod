@@ -81,7 +81,7 @@ Imported notes are like notes you add yourself: they help Nod understand you and
 
 ## Review and change memory
 
-Open **Settings → Memory**. The saving and sensitive-details switches sit above your notes. With [bots](/use/bots/), pick Nod or a bot above the search to see and change what each one remembers. Filter by **All**, **Mentioned once**, **Learned**, **Confirmed**, **Let go** or **Skills**, or search.
+Open **Settings → Memory**. The saving and sensitive-details switches sit above your notes. Filter by **All**, **Mentioned once**, **Learned**, **Confirmed**, **Let go** or **Skills**, or search.
 
 Open **Details** on a note or skill to see its updated date and source. **View message** opens a note’s source in the current chat. **Back to Memory** restores the selected note, filters, search and open Details. A source from a reset conversation remains an excerpt instead of a link. Missing messages are marked unavailable. Skills show their original task as text.
 

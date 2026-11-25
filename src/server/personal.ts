@@ -4,8 +4,8 @@ import type { PoolClient } from 'pg';
 import type { FastifyInstance } from 'fastify';
 import { afterCommit } from './transaction.ts';
 import { createPreferencesStore } from './preferences.ts';
-import { controlInput, forgetInput, forgetReview } from './memory.ts';
-import type { Memories } from './memories.ts';
+import { controlInput, forgetInput, forgetReview, type MemoryService } from './memory.ts';
+import { turnChat } from './thread.ts';
 import type { LearnedSkills } from './learned-skills.ts';
 import type { MemoryUpdate, MemoryView } from '../shared/memory.ts';
 import { memoryFileName, memoryMarkdown } from '../shared/memory-export.ts';
@@ -20,7 +20,7 @@ import type { ModelRoute, ModelSelection } from '../shared/models.ts';
 type ModelScope = 'chat' | 'schedules' | 'background' | 'schedule' | 'task';
 
 type PersonalDependencies = ScheduleDependencies & {
-  memories?: Memories;
+  memory?: MemoryService;
   learnedSkills?: LearnedSkills;
   models?: ReturnType<typeof createModelService>;
   localFilesAvailable?: boolean;
@@ -51,10 +51,7 @@ export function createPersonalService(dependencies: PersonalDependencies) {
   const { pool, ownerId, refresh } = dependencies;
   const preferences = createPreferencesStore(pool, ownerId, dependencies.analytics);
   const schedules = createSchedules(dependencies);
-  const memories = dependencies.memories;
-  const memory = memories?.nod;
-  const own = (value?: string | null) => (value && value !== 'nod' ? value : null);
-  const chatOf = (turnId?: string | null) => memories?.chatOf(turnId) ?? Promise.resolve(null);
+  const memory = dependencies.memory;
   async function assertOwnTarget(action: string, args: Record<string, unknown>, turnId?: string) {
     const kind = ['schedule_update', 'schedule_pause', 'schedule_cancel'].includes(action)
       ? 'schedules'
@@ -163,7 +160,7 @@ export function createPersonalService(dependencies: PersonalDependencies) {
     }
     if (action === 'memory_forget') {
       const input = forgetReview.parse(args);
-      if ((await memories?.of(own(input.memory)).note(input.path)) !== input.note)
+      if ((await memory?.note(input.path)) !== input.note)
         throw Object.assign(new Error('The note changed. Review it before asking again.'), {
           statusCode: 409,
         });
@@ -180,24 +177,21 @@ export function createPersonalService(dependencies: PersonalDependencies) {
     args: Record<string, unknown>,
     provenance: { sourceMessageId: string | null; turnId: string; ownerRooted: boolean },
   ): Promise<Record<string, unknown>> {
-    if (!memories) throw new Error('Memory is unavailable.');
+    if (!memory) throw new Error('Memory is unavailable.');
     if (action === 'memory_forget') {
       if (!provenance.sourceMessageId || !provenance.ownerRooted)
         throw new Error('Only a request from the owner can forget a note.');
       const { path } = forgetInput.parse(args);
-      const bot = await chatOf(provenance.turnId);
-      const note = await memories.of(bot).note(path);
+      const note = await memory.note(path, await turnChat(provenance.turnId));
       if (note === undefined)
-        throw new Error(
-          'This note is not in your own memory. You can forget only notes in your own memory.',
-        );
-      return { path, note, memory: bot ?? 'nod' };
+        throw new Error('This note is not one you saved. You can forget only your own notes.');
+      return { path, note };
     }
     const { quote, ...change } = args;
     const input = controlInput.parse(change);
     if (input.clear && !provenance.ownerRooted)
       throw new Error('Only a request from the owner can clear memory.');
-    await memories.nod.currentSource(provenance, z.string().trim().min(1).parse(quote));
+    await memory.currentSource(provenance, z.string().trim().min(1).parse(quote));
     return input;
   }
 
@@ -292,7 +286,7 @@ export function createPersonalService(dependencies: PersonalDependencies) {
     }
     await assertOwnTarget(action, args, provenance?.turnId);
     if (action === 'schedule_list') {
-      const chat = await chatOf(provenance?.turnId);
+      const chat = await turnChat(provenance?.turnId);
       return (await schedules.list()).filter((schedule) => (schedule.botId ?? null) === chat);
     }
     if (action === 'schedule_record_observation')
@@ -311,24 +305,28 @@ export function createPersonalService(dependencies: PersonalDependencies) {
         options?.client,
       );
     if (action === 'memory_find') {
-      if (!memories) throw new Error('Memory is unavailable.');
-      return memories.find(args, await chatOf(provenance?.turnId));
+      if (!memory) throw new Error('Memory is unavailable.');
+      return memory.find(args);
     }
     if (action === 'memory_read') {
-      if (!memories) throw new Error('Memory is unavailable.');
-      return memories.read(args, await chatOf(provenance?.turnId));
+      if (!memory) throw new Error('Memory is unavailable.');
+      return memory.read(args);
     }
     if (action === 'memory_control') {
-      if (!memories) throw new Error('Memory is unavailable.');
-      const result = await memories.of(await chatOf(provenance?.turnId)).control(args);
+      if (!memory) throw new Error('Memory is unavailable.');
+      const result = await memory.control(args, await turnChat(provenance?.turnId));
       if (result.cleared) remembered('clear', 'agent');
       afterCommit(options?.client ?? pool, refresh);
       return result;
     }
     if (action === 'memory_forget') {
-      if (!memories) throw new Error('Memory is unavailable.');
+      if (!memory) throw new Error('Memory is unavailable.');
       const input = forgetReview.parse(args);
-      const result = await memories.of(own(input.memory)).forget(input.path, input.note);
+      const result = await memory.forget(
+        input.path,
+        input.note,
+        await turnChat(provenance?.turnId),
+      );
       remembered('forget', 'agent');
       return result;
     }
@@ -374,85 +372,65 @@ export function createPersonalService(dependencies: PersonalDependencies) {
     }>;
   }
 
-  async function memoryView(bot: string | null = null): Promise<MemoryView> {
-    if (!memories) throw Object.assign(new Error('Memory is unavailable.'), { statusCode: 404 });
-    const [view, list] = await Promise.all([memories.of(bot).view(), memories.list()]);
-    return { ...view, memories: list };
+  async function memoryView(): Promise<MemoryView> {
+    if (!memory) throw Object.assign(new Error('Memory is unavailable.'), { statusCode: 404 });
+    return memory.view();
   }
 
   function registerRoutes(app: FastifyInstance) {
-    const botOf = (request: { query: unknown }) =>
-      z.object({ bot: z.uuid().optional() }).parse(request.query ?? {}).bot ?? null;
     const changed = async (
-      bot: string | null,
       change: Promise<unknown> | undefined,
       operation?: MemoryChange['operation'],
     ): Promise<MemoryUpdate> => {
       const result = await change;
       if (change && operation && result !== false) remembered(operation, 'owner');
       refresh();
-      return {
-        ...(await memoryView(bot)),
-        ...(typeof result === 'string' ? { path: result } : {}),
-      };
+      return { ...(await memoryView()), ...(typeof result === 'string' ? { path: result } : {}) };
     };
     const notePath = (params: unknown) => {
       const { area, slug } = params as { area: string; slug: string };
       return `${area}/${slug}`;
     };
-    const target = (request: { query: unknown }) => {
-      const bot = botOf(request);
-      return { bot, memory: memories?.of(bot) };
-    };
-    app.get('/api/memory', (request) => memoryView(botOf(request)));
-    app.get('/api/memory/export', async (request, reply) => {
+    app.get('/api/memory', memoryView);
+    app.get('/api/memory/export', async (_request, reply) => {
       const now = new Date();
       return reply
         .header('Content-Type', 'text/markdown; charset=utf-8')
         .header('Cache-Control', 'private, no-store')
         .header('X-Content-Type-Options', 'nosniff')
         .header('Content-Disposition', `attachment; filename="${memoryFileName(now)}"`)
-        .send(memoryMarkdown(await memoryView(botOf(request)), now));
+        .send(memoryMarkdown(await memoryView(), now));
     });
-    app.patch('/api/memory', (request) => changed(botOf(request), memory?.settings(request.body)));
-    app.post('/api/memory/notes', (request) => {
-      const { bot, memory } = target(request);
-      return changed(bot, memory?.add(request.body), 'save');
-    });
+    app.patch('/api/memory', (request) => changed(memory?.settings(request.body)));
+    app.post('/api/memory/notes', (request) => changed(memory?.add(request.body), 'save'));
     app.post('/api/memory/import', async (request): Promise<MemoryUpdate> => {
-      const { bot, memory } = target(request);
-      if (!memory) return memoryView(bot);
+      if (!memory) return memoryView();
       const { saved, ...imported } = await memory.importNotes(request.body);
       if (saved) remembered('save', 'owner');
       refresh();
-      return { ...(await memoryView(bot)), imported };
+      return { ...(await memoryView()), imported };
     });
-    app.patch('/api/memory/notes/:area/:slug', (request) => {
-      const { bot, memory } = target(request);
-      return changed(bot, memory?.change(notePath(request.params), request.body), 'save');
-    });
-    app.delete('/api/memory/notes/:area/:slug', (request) => {
-      const { bot, memory } = target(request);
-      return changed(bot, memory?.forget(notePath(request.params)), 'forget');
-    });
-    app.post('/api/memory/notes/:area/:slug/archive', (request) => {
-      const { bot, memory } = target(request);
-      return changed(bot, memory?.archiveNote(notePath(request.params)), 'archive');
-    });
-    app.post('/api/memory/archive/restore', (request) => {
-      const { bot, memory } = target(request);
-      return changed(bot, memory?.restore(request.body), 'save');
-    });
-    app.post('/api/memory/archive/forget', (request) => {
-      const { bot, memory } = target(request);
-      return changed(bot, memory?.forgetArchived(request.body), 'forget');
-    });
+    app.patch('/api/memory/notes/:area/:slug', (request) =>
+      changed(memory?.change(notePath(request.params), request.body), 'save'),
+    );
+    app.delete('/api/memory/notes/:area/:slug', (request) =>
+      changed(memory?.forget(notePath(request.params)), 'forget'),
+    );
+    app.post('/api/memory/notes/:area/:slug/archive', (request) =>
+      changed(memory?.archiveNote(notePath(request.params)), 'archive'),
+    );
+    app.post('/api/memory/archive/restore', (request) =>
+      changed(memory?.restore(request.body), 'save'),
+    );
+    app.post('/api/memory/archive/forget', (request) =>
+      changed(memory?.forgetArchived(request.body), 'forget'),
+    );
     const skillName = (params: unknown) => (params as { name: string }).name;
     app.patch('/api/memory/skills/:name', (request) =>
-      changed(null, learnedSkills?.change(skillName(request.params), request.body)),
+      changed(learnedSkills?.change(skillName(request.params), request.body)),
     );
     app.delete('/api/memory/skills/:name', (request) =>
-      changed(null, learnedSkills?.forget(skillName(request.params))),
+      changed(learnedSkills?.forget(skillName(request.params))),
     );
     schedules.registerRoutes(app);
   }
