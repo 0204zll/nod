@@ -2565,12 +2565,17 @@ async function initializeApplication(
                 )
               ).rowCount,
             ));
+        const delegateModel = adapters.models?.light() ?? undefined;
         const run = () =>
           ledger.withTurn(
             context.turnId,
             () =>
               runtime
-                .runTurn({ ...context, runtimeHost: desktopMode ? 'desktop' : 'server' })
+                .runTurn({
+                  ...context,
+                  ...(delegateModel ? { delegateModel } : {}),
+                  runtimeHost: desktopMode ? 'desktop' : 'server',
+                })
                 .finally(() => proactivity.release(context.turnId)),
             Boolean(context.spendingLimitReached),
             Boolean(context.automatic),

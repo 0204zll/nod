@@ -126,6 +126,7 @@ export interface RuntimeContext {
   background?: boolean;
   scheduleCache?: 'short' | 'long';
   model?: ModelSelection;
+  delegateModel?: ModelSelection;
   channel?: string;
   runtimeHost?: 'desktop' | 'server';
   timeZone?: string;
@@ -351,6 +352,7 @@ export type AgentEvent =
       type: 'message_end';
       status?: 'succeeded' | 'failed' | 'cancelled' | 'incomplete';
       contextExhausted?: boolean;
+      beforeTool?: string;
     }
   | { type: 'text_delta'; text: string }
   | { type: 'thinking'; title: string }
@@ -373,6 +375,7 @@ export interface AgentToolOutcome {
 }
 export interface AgentSessionOptions extends ExecutionScope {
   model?: ModelSelection;
+  lighterEffort?: boolean;
   automatic?: boolean;
   restricted?: boolean;
   ephemeral?: boolean;
