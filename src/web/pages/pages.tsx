@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, type ComponentProps } from 'react';
+import { pageTypes, type PageType } from '../../shared/attachment-kind';
 import type { Page, PageVersion } from '../../shared/contracts';
 import { useArtifactDrawer } from '../components/artifact-context';
 import { ArtifactWorkspace } from '../components/artifact-drawer';
-import { DataThumbnail } from '../components/attachment-card';
+import { DataThumbnail, thumbnailKinds } from '../components/attachment-card';
+import { FileGlyph } from '../components/attachment-glyph';
 import type { ImagePreview } from '../components/attachment-images';
 import { FileText, Trash2 } from '../components/icons';
 import { PageTitle } from '../components/page-title';
@@ -23,6 +25,14 @@ import { navigate } from '../lib/navigation';
 import './pages.css';
 
 type ThumbnailKind = ComponentProps<typeof DataThumbnail>['kind'];
+
+const typeLabels: Record<PageType, string> = {
+  docs: 'Docs',
+  slides: 'Slides',
+  data: 'Data',
+  images: 'Images',
+  files: 'Files',
+};
 
 interface PageList {
   pages: Page[];
@@ -63,17 +73,25 @@ function PageCards({
           <li key={page.id}>
             <div className="pages-card">
               <button type="button" className="pages-card-open" onClick={() => void open(page)}>
-                {kind ? (
+                {kind === 'image' ? (
+                  <span className="pages-card-image" aria-hidden="true">
+                    <img src={page.artifact.url} alt="" loading="lazy" decoding="async" />
+                  </span>
+                ) : kind && thumbnailKinds.has(kind) ? (
                   <DataThumbnail item={page.artifact} kind={kind as ThumbnailKind} wide />
                 ) : (
                   <span className="pages-card-blank" aria-hidden="true">
-                    <FileText size={32} />
+                    <FileGlyph
+                      name={page.artifact.name}
+                      mimeType={page.artifact.mimeType}
+                      size={32}
+                    />
                   </span>
                 )}
                 <span className="pages-card-details">
                   <span className="pages-card-title">{page.title}</span>
                   <span className="pages-card-meta">
-                    Version {page.version} ·{' '}
+                    {typeLabels[page.type]} · Version {page.version} ·{' '}
                     <time dateTime={page.createdAt}>{formatDateTime(page.createdAt, format)}</time>
                   </span>
                 </span>
@@ -104,7 +122,10 @@ export function Pages() {
     const timer = setTimeout(() => setSearch(query.trim()), 200);
     return () => clearTimeout(timer);
   }, [query]);
-  const filter = search ? `q=${encodeURIComponent(search)}` : '';
+  const [type, setType] = useState<PageType | null>(null);
+  const filter = [search && `q=${encodeURIComponent(search)}`, type && `type=${type}`]
+    .filter(Boolean)
+    .join('&');
   const { data, error, refresh } = usePageData<PageList>(`/api/pages${filter && `?${filter}`}`);
   const [more, setMore] = useState<{ filter: string; pages: Page[]; next?: string } | null>(null);
   const current = useRef(filter);
@@ -186,9 +207,22 @@ export function Pages() {
             type="search"
             value={query}
             placeholder="Search"
-            aria-label="Search pages by title"
+            aria-label="Search by title"
             onChange={(event) => setQuery(event.target.value)}
           />
+          <div className="pages-types" role="group" aria-label="Show one type">
+            {pageTypes.map((item) => (
+              <button
+                type="button"
+                key={item}
+                className="pages-type"
+                aria-pressed={type === item}
+                onClick={() => setType(type === item ? null : item)}
+              >
+                {typeLabels[item]}
+              </button>
+            ))}
+          </div>
           <div data-analytics-private>
             {error ? (
               <>
@@ -201,8 +235,10 @@ export function Pages() {
               <div role="status">
                 <Loading label="Loading pages" />
               </div>
-            ) : !shown.length && search ? (
-              <p className="pages-no-results">No pages match “{search}”.</p>
+            ) : !shown.length && (search || type) ? (
+              <p className="pages-no-results">
+                {search ? `Nothing matches “${search}”.` : `Nothing in ${typeLabels[type!]} yet.`}
+              </p>
             ) : !shown.length ? (
               <section className="pages-empty" aria-labelledby="pages-empty-title">
                 <span className="pages-empty-icon" aria-hidden="true">
@@ -210,8 +246,8 @@ export function Pages() {
                 </span>
                 <h2 id="pages-empty-title">No pages yet</h2>
                 <p>
-                  Ask Nod for a specification, a runbook, a weekly update or meeting notes as a
-                  page. Each one is kept here, with every version.
+                  Every file Nod shares is kept here, with every version: pages, documents,
+                  presentations, spreadsheets and images.
                 </p>
               </section>
             ) : (
