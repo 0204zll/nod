@@ -44,7 +44,7 @@ export interface ModelTraces {
   active(): boolean;
   record(trace: ModelTrace): void;
   capturing?(): boolean;
-  capture?(trace: ModelCallTrace): void;
+  capture?(build: () => ModelCallTrace, turnId?: string): void;
 }
 
 export type ModelTraceDelivery = (trace: ModelTrace, signal: AbortSignal) => Promise<void>;

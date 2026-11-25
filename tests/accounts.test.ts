@@ -9955,22 +9955,25 @@ test(
       },
       stopReason: 'stop',
     });
-    traces.capture(call(mine));
-    traces.capture(call(theirs));
+    traces.capture(() => call(mine), mine);
+    traces.capture(() => call(theirs), theirs);
+    traces.withTurn({ sessionId: mine, turnId: mine }, () => traces.capture(() => call(mine)));
+    traces.captureTurn(mine, () => traces.outsideTurn(() => traces.capture(() => call(mine))));
+    traces.captureTurn(mine, () => traces.capture(() => call(mine)));
     let found;
     for (let attempt = 0; attempt < 40; attempt++) {
       found = await ownerA.read(mine);
-      if (found?.calls.length) break;
+      if (found?.calls.length === 2) break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.equal(found?.calls.length, 1);
+    assert.equal(found?.calls.length, 2);
     assert.equal(found?.calls[0]?.tools[0]?.name, 'read');
     assert.ok(!JSON.stringify(found).includes('fixture-model-key-5d21'));
     assert.equal(await ownerA.read(theirs), undefined);
     assert.equal((await ownerB.read(theirs))?.calls.length, 0);
     assert.equal(
       (await pool.query('SELECT count(*)::int AS n FROM model_call_traces')).rows[0].n,
-      1,
+      2,
     );
   },
 );

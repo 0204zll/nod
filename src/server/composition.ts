@@ -413,7 +413,7 @@ export function createDefaultAdapters(
     active: () => false,
     record: () => {},
     capturing: () => traces.capturing(),
-    capture: (trace: Parameters<typeof traces.capture>[0]) => traces.capture(trace),
+    capture: (...args: Parameters<typeof traces.capture>) => traces.capture(...args),
   };
   const modelCurator = createPiMemoryCurator({
     get provider() {
@@ -2514,11 +2514,15 @@ async function initializeApplication(
               ids,
             )
             .finally(() => {
+              const due = () => proactivity.due();
               void admission
-                .run(() => proactivity.due())
+                .run(() => (adapters.traces ? adapters.traces.outsideTurn(due) : due()))
                 ?.catch((error) => logFailure('proactivity_wake', error));
             });
-        return adapters.traces?.withTurn({ turnId, sessionId }, observe) ?? observe();
+        const traces = adapters.traces;
+        return traces
+          ? traces.captureTurn(turnId, () => traces.withTurn({ turnId, sessionId }, observe))
+          : observe();
       },
       consumers,
       artifacts,

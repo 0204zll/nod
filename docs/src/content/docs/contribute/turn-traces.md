@@ -11,9 +11,9 @@ The short version: in a source install, select **Show trace** in the chat toolba
 
 ## When traces are on
 
-Traces exist only in dev mode: a source install started with `pnpm dev`. A server started with `pnpm start`, one with `NODE_ENV=production` or `NOD_ENVIRONMENT` set to anything other than `development`, and the desktop app never record them, and the panel and its routes aren't there.
+Traces exist only in dev mode: a source install started with `pnpm dev`, which sets `NODE_ENV=development`. Any other server, including `pnpm start`, `pnpm dev:server`, the self-host image and a server with `NOD_ENVIRONMENT` set to anything other than `development`, and the desktop app never record them, and the panel and its routes aren't there.
 
-There is no extra switch. In developer mode Nod stores every model call, whether or not the panel is open.
+There is no extra switch. In dev mode Nod stores every model call made inside a turn, whether or not the panel is open. Work a turn sets off after it ends, such as proactive checks, isn't part of it. If the database falls behind, Nod drops new traces rather than holding them in memory.
 
 ## What the panel shows
 

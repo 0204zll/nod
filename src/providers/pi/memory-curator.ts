@@ -16,7 +16,7 @@ import { lightestEffort, modelPricingSignature } from '../../shared/models.ts';
 import type { MemoryCurator } from '../../ports/memory-curator.ts';
 import { agentModels, memoryModels } from '../../shared/model-defaults.ts';
 import { piUsageMetrics } from './usage.ts';
-import { piModelCallTrace, piModelTrace } from './traces.ts';
+import { capturePiModelCall, piModelTrace } from './traces.ts';
 import type { ProviderUsageEvent } from '../../ports/provider-usage.ts';
 import type { ModelTraces } from '../../ports/traces.ts';
 
@@ -317,8 +317,7 @@ export function createPiMemoryCurator(options: {
               turn_id: traceTurnId,
             }),
           );
-        if (options.traces?.capturing?.())
-          options.traces.capture?.(piModelCallTrace(call, { source: 'curator', task }));
+        capturePiModelCall(options.traces, call, { source: 'curator', task });
         return reply;
       };
       const reply = await retryAssistantCall(

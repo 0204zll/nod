@@ -45,7 +45,8 @@ export function createModelTraces(deliver?: ModelTraceDelivery, appVersion?: str
   }>();
   let secrets: string[] = [];
   let secretText = createTextRedactor(secrets);
-  let sink: ((trace: ModelCallTrace & { turnId: string }) => void) | undefined;
+  const capturedTurns = new AsyncLocalStorage<string>();
+  let sink: ((entry: CapturedCall) => void) | undefined;
   let profile: () => Promise<PersonalProfile> = async () => ({ names: [] });
   let loaded: { profile: string; text: (value: string) => string } | undefined;
   let seen = -1;
@@ -137,7 +138,7 @@ export function createModelTraces(deliver?: ModelTraceDelivery, appVersion?: str
       profile?: () => Promise<PersonalProfile>;
       userId?: string;
       conversationKey?: Uint8Array;
-      capture?: ((trace: ModelCallTrace & { turnId: string }) => void) | null;
+      capture?: ((entry: CapturedCall) => void) | null;
     }) {
       if (options.capture !== undefined) sink = options.capture ?? undefined;
       if (options.conversationKey) {
@@ -172,24 +173,36 @@ export function createModelTraces(deliver?: ModelTraceDelivery, appVersion?: str
     available: deliver !== undefined,
     active: () => enabled && deliver !== undefined,
     capturing: () => sink !== undefined,
-    capture(trace: ModelCallTrace) {
-      const turnId = trace.turnId ?? turns.getStore()?.turnId;
+    capture(build: () => ModelCallTrace, explicitTurnId?: string) {
+      const turnId = explicitTurnId ?? capturedTurns.getStore();
       if (!sink || !turnId) return;
+      const redact = secretText;
       const text = (value: string) =>
-        secretText(homes.reduce((result, path) => result.replaceAll(path, '~'), value));
-      sink(
-        JSON.parse(
-          JSON.stringify(
-            {
-              ...trace,
-              messages: withoutSecretKeys(trace.messages),
-              output: withoutSecretKeys(trace.output),
-              turnId,
-            },
-            (_key, item) => (typeof item === 'string' ? text(item) : item),
-          ),
-        ),
-      );
+        redact(homes.reduce((result, path) => result.replaceAll(path, '~'), value));
+      sink({
+        turnId,
+        build() {
+          const trace = build();
+          return {
+            id: trace.id,
+            json: JSON.stringify(
+              {
+                ...trace,
+                messages: withoutSecretKeys(trace.messages),
+                output: withoutSecretKeys(trace.output),
+                turnId,
+              },
+              (_key, item) => (typeof item === 'string' ? text(item) : item),
+            ),
+          };
+        },
+      });
+    },
+    captureTurn<T>(turnId: string, run: () => T): T {
+      return capturedTurns.run(turnId, run);
+    },
+    outsideTurn<T>(run: () => T): T {
+      return capturedTurns.exit(run);
     },
     withTurn<T>(
       context: { sessionId: string; turnId: string },
@@ -219,3 +232,7 @@ export function createModelTraces(deliver?: ModelTraceDelivery, appVersion?: str
 }
 
 export type ModelTraceGate = ReturnType<typeof createModelTraces>;
+export interface CapturedCall {
+  turnId: string;
+  build(): { id: string; json: string };
+}

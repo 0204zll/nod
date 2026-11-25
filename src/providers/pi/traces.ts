@@ -303,6 +303,7 @@ export function piModelCallTrace(
     turnId?: string;
     runId?: string;
     parentRunId?: string;
+    endedAt?: string;
   },
 ): ModelCallTrace {
   const { message } = call;
@@ -318,7 +319,7 @@ export function piModelCallTrace(
     provider: call.model.provider,
     model: message.responseModel ?? call.model.id,
     startedAt: call.startedAt,
-    endedAt: new Date().toISOString(),
+    endedAt: metadata.endedAt ?? new Date().toISOString(),
     ...replayedSystem(call.context),
     messages: withoutImageData(
       call.context.messages.map((entry) =>
@@ -357,5 +358,16 @@ export function recordPiModelCall(
 ) {
   if (!traces) return;
   if (traces.active()) traces.record(trace());
-  if (traces.capturing?.()) traces.capture?.(piModelCallTrace(call, metadata));
+  capturePiModelCall(traces, call, metadata);
+}
+
+export function capturePiModelCall(
+  traces: ModelTraces | undefined,
+  call: PiModelCall,
+  metadata: Parameters<typeof piModelCallTrace>[1],
+) {
+  if (!traces?.capturing?.()) return;
+  const snapshot = { ...call, context: { ...call.context, messages: [...call.context.messages] } };
+  const endedAt = new Date().toISOString();
+  traces.capture?.(() => piModelCallTrace(snapshot, { ...metadata, endedAt }), metadata.turnId);
 }
