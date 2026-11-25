@@ -121,7 +121,12 @@ function Copyable({ text, label }: { text: string; label: string }) {
       size="icon"
       aria-label={copied ? 'Copied' : label}
       title={copied ? 'Copied' : label}
-      onClick={() => void navigator.clipboard.writeText(text).then(() => setCopied(true))}
+      onClick={() =>
+        void navigator.clipboard?.writeText(text).then(
+          () => setCopied(true),
+          () => undefined,
+        )
+      }
     >
       {copied ? <Check size={16} /> : <Copy size={16} />}
     </Button>
@@ -427,6 +432,7 @@ export function TraceDrawer({ changed, onClose }: { changed: unknown; onClose():
     if (!current) return;
     const controller = new AbortController();
     setSelectedId(undefined);
+    setError('');
     void load(current, controller.signal);
     const updated = (event: Event) => {
       if ((event as CustomEvent<{ turnId: string }>).detail?.turnId === current)
@@ -576,8 +582,21 @@ export function TraceDrawer({ changed, onClose }: { changed: unknown; onClose():
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize trace"
+        aria-valuemin={minimumWidth}
         aria-valuenow={width}
         tabIndex={0}
+        onKeyDown={(event) => {
+          if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+          const page = root.current?.parentElement;
+          if (!page) return;
+          event.preventDefault();
+          const next = Math.min(
+            Math.max(width + (event.key === 'ArrowLeft' ? 24 : -24), minimumWidth),
+            page.clientWidth - minimumWidth,
+          );
+          setWidth(next);
+          writeUiPreference('nod.trace-width', String(next));
+        }}
         onPointerDown={(event) => {
           const page = root.current?.parentElement;
           if (!page || event.button !== 0) return;
@@ -596,16 +615,16 @@ export function TraceDrawer({ changed, onClose }: { changed: unknown; onClose():
             );
             setWidth(latest);
           };
+          const stop = () => {
+            page.classList.remove('is-resizing-artifact');
+            handle.removeEventListener('pointermove', follow);
+            handle.removeEventListener('pointerup', stop);
+            handle.removeEventListener('pointercancel', stop);
+            writeUiPreference('nod.trace-width', String(latest));
+          };
           handle.addEventListener('pointermove', follow);
-          handle.addEventListener(
-            'pointerup',
-            () => {
-              page.classList.remove('is-resizing-artifact');
-              handle.removeEventListener('pointermove', follow);
-              writeUiPreference('nod.trace-width', String(latest));
-            },
-            { once: true },
-          );
+          handle.addEventListener('pointerup', stop);
+          handle.addEventListener('pointercancel', stop);
         }}
       />
       <div className="artifact-drawer-panel">

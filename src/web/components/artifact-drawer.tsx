@@ -697,7 +697,7 @@ export function ArtifactWorkspace({
             onClose={close}
           />
         )}
-        {!displayed && aside}
+        {!current && aside}
       </div>
     </ArtifactDrawerContext.Provider>
   );

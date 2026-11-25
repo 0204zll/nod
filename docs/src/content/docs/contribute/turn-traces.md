@@ -11,19 +11,15 @@ The short version: in a source install, select **Show trace** in the chat toolba
 
 ## When traces are on
 
-Traces exist only in dev mode: a source install started with `pnpm dev`, which sets `NODE_ENV=development`. Any other server, including `pnpm start`, `pnpm dev:server`, the self-host image and a server with `NOD_ENVIRONMENT` set to anything other than `development`, and the desktop app never record them, and the panel and its routes aren't there.
+Traces exist only in dev mode: a source install started with `pnpm dev`, which sets `NODE_ENV=development`. `pnpm dev:server` records them only when you set `NODE_ENV=development` yourself. `pnpm start`, the self-host image, a server with `NOD_ENVIRONMENT` set to anything other than `development`, and the desktop app never record them, and the panel and its routes aren't there.
 
-There is no extra switch. In dev mode Nod stores every model call made inside a turn, whether or not the panel is open. Work a turn sets off after it ends, such as proactive checks, isn't part of it. If the database falls behind, Nod drops new traces rather than holding them in memory.
+There is no extra switch. In dev mode Nod stores every model call made inside a turn, whether or not the panel is open, including the memory curator's calls that conversation traces leave out. Work that starts after a turn ends, such as proactive checks, isn't part of it. If the database falls behind, Nod drops new traces rather than holding them in memory.
 
 ## What the panel shows
 
 The header shows the turn's duration, model calls, tool calls, input tokens (with how many the provider served from its cache), output tokens and cost. Pick an earlier turn from the list under the title, or keep **Latest turn** to follow new work. The list holds turns that started; a message you sent while Nod was working joins the running turn, so its trace is there.
 
 `GET /api/traces` lists the same turns. **Full screen** in the panel header fills the window with the trace; **Exit full screen** or Escape puts it back beside the chat.
-
-## Start over
-
-**Reset chat** in the chat toolbar, also dev mode only, stops running work, starts an empty chat and forgets every memory note and learned skill. Past tasks, files, connected accounts, schedules and settings stay.
 
 | Tab           | What it shows                                                                                                                                                                            |
 | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -35,10 +31,16 @@ The header shows the turn's duration, model calls, tool calls, input tokens (wit
 
 Select a call on the timeline to open its messages. The other tabs follow the selected call, or the main agent's first call when none is selected.
 
+## Start over
+
+**Reset chat** in the chat toolbar, also dev mode only, forgets every memory note and learned skill, stops running work and starts an empty chat. Past tasks, files, connected accounts, schedules and settings stay.
+
 ## Where traces are stored
 
-Each model call is one row in the `model_call_traces` table, keyed to its turn. Rows older than 14 days are deleted, and deleting a turn deletes its traces. They survive restarts.
+Each model call is one row in the `model_call_traces` table, keyed to its turn. They survive restarts, and rows older than 14 days are deleted.
 
-Before a call is stored, Nod removes the secret values it knows, values under secret field names and image data, and shortens home folder paths to `~`. Everything else stays, including private messages, because that is what you are debugging. Traces never leave your computer; [conversation traces](/trust/conversation-traces/) are a separate, opt-in feature.
+Before a call is stored, Nod removes the secret values it knows, values under secret field names (also inside JSON text) and image data, and shortens home folder paths to `~`. Everything else stays, including private messages, because that is what you are debugging. This scrubbing is best effort: it can miss a secret or a personal detail, and it doesn't make a trace anonymous, so read a trace before you share it.
 
-`GET /api/turns/:id/trace` returns the same data as the panel, for your own scripts. It needs the owner key like every other route, answers only for your own turns, and exists only in developer mode.
+The rows never leave your computer. If you also turn on [conversation traces](/trust/conversation-traces/), the same model calls are sent, separately redacted, to n8n while that switch is on, as in any other install.
+
+`GET /api/turns/:id/trace` returns the same data as the panel, for your own scripts. It needs the owner key like every other route, answers only for your own turns, and exists only in dev mode.

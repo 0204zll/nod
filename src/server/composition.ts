@@ -712,6 +712,8 @@ export function createDefaultAdapters(
   };
 }
 
+const devTools = developmentMode && !desktopMode;
+
 function alternativeModel(models: ApplicationAdapters['models']) {
   const view = models?.view();
   const other = view?.connections.find(
@@ -3353,10 +3355,7 @@ async function initializeApplication(
     attributeAudioUsage: ledger.attributeMediaUsage,
     verification: chatVerification,
     taskLedger: tasks.read,
-    forgetLearned:
-      developmentMode && !desktopMode
-        ? async () => void (await memory.control({ clear: true }))
-        : undefined,
+    forgetLearned: devTools ? async () => void (await memory.control({ clear: true })) : undefined,
     activity: activity.current,
     planningTasks: onboardingSuggestions.planning,
     computer,
@@ -3420,7 +3419,7 @@ async function initializeApplication(
   });
   registerPrivacyNotice(app, privacyNotice);
   const developerIds = desktopMode ? new Set<string>() : new Set([ownerId]);
-  const turnTraceIds = developmentMode ? developerIds : new Set<string>();
+  const turnTraceIds = devTools ? developerIds : new Set<string>();
   if (turnTraceIds.has(ownerId)) {
     const turnTraces = createTurnTraces({ pool, ownerId });
     turnTraces.registerRoutes(app);

@@ -325,9 +325,14 @@ export function piModelCallTrace(
       call.context.messages.map((entry) =>
         entry.role === 'system'
           ? {
-              ...entry,
+              role: 'system',
+              content: `[${getSystemMessageText({ ...entry, sections: Object.fromEntries(Object.entries(entry.sections ?? {}).filter(([, value]) => value !== null)) }).length} characters, shown in the system prompt]`,
+              timestamp: entry.timestamp,
               ...(entry.toolsAdded
                 ? { toolsAdded: entry.toolsAdded.map((tool) => tool.name) }
+                : {}),
+              ...(entry.toolsRemoved
+                ? { toolsRemoved: entry.toolsRemoved.map((tool) => tool.name) }
                 : {}),
             }
           : entry,

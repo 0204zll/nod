@@ -177,22 +177,27 @@ export function createModelTraces(deliver?: ModelTraceDelivery, appVersion?: str
       const turnId = explicitTurnId ?? capturedTurns.getStore();
       if (!sink || !turnId) return;
       const redact = secretText;
-      const text = (value: string) =>
+      const plain = (value: string) =>
         redact(homes.reduce((result, path) => result.replaceAll(path, '~'), value));
+      const text = (value: string): string => {
+        const trimmed = value.trim();
+        if (!/^[[{]/.test(trimmed)) return plain(value);
+        try {
+          return JSON.stringify(withoutSecretKeys(JSON.parse(trimmed)), (_key, item) =>
+            typeof item === 'string' ? text(item) : item,
+          );
+        } catch {
+          return plain(value);
+        }
+      };
       sink({
         turnId,
         build() {
           const trace = build();
           return {
             id: trace.id,
-            json: JSON.stringify(
-              {
-                ...trace,
-                messages: withoutSecretKeys(trace.messages),
-                output: withoutSecretKeys(trace.output),
-                turnId,
-              },
-              (_key, item) => (typeof item === 'string' ? text(item) : item),
+            json: JSON.stringify(withoutSecretKeys({ ...trace, turnId }), (_key, item) =>
+              typeof item === 'string' ? text(item) : item,
             ),
           };
         },

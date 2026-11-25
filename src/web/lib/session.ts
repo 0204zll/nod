@@ -19,7 +19,8 @@ function validSession(value: unknown): value is SessionResponse {
   const session = value as Partial<SessionResponse>;
   if (
     typeof session.capabilities?.developer !== 'boolean' ||
-    typeof session.capabilities.traces !== 'boolean'
+    typeof session.capabilities.traces !== 'boolean' ||
+    typeof session.capabilities.turnTraces !== 'boolean'
   )
     return false;
   if (session.user === null) return session.settings === null && !session.capabilities.developer;
@@ -100,7 +101,7 @@ function createSessionStore(
           ...snapshot.session,
           user: null,
           settings: null,
-          capabilities: { developer: false, traces: false, updatesEmail: false },
+          capabilities: { developer: false, turnTraces: false, traces: false, updatesEmail: false },
         }
       : null;
     applyTheme(null);

@@ -23,7 +23,7 @@ export interface SessionResponse {
   settings: (AccountSettings & { usageDataRevision?: string }) | null;
   capabilities: {
     developer: boolean;
-    turnTraces?: boolean;
+    turnTraces: boolean;
     traces: boolean;
     updatesEmail: boolean;
   };

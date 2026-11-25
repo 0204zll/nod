@@ -228,9 +228,9 @@ function Workspace({
             <div className="chat-route" hidden={path !== '/'}>
               {state ? (
                 <Chat
-                  turnTraces={session.capabilities.turnTraces === true}
+                  turnTraces={session.capabilities.turnTraces}
                   onReset={
-                    session.capabilities.turnTraces === true
+                    session.capabilities.turnTraces
                       ? (threadId) => resetConversation(threadId, true)
                       : undefined
                   }
