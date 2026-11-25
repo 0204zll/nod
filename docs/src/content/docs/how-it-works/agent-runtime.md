@@ -69,7 +69,7 @@ After a model list refresh or a connection is saved again, an unsupported saved 
 
 If Ollama does not report its thinking controls, Nod uses the server's default instead of sending an effort value.
 
-Nod corrects saved Ollama boolean effort values when it opens a model connection. A model that advertises only On keeps thinking enabled. Its selected-model check can still fail if reasoning uses the check's 512-token limit.
+Nod corrects saved Ollama boolean effort values when it opens a model connection. A model that advertises only On keeps thinking enabled.
 
 Helper requests use Pi's bounded retry policy. Invalid requests, account limits, and authentication failures do not get unconditional retries. Provider-client retries remain off. A model retry does not repeat a turn or a completed tool action.
 
@@ -208,7 +208,7 @@ flowchart TD
 - **Observations:** the guard reports each call to an optional observer. Only the capability evals and the voice eval script set one; the capability evals redact typed text and memory arguments.
 - **App actions:** `apps` and every connected MCP server tool also pass the server's [trust check](/trust/approvals/).
 
-`apps`, `memory` and `nod` calls run in parallel with each other and with subagents. The trust check covers app actions, changes to schedules, notification settings, the owner's rules and spending limits, and forgetting a note or turning memory on, off or clearing it, and those checks run in parallel too. Other `memory` and `nod` operations, such as saving a note and reads, have no trust check and count as decided as soon as they reach the server.
+`apps`, `memory` and `nod` calls run in parallel with each other and with subagents. The trust check covers app actions, changes to schedules, notification settings, the owner's rules and spending limits, and forgetting a note or turning memory on, off or clearing it, and those checks run in parallel too. Other `memory` and `nod` operations, such as saving a note and reads, have no trust check and count as decided as soon as they reach the server. While one call in a step waits for your answer, reads in the same step still run. Other calls stop with a note that no question was asked for them, and Nod calls them again after you answer.
 
 Public web reads and flight searches also run in parallel when the model requests independent searches or pages in one step. Each call passes the same turn guard. Browser steps run in sequence.
 

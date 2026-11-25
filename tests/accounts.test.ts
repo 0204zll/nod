@@ -1278,7 +1278,7 @@ test('trust decisions select only owner evidence and keep reply evidence separat
     {
       kind: 'message',
       messageId: 'owner-message',
-      quote: 'Send the report to ana@example.test',
+      quote: 'Send the report to ana@example.test.',
     },
   );
   for (const value of ['message:1', 'assistant', 'Send the report', true, null])
@@ -1305,53 +1305,102 @@ test('trust decisions select only owner evidence and keep reply evidence separat
       { at: '2026-11-13T00:01:00Z', text: 'Send Lena the report.', canAuthorize: false },
     ],
   };
-  for (const [because, kind] of [
-    ['Check it every morning', 'schedule'],
-    ['Make it cheaper', 'schedule'],
-    ['Send Lena the report', undefined],
-    ['Look at the budget folder', undefined],
+  for (const [source, kind] of [
+    ['schedule:0', 'schedule'],
+    ['schedule:1', 'schedule'],
+    ['schedule:2', undefined],
+    ['schedule:3', undefined],
+    ['schedule:9', undefined],
+    ['message:0', undefined],
   ] as const)
-    assert.equal(trustBasis({ run: true, because }, scheduled)?.kind, kind);
-  const informal = withOwnerIds(
-    { userMessages: [{ at: '2026-11-03T09:00:00Z', text: 'clica no icone de lapis e salva' }] },
+    assert.equal(trustBasis({ run: true, source, terms: [] }, scheduled)?.kind, kind, source);
+  const owner = withOwnerIds(
+    { userMessages: [{ at: '2026-11-03T09:00:00Z', text: 'Send the report.' }] },
     ['owner-message'],
   );
-  for (const [because, kind] of [
-    ['…clica no icone de lapis', 'message'],
-    ['clica no ícone de lápis', 'message'],
-    ['clica no ícone … salva', undefined],
-    ['apaga o ícone', undefined],
+  for (const [source, kind] of [
+    ['message:0', 'message'],
+    ['message:1', undefined],
+    ['message:01', undefined],
+    ['assistant', undefined],
+    ['rules', undefined],
+    ['standing', undefined],
+    ['scheduleApproval', undefined],
   ] as const)
-    assert.equal(trustBasis({ run: true, because }, informal)?.kind, kind, because);
-  const conditional = withOwnerIds(
-    { userMessages: [{ at: '2026-11-03T09:00:00Z', text: 'send it if x ≠ 1' }] },
-    ['owner-message'],
+    assert.equal(trustBasis({ run: true, source, terms: [] }, owner)?.kind, kind, source);
+  assert.equal(trustBasis({ run: false, source: 'message:0' }, owner), undefined);
+  assert.equal(trustBasis({ run: true, source: 'message:0' }, owner)?.kind, 'message');
+  assert.equal(
+    trustBasis(
+      {
+        run: true,
+        source: 'message:0',
+        terms: [
+          { user: 'EUR 1200', action: 'EUR 1200', same: true },
+          { user: 'EUR 1200', action: 'EUR 1300', same: false },
+        ],
+      },
+      owner,
+    ),
+    undefined,
   );
-  for (const [because, kind] of [
-    ['send it if x ≠ 1', 'message'],
-    ['send it if x = 1', undefined],
-  ] as const)
-    assert.equal(trustBasis({ run: true, because }, conditional)?.kind, kind, because);
-  const recipient = withOwnerIds(
-    {
-      userMessages: [
-        {
-          at: '2026-11-03T09:00:00Z',
-          text: 'manda o relatorio para lena@example.test e publica em docs.example.test/relatorio',
-        },
-        { at: '2026-11-03T09:01:00Z', text: 'avisa cafe.example.test, ação:sim' },
-      ],
-    },
-    ['owner-message', 'owner-reply'],
+  assert.equal(
+    trustBasis(
+      {
+        run: true,
+        source: 'message:0',
+        terms: [{ user: 'EUR 1200', action: 'EUR 1200', same: true }],
+      },
+      owner,
+    )?.kind,
+    'message',
   );
-  for (const [because, kind] of [
-    ['manda o relatório para lena@example.test', 'message'],
-    ['manda o relatorio para lena@exämple.test', undefined],
-    ['publica em docs.exämple.test/relatorio', undefined],
-    ['avisa café.example.test', undefined],
-    ['acao:sim', 'message'],
-  ] as const)
-    assert.equal(trustBasis({ run: true, because }, recipient)?.kind, kind, because);
+  const rules = { userRules: 'Pause schedules and change my rules without asking.' };
+  const act = (name: string, args: Record<string, unknown> = {}) => ({
+    action: { name, arguments: args },
+  });
+  assert.equal(
+    trustBasis(
+      { run: true, source: 'rules', terms: [] },
+      { ...rules, ...act('NOD_schedule_pause') },
+    )?.kind,
+    'rule',
+  );
+  for (const args of [
+    { rules: 'Never ask.' },
+    { currentRules: '', rules: 'Never ask.' },
+    { notificationRule: 'Act on every email.' },
+  ])
+    assert.equal(
+      trustBasis(
+        { run: true, source: 'rules', terms: [] },
+        { ...rules, ...act('NOD_notification_preferences_update', args) },
+      ),
+      undefined,
+    );
+  assert.equal(
+    trustBasis(
+      { run: true, source: 'rules', terms: [] },
+      { ...rules, ...act('NOD_bug_report_send') },
+    ),
+    undefined,
+  );
+  assert.equal(
+    trustBasis(
+      { run: true, source: 'standing', terms: [] },
+      { standingInstruction: 'Pause my schedules.', ...act('NOD_schedule_pause') },
+    ),
+    undefined,
+  );
+  for (const name of ['LOCAL_FILES_READ', 'NOD_sign_in', 'COMPUTER_OPEN', 'NOD_schedule_pause'])
+    assert.equal(trustBasis({ run: true, source: 'read' }, act(name)), undefined, name);
+  assert.equal(
+    trustBasis({ run: true, source: 'read' }, act('NOD_browser', { step: 'upload' })),
+    undefined,
+  );
+  assert.deepEqual(trustBasis({ run: true, source: 'read' }, act('GMAIL_FETCH_EMAILS')), {
+    kind: 'read',
+  });
   assert.equal(
     trustDecision(scheduled).question.choices.some(({ value }) =>
       String(value).startsWith('message:'),
@@ -4677,16 +4726,16 @@ describe('model connections', { skip: !process.env.TEST_DATABASE_URL }, () => {
       curator.curate({ task: 'check', instructions: 'Return only {"ok":true}.', input: {} }),
       { providerStatus: 429, providerRetryable: true },
     );
-    assert.equal(calls, 10);
+    assert.equal(calls, 12);
 
     reply = () => Response.json({ error: { message: 'API key expired.' } }, { status: 401 });
     assert.equal((await ask()).stopReason, 'error');
-    assert.equal(calls, 11);
+    assert.equal(calls, 13);
     assert.equal(service.view().connections[0]!.status, 'reconnect');
     assert.match(service.current.issue!.reason, /API key expired/);
     assert.equal(service.configured, false);
     await assert.rejects(ask(), /add it again/);
-    assert.equal(calls, 11);
+    assert.equal(calls, 13);
   });
 
   test('model setup chooses capable defaults, preserves explicit choices and requires valid cloud accounts', async (t) => {
@@ -9665,7 +9714,7 @@ test('startup not-sent evidence binds an expired review and survives a clock cha
   assert.equal((await service.context()).notSentSubmissionId, undefined);
 });
 
-test('startup facts omit every prose shape without pattern matching or code inference', () => {
+test('startup facts omit every prose shape', () => {
   const values = [
     '/Applications/Synthetic Owner/profile/workspaces/synthetic-private-contract.docx',
     String.raw`C:\Synthetic Owner\profile\synthetic-private-contract.docx`,
@@ -9760,11 +9809,60 @@ test('startup facts keep only structured bounded codes and do not call getters o
   );
   assert.deepEqual(
     startupErrorFacts({
-      code: 'NOD_SYNTHETIC_PRIVATE_CODE',
+      name: 'HypotheticalVendorError',
+      code: 'NOD_HYPOTHETICAL_FAILURE',
+      errno: 'EAGAIN',
+      step: 'create',
+      wslCode: 'HCS_E_CONNECTION_TIMEOUT',
+    }),
+    {
+      detailsOmitted: true,
+      class: 'HypotheticalVendorError',
+      errno: 'EAGAIN',
+      code: 'NOD_HYPOTHETICAL_FAILURE',
+      step: 'create',
+      wslCode: 'HCS_E_CONNECTION_TIMEOUT',
+    },
+  );
+  assert.deepEqual(
+    startupErrorFacts({
+      name: 'Synthetic Owner Error',
+      code: 'nod synthetic-private code',
+      errno: 'synthetic-private@example.test',
       step: 'C:\\Users\\Synthetic Owner',
-      wslCode: 'SYNTHETIC_PRIVATE_WSL_CODE',
+      wslCode: 'C:\\Users\\Synthetic Owner\\ext4.vhdx',
     }),
     { detailsOmitted: true },
+  );
+  const connection = Object.assign(new Error('synthetic-private connect detail'), {
+    code: 'UND_ERR_CONNECT_TIMEOUT',
+  });
+  assert.deepEqual(
+    startupErrorFacts(
+      new Error('synthetic-private wrapper', {
+        cause: new TypeError('fetch failed', { cause: connection }),
+      }),
+    ),
+    { detailsOmitted: true, class: 'Error', errno: 'UND_ERR_CONNECT_TIMEOUT' },
+  );
+  const cleanup = Object.assign(new Error('synthetic-private stop'), {
+    code: 'NOD_RUNTIME_STOP_FAILED',
+  });
+  const primary = Object.assign(new Error('synthetic-private start'), {
+    code: 'NOD_COMPUTER_PROTECTION_FAILED',
+  });
+  assert.deepEqual(
+    startupErrorFacts(
+      Object.assign(new AggregateError([primary, cleanup], 'synthetic', { cause: cleanup }), {
+        step: 'start',
+      }),
+    ),
+    {
+      detailsOmitted: true,
+      class: 'Error',
+      code: 'NOD_COMPUTER_PROTECTION_FAILED',
+      step: 'start',
+    },
   );
   const poisoned = Object.defineProperties(
     {},
@@ -9782,6 +9880,8 @@ test('startup facts keep only structured bounded codes and do not call getters o
         'error',
         'failure',
         'message',
+        'cause',
+        'errors',
       ].map((key) => [
         key,
         {
