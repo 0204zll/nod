@@ -6,6 +6,17 @@ import { pipeline } from 'node:stream/promises';
 const maxNameBytes = 255;
 const utf8 = new TextEncoder();
 
+function truncateBytes(text, limit) {
+  let room = limit;
+  let result = '';
+  for (const character of text) {
+    room -= utf8.encode(character).byteLength;
+    if (room < 0) break;
+    result += character;
+  }
+  return result;
+}
+
 export function downloadFileName(name, suffix = 0) {
   const tag = suffix ? ` (${suffix})` : '';
   const tagBytes = utf8.encode(tag).byteLength;
@@ -14,18 +25,16 @@ export function downloadFileName(name, suffix = 0) {
     if (!tag) return name;
     return `${name.slice(0, name.length - rawExtension.length)}${tag}${rawExtension}`;
   }
-  const extension =
-    rawExtension.length <= 16 && utf8.encode(rawExtension).byteLength + tagBytes < maxNameBytes
-      ? rawExtension
+  const extensionBytes = utf8.encode(rawExtension).byteLength;
+  const stem =
+    rawExtension && extensionBytes + tagBytes < maxNameBytes
+      ? truncateBytes(
+          name.slice(0, name.length - rawExtension.length),
+          maxNameBytes - extensionBytes - tagBytes,
+        )
       : '';
-  let room = maxNameBytes - utf8.encode(extension).byteLength - tagBytes;
-  let stem = '';
-  for (const character of name.slice(0, name.length - extension.length)) {
-    room -= utf8.encode(character).byteLength;
-    if (room < 0) break;
-    stem += character;
-  }
-  return `${stem}${tag}${extension}`;
+  if (stem) return `${stem}${tag}${rawExtension}`;
+  return `${truncateBytes(name, maxNameBytes - tagBytes)}${tag}`;
 }
 
 export function createArtifactFiles({ temporary, downloads, fetchArtifact }) {

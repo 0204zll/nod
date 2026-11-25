@@ -262,6 +262,11 @@ test('artifact filenames cannot escape Downloads and ordinary names keep their e
     [`${'a'.repeat(251)}.pdf`, `${'a'.repeat(247)} (1).pdf`],
     [`${'ä'.repeat(125)}a.pdf`, `${'ä'.repeat(125)}a.pdf`],
     [`${'ä'.repeat(125)}a.pdf`, `${'ä'.repeat(123)} (1).pdf`],
+    [`${'a'.repeat(235)}.long-extension-name`, `${'a'.repeat(235)}.long-extension-name`],
+    [`${'a'.repeat(235)}.long-extension-name`, `${'a'.repeat(231)} (1).long-extension-name`],
+    [`${'c'.repeat(240)}.long-extension-name`, `${'c'.repeat(235)}.long-extension-name`],
+    [`äaaa.${'b'.repeat(249)}`, `äaaa.${'b'.repeat(249)}`],
+    [`äaaa.${'b'.repeat(249)}`, `äaaa.${'b'.repeat(245)} (1)`],
     [`a.${'b'.repeat(253)}`, `a.${'b'.repeat(253)}`],
     [`a.${'b'.repeat(253)}`, `a.${'b'.repeat(249)} (1)`],
   ]) {
@@ -9135,6 +9140,18 @@ test('artifact exports keep owned bytes, safe names, separate saves and restrict
     );
     assert.equal(
       await readFile(join(root, 'Downloads', `${'ä'.repeat(123)} (1).pdf`), 'utf8'),
+      'synthetic PDF bytes',
+    );
+    filename = `${'a'.repeat(235)}.long-extension-name`;
+    const longExtId = randomUUID();
+    await files.save(longExtId);
+    await files.save(longExtId);
+    assert.equal(
+      await readFile(join(root, 'Downloads', `${'a'.repeat(235)}.long-extension-name`), 'utf8'),
+      'synthetic PDF bytes',
+    );
+    assert.equal(
+      await readFile(join(root, 'Downloads', `${'a'.repeat(231)} (1).long-extension-name`), 'utf8'),
       'synthetic PDF bytes',
     );
     filename = `CON.${'a'.repeat(247)}.pdf`;
