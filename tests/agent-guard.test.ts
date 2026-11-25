@@ -2567,7 +2567,13 @@ test('browser upload preserves staged filenames, supports an explicit name and r
               name: 'Custom Report.txt',
             });
             const readsBeforeInvalid = workspaceReads;
-            for (const invalid of ['../escape.txt', 'dir/file.txt', '..', '   '])
+            for (const invalid of [
+              '../escape.txt',
+              'dir/file.txt',
+              '..',
+              '   ',
+              `${'ä'.repeat(128)}.txt`,
+            ])
               await assert.rejects(
                 call(tools, 'browser', {
                   action: 'upload',

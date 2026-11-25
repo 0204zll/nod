@@ -1256,8 +1256,9 @@ export function nodTools(
       if (action === 'upload') {
         if (!context.readWorkspaceFile) throw new Error('Browser file upload is unavailable.');
         if (!rest.selector || !rest.path) throw new Error('Choose a file and upload field.');
-        const uploadName = name !== undefined ? uploadFileName(name) : posix.basename(rest.path);
+        if (name !== undefined) uploadFileName(name);
         const bytes = await context.readWorkspaceFile(rest.path, fileBytes);
+        const uploadName = uploadFileName(name ?? posix.basename(rest.path));
         const checked = await check({
           action,
           selector: rest.selector,

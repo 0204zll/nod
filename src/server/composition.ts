@@ -1534,10 +1534,11 @@ async function initializeApplication(
               browserId,
               {
                 selector: String(command.selector),
-                name:
+                name: uploadFileName(
                   typeof command.name === 'string'
-                    ? uploadFileName(command.name)
+                    ? command.name
                     : posix.basename(String(command.path)),
+                ),
                 bytes: await workspace.readArtifact(
                   provenance.threadId,
                   String(command.path),

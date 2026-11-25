@@ -1,16 +1,16 @@
 export const fileBytes = 90 * 1024 * 1024;
 
-const nameBytes = 255 - 37;
+const nameBytes = 255;
+const utf8 = new TextEncoder();
 
 export function fileName(name: string) {
-  const encoder = new TextEncoder();
-  if (encoder.encode(name).byteLength <= nameBytes) return name;
+  if (utf8.encode(name).byteLength <= nameBytes) return name;
   const dot = name.lastIndexOf('.');
   const extension = dot > 0 && name.length - dot <= 16 ? name.slice(dot) : '';
-  let room = nameBytes - encoder.encode(extension).byteLength;
+  let room = nameBytes - utf8.encode(extension).byteLength;
   let stem = '';
   for (const character of name.slice(0, name.length - extension.length)) {
-    room -= encoder.encode(character).byteLength;
+    room -= utf8.encode(character).byteLength;
     if (room < 0) break;
     stem += character;
   }
@@ -18,7 +18,13 @@ export function fileName(name: string) {
 }
 
 export function stagedWorkspaceFile(id: string, name: string) {
-  if (!id || /[/\\\u0000-\u001f\u007f]/.test(id) || id === '.' || id === '..')
+  if (
+    !id ||
+    /[/\\\u0000-\u001f\u007f]/.test(id) ||
+    id === '.' ||
+    id === '..' ||
+    utf8.encode(id).byteLength > nameBytes
+  )
     throw new Error('A staged file identifier is required.');
   const clean = name
     .replaceAll('\\', '/')
@@ -26,19 +32,23 @@ export function stagedWorkspaceFile(id: string, name: string) {
     .split('/')
     .at(-1)!
     .replace(/[\u0000-\u001f\u007f]/g, '');
-  const safe = !clean.trim() || clean === '.' || clean === '..' ? 'file' : fileName(clean);
+  const bounded = fileName(clean);
+  const safe = !bounded.trim() || bounded === '.' || bounded === '..' ? 'file' : bounded;
   return `${id}/${safe}`;
 }
 
+export function isUploadFileName(name: string) {
+  return (
+    Boolean(name.trim()) &&
+    !/[/\\\u0000-\u001f\u007f]/.test(name) &&
+    name !== '.' &&
+    name !== '..' &&
+    utf8.encode(name).byteLength <= nameBytes
+  );
+}
+
 export function uploadFileName(name: string) {
-  if (
-    !name.trim() ||
-    /[/\\\u0000-\u001f\u007f]/.test(name) ||
-    name === '.' ||
-    name === '..' ||
-    name.length > 200
-  )
-    throw new Error('A plain upload filename is required.');
+  if (!isUploadFileName(name)) throw new Error('A plain upload filename is required.');
   return name;
 }
 
