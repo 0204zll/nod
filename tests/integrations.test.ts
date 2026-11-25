@@ -3886,10 +3886,15 @@ test('native connection waits for the owner and refuses a cancelled or expired s
       t.after(() => browser.close());
       const id = randomBytes(32).toString('base64url');
       let starts = 0;
-      const url = await browser.open(id, 'https://proxy.example.test', async () => {
-        starts++;
-        return 'https://proxy.example.test/v2/connect/pair?ticket=synthetic-consent';
-      });
+      const url = await browser.open(
+        id,
+        'https://proxy.example.test',
+        async () => {
+          starts++;
+          return 'https://proxy.example.test/v2/connect/pair?ticket=synthetic-consent';
+        },
+        '<img src=x>Synthetic',
+      );
       const html = await (await fetch(url)).text();
       const dom = new JSDOM(html, {
         url,
@@ -3912,6 +3917,11 @@ test('native connection waits for the owner and refuses a cancelled or expired s
       await delay(100);
       assert.equal(Number(starts), 0);
       assert.equal(browser.remote(url), undefined);
+      assert.equal(dom.window.document.querySelector('img'), null);
+      assert.equal(
+        dom.window.document.getElementById('heading')?.textContent,
+        'Connect <img src=x>Synthetic',
+      );
       const button = dom.window.document.getElementById('connect') as HTMLButtonElement;
       assert.ok(button && !button.disabled);
       if (outcome === 'cancel') browser.finish(id);
@@ -9264,7 +9274,11 @@ async function managedReconnectFixture(t: TestContext, watchRequested = true, se
     await control.pause('create', id);
     return snapshot(id);
   });
-  const authorize = async (slug: string, callbackUrl: string, reconnectAccountId?: string) => {
+  const authorize = async (
+    slug: string,
+    callbackUrl: string,
+    { reconnectAccountId }: { reconnectAccountId?: string } = {},
+  ) => {
     assert.equal(slug, service);
     assert.equal(reconnectAccountId, 'old-account');
     const accountId = `replacement-${links.length + 1}`;
