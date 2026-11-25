@@ -125,6 +125,7 @@ interface EnqueueTurnOptions {
   channelSourceId?: string | null;
   background?: boolean;
   sessionId?: string;
+  botId?: string | null;
   parentTurnId?: string;
   proactive?: boolean;
   startAfter?: Date;
@@ -140,6 +141,7 @@ interface SubmitUserMessageOptions {
   replyToMessageId?: string;
   replyQuote?: string;
   seenMessageId?: string;
+  botId?: string;
   clientMessageId?: string;
   questionAnswer?: QuestionAnswer;
   approvalAnswer?: { approvalId: string; approved: boolean };
@@ -441,13 +443,18 @@ async function assertReplyTarget(
   threadId: string,
   messageId?: string,
   lock = false,
+  botId?: string | null,
 ) {
   if (!messageId) return;
-  const target = await client.query(
-    `SELECT 1 FROM messages WHERE id=$1 AND owner_id=$2 AND thread_id=$3 AND hidden_at IS NULL${lock ? ' FOR SHARE' : ''}`,
+  const target = await client.query<{ bot_id: string | null }>(
+    `SELECT bot_id FROM messages WHERE id=$1 AND owner_id=$2 AND thread_id=$3 AND hidden_at IS NULL${lock ? ' FOR SHARE' : ''}`,
     [messageId, ownerId, threadId],
   );
   if (!target.rowCount) throw httpError('The reply is unavailable in this conversation.', 404);
+  if (botId !== undefined && target.rows[0]!.bot_id !== botId)
+    throw Object.assign(httpError('That message belongs to another chat.', 409), {
+      code: 'chat_mismatch',
+    });
 }
 
 export { pendingAnswerChoicesSql };
@@ -534,10 +541,11 @@ export async function insertAssistantMessage(
     turn.taskMessageId ??
     (
       await client.query<{ id: string }>(
-        `SELECT a.id FROM (SELECT id,created_at FROM messages WHERE owner_id=$1 AND thread_id=$2 AND turn_id=$3
+        `SELECT a.id FROM (SELECT id,created_at,bot_id FROM messages WHERE owner_id=$1 AND thread_id=$2 AND turn_id=$3
            AND role='user' ORDER BY created_at DESC,id DESC LIMIT 1) a
          WHERE EXISTS (SELECT 1 FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2
-           AND (m.created_at,m.id)>(a.created_at,a.id) AND m.turn_id IS DISTINCT FROM $3)`,
+           AND (m.created_at,m.id)>(a.created_at,a.id) AND m.turn_id IS DISTINCT FROM $3
+           AND m.bot_id IS NOT DISTINCT FROM a.bot_id)`,
         [ownerId, turn.threadId, turn.turnId],
       )
     ).rows[0]?.id;
@@ -621,8 +629,8 @@ export async function enqueueTurn(prompt: string, options: EnqueueTurnOptions) {
       : options.sessionId;
     const id = randomUUID();
     const inserted = await client.query(
-      `INSERT INTO turns(id,owner_id,thread_id,source,source_id,prompt,channel,background,channel_source_id,session_id,parent_turn_id,proactive,start_after)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,COALESCE($12,(SELECT proactive FROM turns WHERE id=$11 AND owner_id=$2),false),$13)
+      `INSERT INTO turns(id,owner_id,thread_id,source,source_id,prompt,channel,background,channel_source_id,session_id,parent_turn_id,proactive,start_after,bot_id)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,COALESCE($12,(SELECT proactive FROM turns WHERE id=$11 AND owner_id=$2),false),$13,$14)
        ON CONFLICT (owner_id,source_id) WHERE source_id IS NOT NULL DO NOTHING RETURNING id`,
       [
         id,
@@ -638,6 +646,7 @@ export async function enqueueTurn(prompt: string, options: EnqueueTurnOptions) {
         options.parentTurnId ?? null,
         options.proactive ?? null,
         options.startAfter ?? null,
+        options.botId ?? null,
       ],
     );
     if (!inserted.rowCount)
@@ -707,11 +716,14 @@ async function repliesOutsideChat(
 
 export async function messageIntakeSignal(
   arrival: AbortSignal,
-  input: Pick<SubmitUserMessageOptions, 'threadId' | 'replyToMessageId' | 'chatClearedAt'>,
+  input: Pick<
+    SubmitUserMessageOptions,
+    'threadId' | 'replyToMessageId' | 'chatClearedAt' | 'botId'
+  >,
   database: Pool | PoolClient = pool,
 ) {
   const chat = chatIntakes.get(arrival);
-  if (!chat && input.chatClearedAt === undefined) return undefined;
+  if (input.botId || (!chat && input.chatClearedAt === undefined)) return undefined;
   const threadId = input.threadId ?? (await activeThread(database)).id;
   if (await repliesOutsideChat(database, threadId, input.replyToMessageId)) return undefined;
   if (input.chatClearedAt !== undefined) {
@@ -747,6 +759,7 @@ async function readAnswer(
     threadId,
     replyToMessageId: options.replyToMessageId,
     seenMessageId: options.seenMessageId,
+    botId: options.botId,
     hasAttachments,
   });
 }
@@ -777,6 +790,7 @@ export async function submitUserMessage(
     channel,
     replyToMessageId: options.replyToMessageId,
     seenMessageId: options.seenMessageId,
+    botId: options.botId,
     clientMessageId: options.clientMessageId,
     sourceId: options.sourceId,
     hasAttachments: attachments.length > 0 || Boolean(options.prepareAttachments),
@@ -805,6 +819,18 @@ export async function submitUserMessage(
     const thread = await lockThread(client);
     if (options.threadId !== undefined && options.threadId !== thread.id)
       throw httpError('This conversation has been reset. Reload it before continuing.');
+    const botId = options.botId ?? null;
+    const session = botId ?? thread.id;
+    if (
+      botId &&
+      !(
+        await client.query(
+          'SELECT 1 FROM bots WHERE id=$1 AND owner_id=$2 AND archived_at IS NULL FOR SHARE',
+          [botId, ownerId],
+        )
+      ).rowCount
+    )
+      throw httpError('This bot was removed.', 404);
     if (options.clientMessageId) {
       const previous = (
         await client.query(
@@ -843,7 +869,7 @@ export async function submitUserMessage(
       if (prior) return { threadId: thread.id, turnId: prior.id, messageId: prior.message_id };
     }
     await messageIntakeSignal(stop, { ...options, threadId: thread.id }, client);
-    await assertReplyTarget(client, thread.id, options.replyToMessageId);
+    await assertReplyTarget(client, thread.id, options.replyToMessageId, false, botId);
     let choiceQuestion: { id: string; session_id: string; background: boolean } | undefined;
     if (options.questionAnswer !== undefined) {
       const submitted = questionAnswerSchema.parse(options.questionAnswer);
@@ -898,7 +924,7 @@ export async function submitUserMessage(
             },
             markInserted,
           );
-    await assertReplyTarget(client, thread.id, options.replyToMessageId, true);
+    await assertReplyTarget(client, thread.id, options.replyToMessageId, true, botId);
     if (confirmed && 'turnId' in confirmed) return confirmed;
     if (options.approvalAnswer)
       throw Object.assign(httpError('This approval is no longer waiting for an answer.', 409), {
@@ -922,11 +948,11 @@ export async function submitUserMessage(
           await client.query(
             `SELECT u.id,u.session_id,u.background FROM turns u JOIN messages m ON m.turn_id=u.id AND m.owner_id=u.owner_id
        WHERE u.owner_id=$1 AND u.thread_id=$2 AND (u.channel=$3 OR $4::uuid IS NOT NULL) AND u.status='waiting' AND u.waiting_reason='question'
-         AND m.role='assistant' AND (($4::uuid IS NOT NULL AND m.id=$4) OR ($4::uuid IS NULL AND u.session_id=$2))
+         AND m.role='assistant' AND (($4::uuid IS NOT NULL AND m.id=$4) OR ($4::uuid IS NULL AND u.session_id=$5))
          AND m.id=(SELECT q.id FROM messages q WHERE q.turn_id=u.id AND q.owner_id=u.owner_id AND q.role='assistant' ORDER BY q.created_at DESC,q.id DESC LIMIT 1)
          AND NOT ${laterSupersedingTurnSql}
        ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
-            [ownerId, thread.id, channel, options.replyToMessageId ?? null],
+            [ownerId, thread.id, channel, options.replyToMessageId ?? null, session],
           )
         ).rows[0]
       : undefined;
@@ -941,14 +967,14 @@ export async function submitUserMessage(
         messageId,
         options.prompt ?? text,
         channel,
-        question?.session_id ?? thread.id,
+        question?.session_id ?? session,
         question?.background ?? false,
         question?.id ?? null,
         live ? 'queued' : 'cancelled',
       ],
     );
     if (taskTarget) await taskTarget.record(turnId);
-    if (live) await confirmAction?.close(client, question?.session_id ?? thread.id, turnId);
+    if (live) await confirmAction?.close(client, question?.session_id ?? session, turnId);
     const prepared = (await options.prepareAttachments?.(client, thread.id)) ?? [];
     await client.query(
       "INSERT INTO messages(id,owner_id,role,text,display_text,thread_id,turn_id,attachments,reply_to_message_id,reply_quote,audio_caption,question_answer) VALUES($1,$2,'user',$3,$4,$5,$6,$7,$8,$9,$10,$11)",
@@ -1011,26 +1037,42 @@ async function withdraw(client: PoolClient, turnIds: string[], wholeRequest: boo
 export async function cancelTurns(
   client: PoolClient,
   threadId: string,
-  scope: { sessionId?: string; background?: boolean; withdrawRequest?: boolean } = {},
+  scope: {
+    sessionId?: string;
+    background?: boolean;
+    botId?: string | null;
+    all?: boolean;
+    withdrawRequest?: boolean;
+  } = {},
   analytics?: CaptureAnalytics,
   actor: 'owner' | 'agent' = 'owner',
 ) {
   const capture = snapshotAnalytics(analytics);
-  if (!scope.sessionId && !scope.background) {
+  if (scope.all || (!scope.sessionId && !scope.background && !scope.botId)) {
     nextStop.abort();
     nextStop = new AbortController();
   }
-  const values = [threadId, ownerId, scope.sessionId ?? null, scope.background ?? false];
+  const values = [
+    threadId,
+    ownerId,
+    scope.sessionId ?? null,
+    scope.background ?? false,
+    scope.botId ?? null,
+    scope.all ?? false,
+  ];
+  const scoped = (alias: string) =>
+    `($6 OR $3::uuid IS NOT NULL OR ${alias}bot_id IS NOT DISTINCT FROM $5::uuid)
+     AND (NOT $4 OR ${alias}session_id NOT IN ($1,COALESCE($5::uuid,$1)))`;
   const candidates = await client.query<{ id: string; live: boolean }>(
     `SELECT u.id,u.status<>'waiting' OR NOT ${laterSupersedingTurnSql} AS live FROM turns u
-     WHERE u.thread_id=$1 AND u.owner_id=$2 AND ($3::uuid IS NULL OR u.session_id=$3) AND (NOT $4 OR u.session_id<>$1) AND u.status IN ('queued','running','waiting')`,
+     WHERE u.thread_id=$1 AND u.owner_id=$2 AND ($3::uuid IS NULL OR u.session_id=$3) AND ${scoped('u.')} AND u.status IN ('queued','running','waiting')`,
     values,
   );
   const cancelledIds = candidates.rows.map(({ id }) => id);
   abortTurns(cancelledIds);
   afterCommit(client, () => abortTurns(cancelledIds));
   const current = await client.query(
-    "UPDATE turns SET status='cancelled',finished_at=now() WHERE thread_id=$1 AND owner_id=$2 AND ($3::uuid IS NULL OR session_id=$3) AND (NOT $4 OR session_id<>$1) AND status IN ('queued','running','waiting') RETURNING id,session_id",
+    `UPDATE turns SET status='cancelled',finished_at=now() WHERE thread_id=$1 AND owner_id=$2 AND ($3::uuid IS NULL OR session_id=$3) AND ${scoped('turns.')} AND status IN ('queued','running','waiting') RETURNING id,session_id`,
     values,
   );
   if (actor === 'owner' && scope.withdrawRequest !== false) {
@@ -1044,8 +1086,8 @@ export async function cancelTurns(
   const taskIds = (
     await client.query(
       `SELECT DISTINCT to_jsonb(u)->>'task_id' AS id FROM turns u
-       WHERE u.thread_id=$1 AND u.owner_id=$2 AND ($3::uuid IS NULL OR u.session_id=$3) AND (NOT $4 OR u.session_id<>$1)
-         AND to_jsonb(u)->>'task_id' IS NOT NULL`,
+       WHERE u.thread_id=$1 AND u.owner_id=$2 AND ($3::uuid IS NULL OR u.session_id=$3)
+         AND ${scoped('u.')} AND to_jsonb(u)->>'task_id' IS NOT NULL`,
       values,
     )
   ).rows.map((row) => row.id);
@@ -1078,10 +1120,13 @@ export function abortTurns(ids: string[]) {
   for (const id of ids) running.get(id)?.abort();
 }
 
-export async function stopThread(analytics?: CaptureAnalytics) {
+export async function stopThread(
+  analytics?: CaptureAnalytics,
+  scope: { botId?: string; all?: boolean } = {},
+) {
   const capture = snapshotAnalytics(analytics);
   const cancelled = await cancellationTransaction(
-    async (client) => cancelTurns(client, (await lockThread(client)).id, {}, capture),
+    async (client) => cancelTurns(client, (await lockThread(client)).id, scope, capture),
     pool,
   );
   abortTurns(cancelled.ids);
@@ -1095,7 +1140,7 @@ export async function resetThread(expectedThreadId: string, analytics?: CaptureA
     const thread = await lockThread(client);
     if (thread.id !== expectedThreadId)
       throw httpError('This conversation has changed. Reload it before clearing messages.');
-    const cancelled = await cancelTurns(client, thread.id, {}, capture);
+    const cancelled = await cancelTurns(client, thread.id, { all: true }, capture);
     await client.query('UPDATE threads SET archived_at=now(),updated_at=now() WHERE id=$1', [
       thread.id,
     ]);
@@ -1144,6 +1189,54 @@ export async function restartChatContext(threadId: string, turnId: string) {
   }, pool);
   refresh();
   return { ok: true };
+}
+
+export async function clearBotChat(botId: string, messageId: string) {
+  const result = await transaction(async (client) => {
+    const thread = await lockThread(client);
+    if (
+      !(
+        await client.query(
+          'SELECT 1 FROM bots WHERE id=$1 AND owner_id=$2 AND archived_at IS NULL FOR UPDATE',
+          [botId, ownerId],
+        )
+      ).rowCount
+    )
+      throw httpError('This bot was removed.', 404);
+    const previous = (
+      await client.query<{ turn_id: string; owner_id: string; bot_id: string | null }>(
+        'SELECT turn_id,owner_id,bot_id FROM messages WHERE id=$1',
+        [messageId],
+      )
+    ).rows[0];
+    if (previous) {
+      if (previous.owner_id !== ownerId || previous.bot_id !== botId) throw messageIdInUse();
+      return { threadId: thread.id, turnId: previous.turn_id, messageId };
+    }
+    await cancelTurns(client, thread.id, { sessionId: botId, withdrawRequest: false });
+    const turnId = randomUUID();
+    await client.query(
+      `INSERT INTO turns(id,owner_id,thread_id,session_id,bot_id,source,source_id,message_id,prompt,channel,status,finished_at)
+       VALUES($1,$2,$3,$4,$4,'user',$5,$6,'/clear','web','succeeded',now())`,
+      [turnId, ownerId, thread.id, botId, `clear:${messageId}`, messageId],
+    );
+    await client.query(
+      'UPDATE bots SET cleared_at=clock_timestamp(),updated_at=now() WHERE id=$1 AND owner_id=$2',
+      [botId, ownerId],
+    );
+    await client.query(
+      "INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,created_at) VALUES($1,$2,$3,$4,'user','/clear',clock_timestamp())",
+      [messageId, ownerId, thread.id, turnId],
+    );
+    await client.query(
+      `INSERT INTO messages(id,owner_id,thread_id,turn_id,role,text,created_at)
+       SELECT $1,$2,$3,$4,'assistant',$5,created_at+interval '1 millisecond' FROM messages WHERE id=$6`,
+      [randomUUID(), ownerId, thread.id, turnId, chatClearedMessage, messageId],
+    );
+    return { threadId: thread.id, turnId, messageId };
+  }, pool);
+  refresh();
+  return result;
 }
 
 export const chatClearedMessage =
@@ -1223,8 +1316,8 @@ export async function reactToAssistantMessage(
   const target =
     reaction && wake
       ? (
-          await pool.query<{ channel: string }>(
-            `SELECT COALESCE(u.channel,m.delivered_channel,'web') AS channel FROM messages m
+          await pool.query<{ channel: string; bot_id: string | null }>(
+            `SELECT COALESCE(u.channel,m.delivered_channel,'web') AS channel,m.bot_id FROM messages m
              JOIN threads th ON th.id=m.thread_id AND th.owner_id=m.owner_id
              LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
              WHERE m.id=$1 AND m.owner_id=$2 AND m.role='assistant' AND th.archived_at IS NULL AND m.hidden_at IS NULL`,
@@ -1237,6 +1330,7 @@ export async function reactToAssistantMessage(
       ? await messages.answer(reaction, {
           channel: replyChannel ?? target.channel,
           replyToMessageId: messageId,
+          ...(target.bot_id ? { botId: target.bot_id } : {}),
         })
       : undefined;
   let accepted: ((channel: string) => void) | undefined;
@@ -1245,7 +1339,7 @@ export async function reactToAssistantMessage(
     const thread = await lockThread(client);
     const message = (
       await client.query(
-        `SELECT m.id,m.reaction,m.reaction_revision,COALESCE(u.channel,m.delivered_channel,'web') AS channel FROM messages m LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+        `SELECT m.id,m.reaction,m.reaction_revision,m.bot_id,COALESCE(u.channel,m.delivered_channel,'web') AS channel FROM messages m LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
          WHERE m.id=$1 AND m.owner_id=$2 AND m.role='assistant' AND m.thread_id=$3 AND m.hidden_at IS NULL`,
         [messageId, ownerId, thread.id],
       )
@@ -1265,6 +1359,7 @@ export async function reactToAssistantMessage(
         channel,
         client,
         replyToMessageId: messageId,
+        ...(message.bot_id ? { botId: message.bot_id } : {}),
         answer,
         stopSignal: arrival,
       });
@@ -1293,7 +1388,7 @@ export async function workOrigin(turnId: string, client: Pool | PoolClient = poo
       task: ModelSelection | null;
       schedule: ModelSelection | null;
     }>(
-      `SELECT ${workKindSql('cur')} AS kind,work_task.model AS task,work_schedule.model AS schedule
+      `SELECT ${workKindSql('cur')} AS kind,COALESCE(work_task.model,CASE WHEN work_schedule.model IS NULL THEN (SELECT b.model FROM bots b WHERE b.id=cur.bot_id AND b.owner_id=cur.owner_id) END) AS task,work_schedule.model AS schedule
        FROM turns cur ${workOriginSql('cur')} WHERE cur.id=$1 AND cur.owner_id=$2`,
       [turnId, ownerId],
     )
@@ -1935,6 +2030,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
     confirmedActions,
     restarted,
     language,
+    team,
   ] = await Promise.all([
     loadMessage(sourceMessageId),
     pool.query(
@@ -1952,6 +2048,8 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
        AND (NOT $5::boolean OR (m.created_at<=boundary.at AND
          (u.id IS NULL OR u.session_id=$6
           OR (u.status IN ('succeeded','failed','cancelled') AND u.finished_at<=boundary.at))))
+       AND m.bot_id IS NOT DISTINCT FROM (SELECT cur.bot_id FROM turns cur WHERE cur.id=$4 AND cur.owner_id=$1)
+       AND m.created_at>COALESCE((SELECT b.cleared_at FROM bots b WHERE b.id=m.bot_id AND b.owner_id=$1),'-infinity')
        ORDER BY m.created_at DESC,m.id DESC LIMIT 30) m ORDER BY created_at,id`,
       [ownerId, threadId, sourceMessageId, turn.id, Boolean(turn.background), turn.session_id],
     ),
@@ -1978,10 +2076,20 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
           'SELECT chat_restarted_at AS at FROM threads WHERE id=$1 AND owner_id=$2',
           [threadId, ownerId],
         )
-      : undefined,
+      : turn.bot_id && turn.session_id === turn.bot_id
+        ? pool.query<{ at: Date | null }>(
+            'SELECT cleared_at AS at FROM bots WHERE id=$1 AND owner_id=$2',
+            [turn.bot_id, ownerId],
+          )
+        : undefined,
     loadConversationLanguage(pool, ownerId, threadId),
+    pool.query<{ id: string; name: string; job: string; instructions: string }>(
+      'SELECT id,name,job,instructions FROM bots WHERE owner_id=$1 AND archived_at IS NULL ORDER BY created_at,id',
+      [ownerId],
+    ),
   ]);
   const preference = preferences.rows[0];
+  const bot = team.rows.find((row) => row.id === turn.bot_id);
   const historyTurnIds = [
     ...new Set<string>(
       history.rows.flatMap((message) =>
@@ -2037,6 +2145,8 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       ...(dependencies.localFiles ? { localFiles: true } : {}),
       ...(dependencies.computerUse && preference?.computer_use ? { computerUse: true } : {}),
       ...(mcpServers?.length ? { mcpServers } : {}),
+      ...(bot ? { bot } : {}),
+      bots: team.rows.map(({ id, name, job }) => ({ id, name, job })),
     },
   };
 }
@@ -2128,10 +2238,7 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
   };
   const ensureCurrent = () => current(async () => {});
   const intentLine =
-    dependencies.activityLine &&
-    !turn.background &&
-    turn.session_id === threadId &&
-    providerChannel === 'web'
+    dependencies.activityLine && !turn.background && providerChannel === 'web'
       ? dependencies.activityLine
       : undefined;
   const intentFailed = (error: unknown) => {
@@ -2259,7 +2366,16 @@ async function executeTurn(turn: any, dependencies: ThreadDependencies) {
   };
   const shared: Artifact[] = [];
   try {
-    if (turn.source_id && (await dependencies.skipTurn?.(turn.source_id))) {
+    if (
+      (turn.source_id && (await dependencies.skipTurn?.(turn.source_id))) ||
+      (turn.bot_id &&
+        !(
+          await pool.query(
+            'SELECT 1 FROM bots WHERE id=$1 AND owner_id=$2 AND archived_at IS NULL',
+            [turn.bot_id, ownerId],
+          )
+        ).rowCount)
+    ) {
       await current((client) => finishTurn(client, turnId, 'cancelled'));
       outcome = 'skipped';
       return;

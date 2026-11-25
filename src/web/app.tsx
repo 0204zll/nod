@@ -1,6 +1,11 @@
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft } from './components/icons';
 import { Chat } from './pages/chat';
+import { BotChat } from './pages/bot-chat';
+import { BotsPage } from './pages/bots';
+import { ChatTop, BotNav, BotPanel, Toasts } from './components/bots';
+import { SettingsNav, botsSettingsPath } from './components/settings-nav';
+import { chatUnread, readChatCursors, botIdOf, botPath, writeChatCursor } from './lib/bots';
 import { Usage } from './pages/usage';
 import { Vault } from './pages/vault';
 import { Apps } from './pages/apps';
@@ -17,12 +22,17 @@ import { ChatSkeleton } from './components/startup';
 import { SetupProgress } from './components/setup-progress';
 import { ServerAccess } from './components/server-access';
 import { Sidebar } from './components/sidebar';
-import { DesktopToolbar } from './components/desktop-toolbar';
+import { PageHeader } from './components/page-title';
 import { DesktopUpdateToast } from './components/desktop-update-toast';
-import { SidebarToggle } from './components/sidebar-toggle';
 import { FeedbackDialog } from './components/feedback';
 import { createFeedbackCapture } from './lib/feedback-capture';
-import { navigate, replaceNavigation, sidebarItems, subscribeNavigation } from './lib/navigation';
+import {
+  navigate,
+  replaceNavigation,
+  sidebarItems,
+  sidebarSection,
+  subscribeNavigation,
+} from './lib/navigation';
 import { appPagePath, preparedWorkId } from '../shared/app-links';
 import { BrowserWindow } from './pages/browser';
 import { readUiPreference, writeUiPreference } from './lib/ui-preferences';
@@ -113,18 +123,10 @@ function Workspace({
   useBrowserNotifications(session.user!.id, state);
   useSavedDateFormat();
   useBrowserTimeZone();
-  const [collapsed, setCollapsed] = useState(() => readUiPreference('nod.sidebar') !== 'expanded');
-  const [toolbarActions, setToolbarActions] = useState<HTMLDivElement | null>(null);
-  const [mobileActions, setMobileActions] = useState<HTMLDivElement | null>(null);
-  const [mobileHeader, setMobileHeader] = useState(
-    () => window.matchMedia?.('(max-width: 640px)').matches ?? false,
+  const [panelHidden, setPanelHidden] = useState(
+    () => readUiPreference('nod.side-panel') === 'hidden',
   );
-  useEffect(() => {
-    const media = window.matchMedia?.('(max-width: 640px)');
-    const update = () => setMobileHeader(media?.matches ?? false);
-    media?.addEventListener('change', update);
-    return () => media?.removeEventListener('change', update);
-  }, []);
+  const [mainTools, setMainTools] = useState<HTMLDivElement | null>(null);
   const [pendingMessageFocus, setPendingMessageFocus] = useState(initialFocusMessageId);
   useEffect(() => {
     if (initialFocusMessageId) onFocusMessageHandled();
@@ -132,8 +134,56 @@ function Workspace({
   const [notificationTarget, setNotificationTarget] = useState<{
     threadId: string;
     messageId: string;
+    botId?: string;
   } | null>();
   const [chatRequests, setChatRequests] = useState<Array<{ id: string; text: string }>>([]);
+  const ownerId = session.user!.id;
+  const openBotId = botIdOf(path);
+  const [chatCursors, setChatCursors] = useState<Record<string, string>>(() =>
+    readChatCursors(ownerId),
+  );
+  const [panelOpen, setPanelOpen] = useState(false);
+  const bots = state?.bots ?? [];
+  const openBot = bots.find((bot) => bot.id === openBotId);
+  const inSettings =
+    path === botsSettingsPath ||
+    sidebarSection(path) === 'settings' ||
+    sidebarSection(path) === 'scheduled';
+  useEffect(() => {
+    const changed = () => void refresh();
+    window.addEventListener('nod:bots-changed', changed);
+    return () => window.removeEventListener('nod:bots-changed', changed);
+  }, [refresh]);
+  const lastSettings = useRef(botsSettingsPath);
+  if (inSettings) lastSettings.current = path;
+  const botTurns = new Set(
+    (state?.activity ?? []).filter((item) => item.botId).map((item) => item.turnId),
+  );
+  const mainStreams = botTurns.size
+    ? Object.fromEntries(
+        Object.entries(streams).filter(
+          ([id]) => ![...botTurns].some((turnId) => id.includes(turnId)),
+        ),
+      )
+    : streams;
+  const mainState = useMemo(
+    () =>
+      state && {
+        ...state,
+        turns: state.turns.filter((turn) => !turn.botId),
+        tasks: state.tasks?.filter((task) => !task.botId),
+        verificationRequests: state.verificationRequests?.filter((request) => !request.botId),
+        activity: state.activity?.filter((item) => !item.botId),
+      },
+    [state],
+  );
+  const lastMain = state?.messages.findLast((message) => message.text.trim());
+  const nodLine = lastMain
+    ? `${lastMain.role === 'user' ? 'You: ' : ''}${lastMain.text.replace(/\s+/g, ' ').trim()}`
+    : '';
+  const nodWorking = Boolean(
+    connected && state?.activity?.some((item) => !item.background && !item.botId),
+  );
   const askInChat = (text: string) => {
     setChatRequests((current) => [...current, { id: crypto.randomUUID(), text }]);
     navigate('/');
@@ -143,21 +193,26 @@ function Workspace({
     if (notificationTarget === undefined || (notificationTarget && !state)) return;
     setNotificationTarget(undefined);
     if (notificationTarget && notificationTarget.threadId !== state?.threadId) return;
-    navigate('/');
+    const botId = notificationTarget?.botId;
+    navigate(botId ? botPath(botId) : '/');
     if (notificationTarget)
-      window.dispatchEvent(
-        new CustomEvent('nod:focus-message', {
-          detail: { messageId: notificationTarget.messageId },
-        }),
+      window.setTimeout(
+        () =>
+          window.dispatchEvent(
+            new CustomEvent('nod:focus-message', {
+              detail: { messageId: notificationTarget.messageId, ...(botId ? { botId } : {}) },
+            }),
+          ),
+        botId ? 300 : 0,
       );
   }, [notificationTarget, state]);
   useEffect(() => {
     const focusMessage = (event: Event) => {
-      const detail = (event as CustomEvent<{ messageId?: unknown }>).detail;
-      if (typeof detail?.messageId === 'string') {
-        if (!state) setPendingMessageFocus(detail.messageId);
-        navigate('/');
-      }
+      const detail = (event as CustomEvent<{ messageId?: unknown; botId?: unknown }>).detail;
+      if (typeof detail?.messageId !== 'string') return;
+      if (typeof detail.botId === 'string') return navigate(botPath(detail.botId));
+      if (!state) setPendingMessageFocus(detail.messageId);
+      navigate('/');
     };
     window.addEventListener('nod:focus-message', focusMessage);
     return () => window.removeEventListener('nod:focus-message', focusMessage);
@@ -185,61 +240,73 @@ function Workspace({
     ]);
   }, []);
   useEffect(() => {
-    writeUiPreference('nod.sidebar', collapsed ? 'collapsed' : 'expanded');
-  }, [collapsed]);
+    writeUiPreference('nod.side-panel', panelHidden ? 'hidden' : 'shown');
+  }, [panelHidden]);
+  const shell = useRef<HTMLDivElement>(null);
   function toggleSidebar() {
-    setCollapsed((value) => !value);
+    setPanelHidden((value) => !value);
   }
+  const showPanel = panelOpen && (path === '/' || Boolean(openBot));
+  const togglePanel = () => setPanelOpen((value) => !value);
   return (
     <div
-      className={`app-shell ${collapsed ? 'sidebar-collapsed' : ''} ${entering ? 'shell-entering' : ''} ${settingsPage(path) ? 'settings-open' : ''}`}
+      ref={shell}
+      className={`app-shell${panelHidden ? ' panel-hidden' : ''}${entering ? ' shell-entering' : ''}${settingsPage(path) ? ' settings-open' : ''}${showPanel ? ' with-panel' : ''}`}
     >
       <a href="#workspace" className="skip-link">
         Skip to content
       </a>
-      {desktopSettingsAvailable() && <DesktopToolbar actionsRef={setToolbarActions} />}
-      {!settingsPage(path) && (
-        <Sidebar
-          path={path}
-          unreadCount={unread.count}
-          unreadPending={unread.pending}
-          presence={
-            !connected
-              ? undefined
-              : state?.turns[0]?.status === 'waiting' ||
-                  state?.tasks?.some((task) => task.status === 'needs_you')
-                ? 'waiting'
-                : state?.activity?.some((item) => !item.background)
-                  ? 'working'
-                  : undefined
-          }
-          onToggle={toggleSidebar}
-          onNavigate={navigate}
-          account={account}
-          actionsRef={setMobileActions}
-        />
-      )}
+      <Sidebar
+        nav={
+          <BotNav
+            bots={bots}
+            activity={state?.activity}
+            activeId={openBotId}
+            mainActive={path === '/'}
+            nodLine={nodLine}
+            nodWorking={nodWorking}
+            nodUnread={path !== '/' && (unread.count > 0 || unread.pending)}
+            settingsActive={inSettings}
+            unread={(bot) => chatUnread(bot, chatCursors)}
+            onNavigate={navigate}
+            onSettings={() => navigate(lastSettings.current)}
+            onOpenPanel={(id) => {
+              navigate(botPath(id));
+              setPanelOpen(true);
+            }}
+          />
+        }
+        panelHidden={panelHidden}
+        onToggle={toggleSidebar}
+        onNavigate={navigate}
+      />
       <div className="workspace-frame">
-        {!settingsPage(path) && <SidebarToggle collapsed={collapsed} onToggle={toggleSidebar} />}
         <div className="workspace-body">
-          <main id="workspace" className="main-workspace" tabIndex={-1}>
-            <div className="chat-route" hidden={path !== '/'}>
+          <main
+            id="workspace"
+            className={`main-workspace${inSettings ? ' main-settings' : ''}`}
+            tabIndex={-1}
+          >
+            {inSettings && <SettingsNav path={path} account={account} onNavigate={navigate} />}
+            <PageHeader path={path} />
+            <div className="chat-route chat-surface" hidden={path !== '/'}>
+              {state && (
+                <ChatTop
+                  panelOpen={showPanel}
+                  onTogglePanel={togglePanel}
+                  toolsRef={setMainTools}
+                />
+              )}
               {state ? (
                 <Chat
-                  ownerId={session.user!.id}
-                  state={state}
-                  streams={streams}
+                  ownerId={ownerId}
+                  state={mainState!}
+                  streams={mainStreams}
                   connected={connected}
                   refresh={refresh}
                   initialFocusMessageId={pendingMessageFocus}
                   onReturnToMemory={onReturnToMemory}
-                  toolbarActions={
-                    path === '/'
-                      ? !desktopSettingsAvailable() && mobileHeader
-                        ? mobileActions
-                        : toolbarActions
-                      : null
-                  }
+                  toolbarActions={path === '/' ? mainTools : null}
                   visible={path === '/'}
                   readCursor={unread.cursor}
                   readUnavailable={unread.unavailable}
@@ -262,6 +329,33 @@ function Workspace({
                 <ChatSkeleton />
               )}
             </div>
+            {openBot && state && (
+              <BotChat
+                key={openBot.id}
+                bot={openBot}
+                ownerId={ownerId}
+                state={state}
+                streams={streams}
+                connected={connected}
+                refresh={refresh}
+                visible
+                panelOpen={showPanel}
+                onTogglePanel={togglePanel}
+                onNavigate={navigate}
+                onRead={(chatId, at) => setChatCursors(writeChatCursor(ownerId, chatId, at))}
+                onFeedback={onFeedback}
+              />
+            )}
+            {path === botsSettingsPath && (
+              <BotsPage
+                bots={bots}
+                onNavigate={navigate}
+                onOpenSettings={(id) => {
+                  navigate(id ? botPath(id) : '/');
+                  setPanelOpen(true);
+                }}
+              />
+            )}
             {(path === '/usage' || path === '/vault') && (
               <>
                 <Usage hidden={path !== '/usage'} />
@@ -269,7 +363,7 @@ function Workspace({
               </>
             )}
             {path === '/apps' && (
-              <Apps key={session.user!.id} configuration={state?.configuration} onAsk={askInChat} />
+              <Apps key={ownerId} configuration={state?.configuration} onAsk={askInChat} />
             )}
             {path === '/channels' && <Channels />}
             {path === '/tasks' && (
@@ -279,6 +373,8 @@ function Workspace({
             {settings}
             {!settingsPage(path) &&
               !preparedWorkId(path) &&
+              path !== botsSettingsPath &&
+              !(openBotId && (openBot || !state)) &&
               !sidebarItems.some((item) => item.path === path) && (
                 <div className="empty-state">
                   <h1>This page isn’t here.</h1>
@@ -296,6 +392,10 @@ function Workspace({
           </main>
         </div>
       </div>
+      {showPanel && (
+        <BotPanel bot={path === '/' ? undefined : openBot} onClose={() => setPanelOpen(false)} />
+      )}
+      <Toasts />
     </div>
   );
 }
@@ -623,11 +723,6 @@ function AuthenticatedApp({
                     });
                   }
                 }}
-                onTabChange={(tab, replace) => {
-                  if (replace) {
-                    replaceNavigation(settingsPath(tab));
-                  } else navigate(settingsPath(tab));
-                }}
                 onReplayOnboarding={
                   import.meta.env?.DEV === true && !desktopSettingsAvailable()
                     ? () => navigate('/onboarding?replay=1')
@@ -689,6 +784,8 @@ function AccountApp({
           : (secure && (path !== '/browser' || session.capabilities.developer)) ||
               settingsPage(path) ||
               sidebarItems.some((item) => item.path === path) ||
+              path === botsSettingsPath ||
+              botIdOf(path) ||
               preparedWorkId(path)
             ? path
             : '/not-found',

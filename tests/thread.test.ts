@@ -5203,6 +5203,175 @@ test(
       });
 
       await t.test(
+        'a bot chat runs in its own session and keeps its messages, owner words, approvals and stop to itself',
+        async () => {
+          await waitFor(settledThread);
+          const runTurn = dependencies.runTurn;
+          const contexts: RuntimeContext[] = [];
+          let releaseHeld!: () => void;
+          const held = new Promise<void>((resolve) => {
+            releaseHeld = resolve;
+          });
+          dependencies.runTurn = async (context) => {
+            contexts.push(context);
+            if (context.prompt === 'Synthetic bot hold')
+              await Promise.race([
+                held,
+                new Promise((resolve) =>
+                  context.signal.addEventListener('abort', resolve, { once: true }),
+                ),
+              ]);
+            await context.reply(`Synthetic reply to ${context.prompt}`);
+            return { status: 'succeeded' };
+          };
+          const bot = randomUUID();
+          const created: string[] = [];
+          const { recentOwnerWords } = await import('../src/server/owner-instructions.ts');
+          try {
+            await db.pool.query(
+              `INSERT INTO bots(id,owner_id,name,job,avatar,model) VALUES($1,$2,'Synthetic bot','Synthetic job','{"hue":"sky"}','{"connectionId":"00000000-0000-4000-8000-000000000000","modelId":"synthetic","effort":"medium"}')`,
+              [bot, ownerId],
+            );
+            const main = await thread.submitUserMessage('Synthetic main request');
+            created.push(main.turnId);
+            await waitFor(settled(main.turnId));
+            const chat = await thread.submitUserMessage('Synthetic bot request', [], {
+              botId: bot,
+            });
+            created.push(chat.turnId);
+            await waitFor(settled(chat.turnId));
+            const chatTurn = (
+              await db.pool.query('SELECT session_id,background FROM turns WHERE id=$1', [
+                chat.turnId,
+              ])
+            ).rows[0];
+            assert.equal(chatTurn.session_id, bot);
+            assert.equal(chatTurn.background, false);
+            const stamped = (
+              await db.pool.query(
+                'SELECT turn_id,role,bot_id FROM messages WHERE turn_id=ANY($1::uuid[]) ORDER BY created_at',
+                [[main.turnId, chat.turnId]],
+              )
+            ).rows;
+            assert.deepEqual(
+              stamped.map((row) => [row.turn_id === chat.turnId, row.role, row.bot_id]),
+              [
+                [false, 'user', null],
+                [false, 'assistant', null],
+                [true, 'user', bot],
+                [true, 'assistant', bot],
+              ],
+            );
+            const botContext = contexts.find((context) => context.turnId === chat.turnId)!;
+            assert.equal(botContext.sessionId, bot);
+            assert.equal(botContext.bot?.id, bot);
+            assert.ok(botContext.bots?.some((item) => item.id === bot));
+            assert.ok(!botContext.history.some((item) => item.text.includes('Synthetic main')));
+            const next = await thread.submitUserMessage('Synthetic second main request');
+            created.push(next.turnId);
+            await waitFor(settled(next.turnId));
+            const mainContext = contexts.find((context) => context.turnId === next.turnId)!;
+            assert.equal(mainContext.bot, undefined);
+            assert.ok(mainContext.history.some((item) => item.text === 'Synthetic main request'));
+            assert.ok(!mainContext.history.some((item) => item.text.includes('Synthetic bot')));
+            const botReply = stamped.length
+              ? (
+                  await db.pool.query(
+                    "SELECT id FROM messages WHERE turn_id=$1 AND role='assistant'",
+                    [chat.turnId],
+                  )
+                ).rows[0].id
+              : undefined;
+            await assert.rejects(
+              thread.submitUserMessage('Synthetic cross-chat reply', [], {
+                replyToMessageId: botReply,
+              }),
+              /another chat/,
+            );
+            const botWords = await recentOwnerWords(
+              db.pool,
+              ownerId,
+              threadId,
+              [chat.messageId],
+              null,
+              chat.turnId,
+            );
+            const mainWords = await recentOwnerWords(
+              db.pool,
+              ownerId,
+              threadId,
+              [next.messageId],
+              null,
+              next.turnId,
+            );
+            const texts = (words: unknown) => JSON.stringify(words);
+            assert.match(texts(botWords), /Synthetic bot request/);
+            assert.doesNotMatch(texts(botWords), /Synthetic main request/);
+            assert.match(texts(mainWords), /Synthetic main request/);
+            assert.doesNotMatch(texts(mainWords), /Synthetic bot request/);
+
+            const scoped = await createApprovals(
+              async () => ({}),
+              undefined,
+              async (reply) => (reply === 'yes' ? true : undefined),
+              async () => 'Synthetic saved action confirmation.',
+            );
+            const approvalTurn = randomUUID();
+            created.push(approvalTurn);
+            const approvalAsk = randomUUID();
+            await db.pool.query(
+              `INSERT INTO turns(id,owner_id,thread_id,session_id,source,message_id,prompt,status,started_at)
+               VALUES($1,$2,$3,$4,'user',$5,'Synthetic bot approval','running',now())`,
+              [approvalTurn, ownerId, threadId, bot, approvalAsk],
+            );
+            await db.pool.query(
+              "INSERT INTO messages(id,owner_id,role,text,thread_id,turn_id) VALUES($1,$2,'user','Synthetic bot approval',$3,$4)",
+              [approvalAsk, ownerId, threadId, approvalTurn],
+            );
+            await scoped.request({ threadId, turnId: approvalTurn }, 'FIXTURE_WRITE', {});
+            await db.pool.query(
+              "UPDATE turns SET status='waiting',waiting_reason='approval' WHERE id=$1",
+              [approvalTurn],
+            );
+            const confirmation = (
+              await db.pool.query(
+                'SELECT m.bot_id FROM approvals a JOIN messages m ON m.id=a.confirmation_message_id WHERE a.turn_id=$1',
+                [approvalTurn],
+              )
+            ).rows[0];
+            assert.equal(confirmation.bot_id, bot);
+            assert.equal(
+              await scoped.chat.answer({ text: 'yes', channel: 'web', threadId }),
+              undefined,
+            );
+            assert.equal(
+              (await scoped.chat.answer({ text: 'yes', channel: 'web', threadId, botId: bot }))
+                ?.approved,
+              true,
+            );
+            await db.pool.query("UPDATE turns SET status='cancelled' WHERE id=$1", [approvalTurn]);
+
+            const hold = await thread.submitUserMessage('Synthetic bot hold', [], { botId: bot });
+            created.push(hold.turnId);
+            await waitFor(() => contexts.some((context) => context.turnId === hold.turnId));
+            await thread.stopThread();
+            assert.equal(await turnStatus(hold.turnId), 'running');
+            await thread.stopThread(undefined, { botId: bot });
+            await waitFor(settled(hold.turnId));
+            assert.equal(await turnStatus(hold.turnId), 'cancelled');
+          } finally {
+            releaseHeld();
+            dependencies.runTurn = runTurn;
+            await db.pool.query(
+              "UPDATE turns SET status='cancelled',finished_at=now() WHERE id=ANY($1::uuid[]) AND status IN ('queued','running','waiting')",
+              [created],
+            );
+            await db.pool.query('UPDATE bots SET archived_at=now() WHERE id=$1', [bot]);
+          }
+        },
+      );
+
+      await t.test(
         'answer choices bind owned pending questions across sessions and reject stale or altered submissions',
         async (t) => {
           await waitFor(settledThread);
@@ -14553,8 +14722,9 @@ test(
     const pool = new pg.Pool({ connectionString: url.href });
     try {
       await pool.query(`CREATE TABLE threads(id uuid PRIMARY KEY, owner_id text NOT NULL, archived_at timestamptz);
-        CREATE TABLE turns(id uuid PRIMARY KEY, owner_id text NOT NULL, thread_id uuid, session_id uuid, source text,
+        CREATE TABLE turns(id uuid PRIMARY KEY, owner_id text NOT NULL, thread_id uuid, session_id uuid, bot_id uuid, source text,
           status text, channel text DEFAULT 'web', message_id uuid, created_at timestamptz DEFAULT now(), started_at timestamptz);
+        CREATE TABLE bots(id uuid PRIMARY KEY, owner_id text NOT NULL);
         CREATE TABLE tasks(id uuid PRIMARY KEY, owner_id text NOT NULL, session_id uuid, title text, now_text text,
           message_id uuid, created_at timestamptz DEFAULT now());
         CREATE TABLE turn_events(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), turn_id uuid, type text, summary text DEFAULT '',
@@ -14974,8 +15144,9 @@ test(
     };
     try {
       await pool.query(`CREATE TABLE threads(id uuid PRIMARY KEY, owner_id text NOT NULL, archived_at timestamptz);
-        CREATE TABLE turns(id uuid PRIMARY KEY, owner_id text NOT NULL, thread_id uuid, session_id uuid, source text,
+        CREATE TABLE turns(id uuid PRIMARY KEY, owner_id text NOT NULL, thread_id uuid, session_id uuid, bot_id uuid, source text,
           status text, channel text DEFAULT 'web', message_id uuid, created_at timestamptz DEFAULT now(), started_at timestamptz);
+        CREATE TABLE bots(id uuid PRIMARY KEY, owner_id text NOT NULL);
         CREATE TABLE tasks(id uuid PRIMARY KEY, owner_id text NOT NULL, session_id uuid, title text, now_text text,
           message_id uuid, created_at timestamptz DEFAULT now());
         CREATE TABLE turn_events(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), turn_id uuid, type text, summary text DEFAULT '',

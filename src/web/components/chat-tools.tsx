@@ -13,6 +13,8 @@ import {
   shortcutLabel,
   sidebarItems,
 } from '../lib/navigation';
+import { botPath, focusMessage, type Bot } from '../lib/bots';
+import { createBot, toast } from './bots';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
 import { useArtifactDrawer } from './artifact-context';
 import { ownedArtifactUrl, type ImagePreview } from './attachment-images';
@@ -42,7 +44,21 @@ function highlighted(text: string, query: string) {
     .map((part, index) => (index % 2 ? <mark key={index}>{part}</mark> : part));
 }
 
-export function ChatTools({ files, tasks = [] }: { files: ImagePreview[]; tasks?: Task[] }) {
+export function ChatTools({
+  files,
+  tasks = [],
+  bots = [],
+  enabled = true,
+  botId,
+}: {
+  files: ImagePreview[];
+  tasks?: Task[];
+  bots?: Bot[];
+  enabled?: boolean;
+  botId?: string;
+}) {
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
   const drawer = useArtifactDrawer();
   const desktop = desktopSettingsAvailable();
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
@@ -92,7 +108,7 @@ export function ChatTools({ files, tasks = [] }: { files: ImagePreview[]; tasks?
         isEditingTarget(event.target)
       )
         return;
-      if (document.querySelector('[role="dialog"],dialog[open]')) return;
+      if (!enabledRef.current || document.querySelector('[role="dialog"],dialog[open]')) return;
       if (
         event.key.toLowerCase() === 'k' ||
         (desktopSettingsAvailable() && event.key.toLowerCase() === 'f')
@@ -115,7 +131,7 @@ export function ChatTools({ files, tasks = [] }: { files: ImagePreview[]; tasks?
     setSearch({ query: trimmedQuery, items: [], error: '', loading: true });
     const timer = setTimeout(() => {
       void api<Array<Message & { snippet?: string }>>(
-        `/api/messages/search?q=${encodeURIComponent(trimmedQuery)}`,
+        `/api/messages/search?q=${encodeURIComponent(trimmedQuery)}${botId ? `&botId=${botId}` : ''}`,
         { signal: controller.signal },
       )
         .then((items) => {
@@ -151,6 +167,21 @@ export function ChatTools({ files, tasks = [] }: { files: ImagePreview[]; tasks?
           },
         ]
       : []),
+    {
+      id: 'new-bot',
+      label: 'New bot',
+      action: () =>
+        void createBot()
+          .then((bot) => navigate(botPath(bot.id)))
+          .catch((cause) => toast(errorMessage(cause))),
+    },
+    ...bots
+      .filter((bot) => bot.id !== botId)
+      .map((bot) => ({
+        id: `bot:${bot.id}`,
+        label: `Open ${bot.name}`,
+        action: () => navigate(botPath(bot.id)),
+      })),
     ...sidebarItems.map((item) => ({
       id: item.path,
       label: `Open ${item.label}`,
@@ -166,10 +197,7 @@ export function ChatTools({ files, tasks = [] }: { files: ImagePreview[]; tasks?
       .map((task) => ({
         id: task.id,
         label: `Go to ${task.title}`,
-        action: () =>
-          window.dispatchEvent(
-            new CustomEvent('nod:focus-message', { detail: { messageId: task.messageId } }),
-          ),
+        action: () => focusMessage(task.messageId!, botId),
       })),
   ]
     .filter((item) => item.label.toLocaleLowerCase().includes(query.toLocaleLowerCase()))
@@ -182,7 +210,7 @@ export function ChatTools({ files, tasks = [] }: { files: ImagePreview[]; tasks?
           action: () =>
             window.dispatchEvent(
               new CustomEvent('nod:focus-message', {
-                detail: { messageId: message.id },
+                detail: { messageId: message.id, ...(botId ? { botId } : {}) },
               }),
             ),
         }))

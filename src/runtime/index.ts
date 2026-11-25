@@ -821,8 +821,11 @@ export function createAgentRuntime(dependencies: {
         ]
           .filter(
             (tool) =>
-              !context.proactivity ||
-              ['read_source', 'proactive_issue', 'memory', 'task', 'ask_user'].includes(tool.name),
+              (tool.name !== 'bot' || (!context.background && !context.taskContext)) &&
+              (!context.proactivity ||
+                ['read_source', 'proactive_issue', 'memory', 'task', 'ask_user'].includes(
+                  tool.name,
+                )),
           )
           .map((tool): AgentTool => {
             const { name, execute } = tool;
@@ -1435,7 +1438,12 @@ export function createAgentRuntime(dependencies: {
               { execution },
             )
             .catch(() => {});
-        if (sessionId !== threadId && !waitingForUser && (browsed || context.resumed))
+        if (
+          sessionId !== threadId &&
+          sessionId !== context.bot?.id &&
+          !waitingForUser &&
+          (browsed || context.resumed)
+        )
           await computer.clear(browserId).catch(() => {});
         finished();
       }

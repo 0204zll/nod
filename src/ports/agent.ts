@@ -191,6 +191,8 @@ export interface RuntimeContext {
     messageId?: string | null;
   };
   tasks?: import('../shared/contracts.ts').Task[];
+  bot?: { id: string; name: string; job: string; instructions: string };
+  bots?: Array<{ id: string; name: string; job: string }>;
   workspacePath: string;
   signal: AbortSignal;
   attachments: Array<{

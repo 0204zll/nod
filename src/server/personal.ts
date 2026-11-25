@@ -395,6 +395,7 @@ export function createPersonalService(dependencies: PersonalDependencies) {
     scheduleCache: schedules.scheduleCache,
     listSchedules: schedules.list,
     getSchedule: schedules.get,
+    removeSchedule: schedules.remove,
     manage,
     recall,
     validateReview,

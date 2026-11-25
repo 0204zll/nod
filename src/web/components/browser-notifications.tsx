@@ -102,7 +102,7 @@ function useNotificationChoice(ownerId: string) {
       setError(errorMessage(cause));
     }
   }
-  return { ...browserNotificationStatus(ownerId), busy, error, change, dismiss };
+  return { ...scope.consent, busy, error, change, dismiss };
 }
 
 export function BrowserNotificationPrompt({ ownerId }: { ownerId: string }) {

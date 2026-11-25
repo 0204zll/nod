@@ -114,6 +114,7 @@ type Row = {
   question_message_id: string | null;
   handoff: boolean;
   model: ModelSelection | null;
+  bot_id: string | null;
   work: WorkKind | null;
   schedule_model: ModelSelection | null;
 };
@@ -191,7 +192,7 @@ export function createTasks(options: {
            COALESCE(${activeHandoffSql},false) AS handoff,
            COALESCE(q.text,CASE WHEN u.status='cancelled' THEN continuation.text END) AS question,
            COALESCE(q.id,CASE WHEN u.status='cancelled' THEN continuation.id END) AS question_message_id,
-           t.model,CASE WHEN t.session_id=t.id THEN ${workKindSql('t', 'NULL')} END AS work,
+           t.model,t.bot_id,CASE WHEN t.session_id=t.id THEN ${workKindSql('t', 'NULL')} END AS work,
            work_schedule.model AS schedule_model
          FROM ranked t LEFT JOIN turns u ON u.id=t.turn_id AND u.owner_id=t.owner_id
          ${workOriginSql('t')}
@@ -241,6 +242,7 @@ export function createTasks(options: {
         createdAt: row.created_at.toISOString(),
         updatedAt: row.updated_at.toISOString(),
         closedAt: row.closed_at?.toISOString() ?? null,
+        botId: row.bot_id ?? null,
         ...(row.work
           ? {
               model: row.model,
@@ -487,27 +489,39 @@ export function createTasks(options: {
     priorHandoff = false,
   ) {
     const request = input.parse(raw);
-    if (request.action === 'list') return { tasks: await read(client) };
     const current = (
       await client.query('SELECT * FROM turns WHERE id=$1 AND owner_id=$2', [turn.turnId, ownerId])
     ).rows[0];
+    const sameChat = (task: { botId?: string | null }) =>
+      (task.botId ?? null) === (current.bot_id ?? null);
+    if (request.action === 'list') return { tasks: (await read(client)).filter(sameChat) };
+    const own = async (ids: string[]) => {
+      const tasks = await read(client, { closed: true });
+      for (const id of ids) {
+        const task = tasks.find((item) => item.id === id);
+        if (task && !sameChat(task)) throw failure('That task belongs to another chat.');
+      }
+    };
+    const chatSession =
+      current.session_id === turn.threadId ||
+      Boolean(current.bot_id && current.session_id === current.bot_id);
     if (request.action === 'reply') {
-      if (current.task_id || current.session_id !== turn.threadId || !sourceMessageId)
-        throw failure('Only the main chat can send owner updates to tasks.');
+      if (current.task_id || !chatSession || !sourceMessageId)
+        throw failure('Only a chat can send owner updates to tasks.');
       const ids = new Set(request.ids);
       if (request.retry && ids.size !== 1) throw failure('A retry must name one task.');
+      await own([...ids]);
       for (const id of ids) await deliver(client, id, sourceMessageId, turn.turnId, request.retry);
       return { tasks: await read(client) };
     }
     if (request.action === 'stop') {
       if (current.task_id) throw failure('Use finish to close your own task.');
-      if (current.session_id !== turn.threadId || !sourceMessageId)
-        throw failure('Only the main chat can stop tasks.');
+      if (!chatSession || !sourceMessageId) throw failure('Only a chat can stop tasks.');
       if (!request.id) {
         const cancelled = await cancelTurns(
           client,
           turn.threadId,
-          { background: true },
+          { background: true, botId: current.bot_id ?? null },
           capture,
           'agent',
         );
@@ -516,6 +530,7 @@ export function createTasks(options: {
         const otherRuns = cancelled.browsers.filter((id) => !sessions.has(id)).length;
         return { stopped: { tasks, otherRuns }, cancelled };
       }
+      await own([request.id]);
       const cancelled = await stop(client, request.id, turn.threadId, capture, 'agent');
       return { task: (await read(client, { id: request.id, closed: true }))[0], cancelled };
     }
@@ -546,7 +561,7 @@ export function createTasks(options: {
         if (existing) return (await read(client, { id: existing.id, closed: true }))[0];
       }
       id = randomUUID();
-      const independent = current.proactive || current.session_id === turn.threadId;
+      const independent = current.proactive || chatSession;
       if (request.model && (current.proactive || !independent || !sourceMessageId))
         throw failure('Only a task you start from chat can have its own model.');
       const model = request.model && validateModel(request.model);
@@ -571,8 +586,8 @@ export function createTasks(options: {
           : await insertAssistantMessage(client, turn, request.message);
       const sessionId = independent ? id : current.session_id;
       await client.query(
-        `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,message_id,title,done_when,brief,now_text,steps,waiting_for,next_check,applied_revision,activity_key,model)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+        `INSERT INTO tasks(id,owner_id,turn_id,session_id,source_message_id,message_id,title,done_when,brief,now_text,steps,waiting_for,next_check,applied_revision,activity_key,model,bot_id)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
         [
           id,
           ownerId,
@@ -590,6 +605,7 @@ export function createTasks(options: {
           independent ? 0 : 1,
           current.proactive ? `${turn.threadId}:${request.key}` : null,
           model ? JSON.stringify(model) : null,
+          current.bot_id ?? null,
         ],
       );
       if (independent) {
@@ -776,6 +792,7 @@ export function createTasks(options: {
         updated_at timestamptz NOT NULL DEFAULT now(), closed_at timestamptz
       );
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS session_id uuid;
+      ALTER TABLE tasks ADD COLUMN IF NOT EXISTS bot_id uuid;
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS source_message_id uuid REFERENCES messages(id);
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS message_id uuid REFERENCES messages(id);
       ALTER TABLE tasks ADD COLUMN IF NOT EXISTS continuation_message_id uuid REFERENCES messages(id);
@@ -971,7 +988,7 @@ export function createTasks(options: {
       command === 'stop'
         ? target
           ? await stop(client, target.task_id, thread.id, capture, 'owner')
-          : await cancelTurns(client, thread.id, {}, capture)
+          : await cancelTurns(client, thread.id, { all: true }, capture)
         : undefined;
     const tasks = await read(client, target ? { id: target.task_id, closed: true } : {});
     return {

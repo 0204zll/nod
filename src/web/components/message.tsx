@@ -2,6 +2,7 @@ import {
   lazy,
   memo,
   Suspense,
+  useContext,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -9,6 +10,7 @@ import {
   type ReactNode,
 } from 'react';
 import { TaskMark } from './task-mark';
+import { ChatBot, focusMessage } from '../lib/bots';
 import { createPortal } from 'react-dom';
 import { Copy, Check, CornerUpLeft, Ellipsis, SmilePlus } from './icons';
 import Markdown from 'react-markdown';
@@ -50,7 +52,13 @@ import { TelegramChatLink, useTelegramChatUrl } from './telegram-chat-link';
 import { BrowserHandoff } from './browser-handoff';
 import { MessageAttachments } from './attachment-card';
 import { AudioPlayer } from './audio-player';
-import { AnswerChoices, ChoiceAnswer, type AnswerChoicesProps } from './answer-choices';
+import {
+  AnswerChoices,
+  ChoiceAnswer,
+  QuickChoices,
+  quickChoices,
+  type AnswerChoicesProps,
+} from './answer-choices';
 import { ApprovalCard, ApprovalChoiceCard, ApprovalFields, CodeRequestCard } from './action-card';
 import { MessageLinkTooltip } from './message-link-tooltip';
 import { Tooltip } from './tooltip';
@@ -124,23 +132,20 @@ export function MessageQuote({
   message,
   composing = false,
 }: {
-  message: NonNullable<Message['replyTo']>;
+  message: NonNullable<Message['replyTo']> & { from?: string };
   composing?: boolean;
 }) {
+  const botId = useContext(ChatBot);
   return (
     <Tooltip content="Go to original message">
       <button
         type="button"
         className="message-reply-quote"
-        onClick={() =>
-          window.dispatchEvent(
-            new CustomEvent('nod:focus-message', { detail: { messageId: message.id } }),
-          )
-        }
+        onClick={() => focusMessage(message.id, botId)}
       >
         <strong>
           {composing ? 'Replying to ' : ''}
-          {message.role === 'assistant' ? 'Nod' : composing ? 'yourself' : 'You'}
+          {message.role === 'assistant' ? (message.from ?? 'Nod') : composing ? 'yourself' : 'You'}
         </strong>
         <span
           className="message-excerpt"
@@ -363,10 +368,18 @@ export function MessageBubble({
   handoffPaused,
   work,
   task,
+  replyFrom,
+  avatar,
+  speakerName = 'Nod',
+  replyPills = false,
 }: {
   message: Message;
   work?: MessageWork;
   task?: ReactNode;
+  replyFrom?: string;
+  avatar?: ReactNode;
+  speakerName?: string;
+  replyPills?: boolean;
   pendingAudio?: ImagePreview;
   connectedAppIds?: ReadonlySet<string>;
   grouped?: boolean;
@@ -391,8 +404,14 @@ export function MessageBubble({
     (message.role === 'user' ? message.displayText : undefined) ??
     message.audioCaption ??
     message.text;
+  const quick =
+    replyPills &&
+    message.role === 'assistant' &&
+    !streaming &&
+    !message.approval &&
+    quickChoices(message.answerChoices);
   const card =
-    message.role !== 'assistant' || streaming
+    message.role !== 'assistant' || streaming || quick
       ? null
       : message.approval && !message.approval.fields
         ? 'approval'
@@ -718,13 +737,16 @@ export function MessageBubble({
   return (
     <article
       ref={articleElement}
-      className={`message message-${message.role}${grouped ? ' message-grouped' : ''}${arriving ? ' message-arriving' : ''}${panel ? ' message-panel-open' : ''}`}
-      aria-label={streaming ? 'Nod is responding' : message.role === 'user' ? 'You' : 'Nod'}
+      className={`message message-${message.role}${grouped ? ' message-grouped' : ''}${arriving ? ' message-arriving' : ''}${panel ? ' message-panel-open' : ''}${avatar ? ' message-with-avatar' : ''}`}
+      aria-label={
+        streaming ? `${speakerName} is responding` : message.role === 'user' ? 'You' : speakerName
+      }
       data-message-id={streaming ? undefined : message.id}
       onMouseUp={selectQuote}
       onKeyUp={selectQuote}
       tabIndex={-1}
     >
+      {avatar && <span className="message-avatar">{avatar}</span>}
       <div className="message-content">
         {work && <WorkLabel work={work} />}
         {run && <ScheduleRunTrack run={run} />}
@@ -784,7 +806,7 @@ export function MessageBubble({
                 );
               }}
             >
-              {visibleReply && <MessageQuote message={visibleReply} />}
+              {visibleReply && <MessageQuote message={{ ...visibleReply, from: replyFrom }} />}
               {cardText?.lead && (
                 <MessageText text={cardText.lead} connectedAppIds={connectedAppIds} />
               )}
@@ -980,6 +1002,15 @@ export function MessageBubble({
             )}
           </div>
         </div>
+        {quick && (
+          <QuickChoices
+            key={message.id}
+            choices={message.answerChoices!}
+            answer={message.choiceAnswer}
+            disabled={answersDisabled}
+            onAnswer={message.answerChoicesPending ? onAnswer : undefined}
+          />
+        )}
         {task && <div className="message-task">{task}</div>}
         {message.role === 'assistant' && !streaming && message.presentation?.type === 'apps' && (
           <MessagePresentation value={message.presentation} messageId={message.id} />

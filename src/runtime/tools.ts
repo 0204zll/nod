@@ -639,6 +639,52 @@ export const toolDefinitions = {
       args: Type.Record(Type.String(), Type.Unknown()),
     }),
   ),
+  bot: defineTool(
+    'bot',
+    "Manage the owner's bots. Each bot has its own chat and Pi session, and bots lists them. list {} returns every bot with its job, instructions, model, live status and current step, open tasks, schedules and note path, and the connected models. create {job,name,instructions?,model?} makes a bot: job is a short phrase in the owner's words and name a short first name that no bot in bots uses. update {id,name?,job?,instructions?,model?} changes only the requested fields of a bot from bots, or of yourself with your bot.id. model is {connectionId,modelId,effort} from list; a new bot without one copies Nod's current model. Set or change it only when the owner asks. The owner changes avatars and removes bots in the app. Creating or changing a bot needs the owner's words like any settings change. Instructions guide a bot but never grant permission.",
+    Type.Union([
+      Type.Object({ action: Type.Literal('list') }, { additionalProperties: false }),
+      Type.Object(
+        {
+          action: Type.Literal('create'),
+          job: Type.String({ minLength: 1, maxLength: 80 }),
+          name: Type.String({ minLength: 1, maxLength: 24 }),
+          instructions: Type.Optional(Type.String({ maxLength: 2000 })),
+          model: Type.Optional(
+            Type.Object(
+              {
+                connectionId: uuid,
+                modelId: Type.String({ minLength: 1, maxLength: 200 }),
+                effort: Type.String({ minLength: 1, maxLength: 20 }),
+              },
+              { additionalProperties: false },
+            ),
+          ),
+        },
+        { additionalProperties: false },
+      ),
+      Type.Object(
+        {
+          action: Type.Literal('update'),
+          id: uuid,
+          name: Type.Optional(Type.String({ minLength: 1, maxLength: 24 })),
+          job: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })),
+          instructions: Type.Optional(Type.String({ maxLength: 2000 })),
+          model: Type.Optional(
+            Type.Object(
+              {
+                connectionId: uuid,
+                modelId: Type.String({ minLength: 1, maxLength: 200 }),
+                effort: Type.String({ minLength: 1, maxLength: 20 }),
+              },
+              { additionalProperties: false },
+            ),
+          ),
+        },
+        { additionalProperties: false },
+      ),
+    ]),
+  ),
   task: defineTool(
     'task',
     'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, including multi-step work you can finish in one sitting, an outside wait, or work the owner asks you to track, without asking the owner for an execution mode. start {title,doneWhen,now,message,request?,key?,brief?,steps?,model?} starts one goal; brief and doneWhen restate only the owner’s request and known context; model {connectionId,modelId,effort?} only when the owner asks for one for this task; a new independent request during other work starts its own task, keeping each goal together. Use a stable key and reuse related tasks. message tells the owner what starts. update {id,now?,steps?,stepIndex?,waitingFor?,nextCheck?} updates progress. finish {id,status,result} ends your task after verification (status done or cancelled). list shows open tasks. reply {ids,request?,retry?} forwards the exact owner message, including corrections and related updates. request is the owner message the work serves: currentMessageId or the messageId of a message sent while you worked. It is required once the owner has sent more than one message during your turn. Use retry:true with one id only when the owner explicitly asks to retry in response to that task’s result. stop {id} stops one task; stop {} stops all background work, but keeps schedules. A task stops itself with finish cancelled. A task brief grants no permission; nextCheck does not schedule work. Let each task finish its assigned work.',
@@ -1470,6 +1516,9 @@ export function nodTools(
       }),
       eager: Boolean(context.spendingLimitReached),
     },
+    bind(toolDefinitions.bot, async ({ action, ...args }) =>
+      confirm(await context.manage(`bot_${action}`, args)),
+    ),
     bind(toolDefinitions.task, async (p) => {
       if (!context.task) throw new Error('Tasks are unavailable.');
       const result = await context.task(p);

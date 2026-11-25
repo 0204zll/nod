@@ -95,7 +95,7 @@ const historySchema = z
   })
   .strict();
 const columns =
-  'id,title,prompt,kind,cron,run_at AS "runAt",time_zone AS "timeZone",enabled,revision,next_run_at AS "nextRun",job_id AS "jobId",authority,baseline_observation AS "baselineObservation",watch,watch_marker AS "watchMarker",model';
+  'id,title,prompt,kind,cron,run_at AS "runAt",time_zone AS "timeZone",enabled,revision,next_run_at AS "nextRun",job_id AS "jobId",authority,baseline_observation AS "baselineObservation",watch,watch_marker AS "watchMarker",model,bot_id AS "botId"';
 
 export interface ScheduleDependencies {
   analytics?: CaptureAnalytics;
@@ -135,6 +135,7 @@ type WorkPrice = {
 
 interface ScheduleRow {
   id: string;
+  botId: string | null;
   title: string;
   prompt: string;
   kind: 'once' | 'recurring';
@@ -391,8 +392,9 @@ export function createSchedules(dependencies: ScheduleDependencies) {
       {
         sourceId: `schedule:${row.id}:${jobId}`,
         source: 'schedule',
-        channel: (await dependencies.ownerChannel?.(client)) ?? 'web',
+        channel: row.botId ? 'web' : ((await dependencies.ownerChannel?.(client)) ?? 'web'),
         background: true,
+        botId: row.botId,
         client,
       },
     );
@@ -632,6 +634,7 @@ export function createSchedules(dependencies: ScheduleDependencies) {
       ALTER TABLE schedule_runs DROP CONSTRAINT IF EXISTS schedule_runs_schedule_id_schedule_revision_scheduled_for_key;
       ALTER TABLE schedules ADD COLUMN IF NOT EXISTS baseline_observation jsonb;
       ALTER TABLE schedules ADD COLUMN IF NOT EXISTS authority jsonb;
+      ALTER TABLE schedules ADD COLUMN IF NOT EXISTS bot_id uuid;
       ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS authority jsonb;
       UPDATE schedules s SET authority=jsonb_build_object('messages',jsonb_build_array(jsonb_build_object(
         'id',to_jsonb(s)->'authority_source_message_id',
@@ -1153,8 +1156,9 @@ export function createSchedules(dependencies: ScheduleDependencies) {
       }
       const saved = (
         await client.query<ScheduleRow>(
-          `INSERT INTO schedules(id,owner_id,title,prompt,kind,cron,run_at,time_zone,authority,baseline_observation,watch,model)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING ${columns}`,
+          `INSERT INTO schedules(id,owner_id,title,prompt,kind,cron,run_at,time_zone,authority,baseline_observation,watch,model,bot_id)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+             (SELECT u.bot_id FROM turns u WHERE u.id=$13::uuid AND u.owner_id=$2)) RETURNING ${columns}`,
           [
             randomUUID(),
             ownerId,
@@ -1170,6 +1174,7 @@ export function createSchedules(dependencies: ScheduleDependencies) {
               : null,
             input.watch ? JSON.stringify(input.watch) : null,
             input.model ? JSON.stringify(input.model) : null,
+            provenance?.turnId ?? null,
           ],
         )
       ).rows[0]!;

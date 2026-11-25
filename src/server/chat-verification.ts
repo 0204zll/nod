@@ -13,6 +13,7 @@ interface VerificationInput {
   threadId?: string;
   replyToMessageId?: string;
   verificationRequestId?: string;
+  botId?: string;
   receiptOnly?: boolean;
   attachmentIds?: string[];
   signal?: AbortSignal;
@@ -126,7 +127,7 @@ export async function createChatVerification(
 
   async function pending(channel = 'web'): Promise<VerificationRequest[]> {
     const result = await pool.query<VerificationRequest>(
-      `SELECT r.id,u.id AS "turnId",r.kind
+      `SELECT r.id,u.id AS "turnId",r.kind,u.bot_id AS "botId"
        FROM ${codeRequests} r JOIN turns u ON u.id=r.turn_id
        WHERE r.owner_id=$1 AND u.owner_id=$1 AND u.channel=$2
          AND r.status='pending' AND ${waitingTurnSql('u', 'credentials')}
@@ -247,8 +248,16 @@ export async function createChatVerification(
            AND r.status='pending' AND (r.kind<>'payment' OR u.channel='web')
            AND ${waitingTurnSql('u', 'credentials')}
            AND ($3::uuid IS NULL OR r.turn_id=$3) AND ($4::text IS NULL OR r.id=$4)
+           AND u.bot_id IS NOT DISTINCT FROM $6::uuid
            ORDER BY u.created_at,r.id LIMIT 2`,
-        [options.ownerId, channel, turnId ?? null, requestId ?? null, thread.id],
+        [
+          options.ownerId,
+          channel,
+          turnId ?? null,
+          requestId ?? null,
+          thread.id,
+          input.botId ?? null,
+        ],
       );
       if (!requests.rowCount) {
         if (requestId) throw conflict(unavailableMessage);
@@ -263,7 +272,8 @@ export async function createChatVerification(
                  'u',
                  `newer.created_at>u.created_at AND (NOT $7::boolean OR newer.created_at<now()-interval '10 minutes')`,
                )})
-               AND ((r.kind='payment' AND ($4::boolean OR ($8::boolean AND u.channel=$2))) OR (r.kind='otp' AND $5::boolean)) LIMIT 1`,
+               AND ((r.kind='payment' AND ($4::boolean OR ($8::boolean AND u.channel=$2))) OR (r.kind='otp' AND $5::boolean))
+               AND u.bot_id IS NOT DISTINCT FROM $9::uuid LIMIT 1`,
             [
               options.ownerId,
               channel,
@@ -275,6 +285,7 @@ export async function createChatVerification(
                 reply.kind === 'wrapped' ||
                 Boolean(codes.payment || paymentCodeLike),
               reply.kind === 'code',
+              input.botId ?? null,
             ],
           )
         ).rows[0];
