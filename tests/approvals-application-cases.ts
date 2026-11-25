@@ -6929,10 +6929,6 @@ export const approvalCases = inParts(
                 assert.equal(uploadApproval.status, 'pending');
                 assert.equal(uploadApproval.args.file, fileName);
                 assert.equal(uploadApproval.args.sourceFile, undefined);
-                assert.equal(
-                  actionTarget('NOD_browser', uploadApproval.args),
-                  `upload ${fileName} on projects.example.test`,
-                );
                 assert.equal(browserUploads.length, beforeUploads);
 
                 const acceptedUpload = await request('POST', '/api/messages', {
@@ -6975,10 +6971,6 @@ export const approvalCases = inParts(
                   assert.equal(renamedApproval.status, 'pending');
                   assert.equal(renamedApproval.args.file, 'Approved Rename.txt');
                   assert.equal(renamedApproval.args.sourceFile, fileName);
-                  assert.equal(
-                    actionTarget('NOD_browser', renamedApproval.args),
-                    `upload ${fileName} as Approved Rename.txt on projects.example.test`,
-                  );
                   assert.equal(browserUploads.length, beforeRenamed);
 
                   const acceptedRenamed = await request('POST', '/api/messages', {

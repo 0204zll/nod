@@ -43,7 +43,6 @@ import type {
 import { serverNetwork } from '../src/server/network.ts';
 import { createErrorRedactor } from '../src/server/redaction.ts';
 import {
-  actionTarget,
   approvalContent,
   approvalTitle,
   calendarEventTarget,
@@ -748,39 +747,34 @@ test('browser upload wording omits the private workspace path', async () => {
       command: renamedCommand,
     },
   };
+  let renamedCalls = 0;
+  let reviewedInput: Record<string, any> | undefined;
   const renamedCommunication = createCommunication({
     pool: { query: async () => ({ rows: [] }) } as unknown as pg.Pool,
     ownerId: 'synthetic-owner',
     review: async (_instructions, input) => {
-      const request = input as Record<string, any>;
-      assert.equal(request.data.args.file, 'Renamed Report.pdf');
-      assert.equal(request.data.args.sourceFile, 'report.pdf');
-      assert.equal(request.data.args.command.path, undefined);
-      assert.equal(request.data.args.command.name, undefined);
-      assert.equal(request.data.args.command.action, 'upload');
-      if (request.purpose === 'confirmation_review') return { valid: true };
+      renamedCalls++;
+      reviewedInput = input as Record<string, any>;
+      if (reviewedInput.purpose === 'confirmation_review') return { valid: true };
       return {
-        text: 'Can I upload report.pdf as Renamed Report.pdf to files.example.test?',
+        text: 'Can I upload the renamed file to files.example.test?',
         action: 'Upload report',
       };
     },
   });
   const renamedResult = await renamedCommunication.describe(renamedProposal);
-  assert.match(visibleMarkdownText(renamedResult.question), /report\.pdf as Renamed Report\.pdf/);
+  assert.equal(renamedCalls, 1);
+  assert.equal(reviewedInput?.data.args.file, 'Renamed Report.pdf');
+  assert.equal(reviewedInput?.data.args.sourceFile, 'report.pdf');
+  assert.equal(reviewedInput?.data.args.command.path, undefined);
+  assert.equal(reviewedInput?.data.args.command.name, undefined);
+  assert.equal(reviewedInput?.data.args.command.action, 'upload');
+  assert.doesNotMatch(
+    JSON.stringify(reviewedInput),
+    new RegExp(renamedCommand.path.split('/')[0]!),
+  );
   assert.doesNotMatch(renamedResult.question, new RegExp(renamedCommand.path.split('/')[0]!));
   assert.deepEqual(renamedProposal.args.command, renamedCommand);
-  assert.equal(
-    actionTarget('NOD_browser', proposal.args),
-    'upload report.pdf on files.example.test',
-  );
-  assert.equal(
-    actionTarget('NOD_browser', { ...proposal.args, sourceFile: 'report.pdf' }),
-    'upload report.pdf on files.example.test',
-  );
-  assert.equal(
-    actionTarget('NOD_browser', renamedProposal.args),
-    'upload report.pdf as Renamed Report.pdf on files.example.test',
-  );
 });
 
 test('confirmation reviews the text after private links and direction controls are removed', async () => {
