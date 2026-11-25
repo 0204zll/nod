@@ -5,7 +5,6 @@ export const botEmojis = ['🧾', '🔭', '🍳', '🗓️', '✈️', '🏡', '
 export const botNameLimit = 24;
 export const botJobLimit = 80;
 export const botInstructionsLimit = 2000;
-export const newBotName = 'New bot';
 const uploaded =
   /^\/api\/artifacts\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 

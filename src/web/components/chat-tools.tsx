@@ -14,7 +14,7 @@ import {
   sidebarItems,
 } from '../lib/navigation';
 import { botPath, focusMessage, type Bot } from '../lib/bots';
-import { createBot, toast } from './bots';
+import { newBot } from './bots';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
 import { useArtifactDrawer } from './artifact-context';
 import { ownedArtifactUrl, type ImagePreview } from './attachment-images';
@@ -170,10 +170,7 @@ export function ChatTools({
     {
       id: 'new-bot',
       label: 'New bot',
-      action: () =>
-        void createBot()
-          .then((bot) => navigate(botPath(bot.id)))
-          .catch((cause) => toast(errorMessage(cause))),
+      action: newBot,
     },
     ...bots
       .filter((bot) => bot.id !== botId)

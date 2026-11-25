@@ -229,7 +229,7 @@ export interface ThreadDependencies {
   localFiles?: boolean;
   computerUse?: boolean;
   mcpServers?: () => Promise<NonNullable<RuntimeContext['mcpServers']>>;
-  memoryContext?: () => Promise<RuntimeContext['memory']>;
+  memoryContext?: (bot?: string | null) => Promise<RuntimeContext['memory']>;
   recall?: (
     text: string,
     before: Date | undefined,
@@ -2064,7 +2064,7 @@ async function loadTurnContext(turn: any, dependencies: ThreadDependencies) {
       [ownerId],
     ),
     dependencies.accountProfile?.().catch(() => undefined),
-    dependencies.memoryContext?.().catch(() => ''),
+    dependencies.memoryContext?.(turn.bot_id).catch(() => ''),
     dependencies.learnedSkills?.().catch(() => undefined),
     turn.background
       ? dependencies.connectedApps?.()

@@ -240,6 +240,11 @@ export interface Workspace {
     maxBytes: number,
     purpose?: 'attachment' | 'publication',
   ): Promise<Uint8Array>;
-  open(input: { threadId: string; workspacePath: string; signal: AbortSignal }): WorkspaceSession;
+  open(input: {
+    threadId: string;
+    workspacePath: string;
+    signal: AbortSignal;
+    bot?: { id: string };
+  }): WorkspaceSession;
   dispose(): void | Promise<void>;
 }

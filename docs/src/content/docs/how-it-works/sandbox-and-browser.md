@@ -48,6 +48,7 @@ Pi's native tools (`read`, `bash`, `edit` and `write`) run inside the workspace 
 The tools use the thread's Linux workspace path on every host, including Windows. The runtime converts Windows file paths before it sends file operations to the container.
 
 - Commands run as the unprivileged `node` user, without sudo.
+- A [bot](/use/bots/)'s commands run as its own Linux user, derived from its ID, with `bots/<bot ID>` as its working directory and home. `team` and `bots` are sticky folders, so each bot can create only its own note and folder, and no other bot can change, rename or delete them. Everyone can read them. On a Mac source install, the workspace is a host folder where Docker doesn't enforce these permissions; the desktop app and self-hosted servers use a volume that does.
 - Bash gets no host environment. It sets the owner's `TZ` when known.
 - No workspace file is loaded as instructions.
 

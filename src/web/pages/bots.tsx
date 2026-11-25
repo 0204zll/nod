@@ -1,10 +1,8 @@
-import { useState } from 'react';
 import type { ModelSelection, ModelsResponse } from '../../shared/models';
 import { useModels } from '../hooks/use-models';
-import { errorMessage } from '../lib/api';
 import { botPath, type Bot } from '../lib/bots';
 import { NodAvatar, BotAvatar } from '../components/bot-avatar';
-import { createBot, toast } from '../components/bots';
+import { newBot } from '../components/bots';
 
 function modelName(data: ModelsResponse | undefined, choice: ModelSelection | null | undefined) {
   if (!data || !choice) return undefined;
@@ -23,20 +21,7 @@ export function BotsPage({
   onOpenSettings(id: string | null): void;
 }) {
   const models = useModels();
-  const [creating, setCreating] = useState(false);
   const chatModel = modelName(models.data ?? undefined, models.data?.selection);
-  async function add() {
-    if (creating) return;
-    setCreating(true);
-    try {
-      const created = await createBot();
-      onOpenSettings(created.id);
-    } catch (cause) {
-      toast(errorMessage(cause));
-    } finally {
-      setCreating(false);
-    }
-  }
   return (
     <section className="bots-page" aria-labelledby="bots-title">
       <div className="bots-page-head">
@@ -47,12 +32,7 @@ export function BotsPage({
             They share Nod’s memory, and your Vault, approvals and settings stay with Nod.
           </p>
         </div>
-        <button
-          type="button"
-          className="bot-button bot-button-primary"
-          disabled={creating}
-          onClick={() => void add()}
-        >
+        <button type="button" className="bot-button bot-button-primary" onClick={newBot}>
           New bot
         </button>
       </div>
@@ -122,12 +102,7 @@ export function BotsPage({
             </article>
           );
         })}
-        <button
-          type="button"
-          className="bot-new-card"
-          disabled={creating}
-          onClick={() => void add()}
-        >
+        <button type="button" className="bot-new-card" onClick={newBot}>
           <strong>New bot</strong>
           <span>Tell it what to do in its chat.</span>
         </button>

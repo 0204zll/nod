@@ -81,7 +81,9 @@ export function createMemoryLearning(options: {
   memory: MemoryService;
   curator: MemoryCurator;
   analytics?: CaptureAnalytics;
+  bot?: string;
 }) {
+  const bot = options.bot ?? null;
   const report = (
     changes: ReturnType<typeof applyOps>['applied'],
     actor: 'agent' | 'background',
@@ -106,7 +108,10 @@ export function createMemoryLearning(options: {
     const tree = await options.memory.load();
     if (!tree.enabled) return;
     if (!tree.reflected) {
-      const { rows } = await options.pool.query(`SELECT ${utc('now()')} AS now`);
+      const { rows } = await options.pool.query(
+        `SELECT ${utc('COALESCE((SELECT created_at FROM bots WHERE id=$1 AND owner_id=$2),now())')} AS now`,
+        [bot, options.ownerId],
+      );
       await options.memory.edit((fresh) => {
         fresh.reflected ??= `${rows[0].now}/${nilId}`;
       });
@@ -114,9 +119,9 @@ export function createMemoryLearning(options: {
     }
     const [from, after] = tree.reflected.split('/');
     const { rows } = await options.pool.query(
-      `${learnableText} AND (m.created_at,m.id)>($2::timestamptz,$3::uuid)
+      `${learnableText} AND (m.created_at,m.id)>($2::timestamptz,$3::uuid) AND m.bot_id IS NOT DISTINCT FROM $4::uuid
        ORDER BY m.created_at,m.id LIMIT ${batchSize}`,
-      [options.ownerId, from, after],
+      [options.ownerId, from, after, bot],
     );
     if (!rows.length) return;
     const mark = `${rows.at(-1).at}/${rows.at(-1).id}`;
@@ -168,9 +173,10 @@ export function createMemoryLearning(options: {
     const ids = named.filter((id) => z.uuid().safeParse(id).success);
     const required = [...ids, sourceMessageId];
     const { rows } = await options.pool.query(
-      `WITH source AS (SELECT thread_id,created_at FROM messages WHERE id=$3 AND owner_id=$1 AND role='user'),
+      `WITH source AS (SELECT thread_id,bot_id,created_at FROM messages WHERE id=$3 AND owner_id=$1 AND role='user'),
        recent AS (SELECT r.id FROM messages r, source WHERE r.owner_id=$1 AND r.role='user' AND NOT ${withdrawnSql('r')}
-         AND r.thread_id IS NOT DISTINCT FROM source.thread_id AND r.created_at<=source.created_at
+         AND r.thread_id IS NOT DISTINCT FROM source.thread_id AND r.bot_id IS NOT DISTINCT FROM source.bot_id
+         AND r.created_at<=source.created_at
          ORDER BY r.created_at DESC,r.id DESC LIMIT ${recentMessages})
        ${ownerText} AND (m.id=ANY($2::uuid[]) OR m.id IN (SELECT id FROM recent))
        ORDER BY m.created_at,m.id`,

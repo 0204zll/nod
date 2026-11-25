@@ -11,7 +11,7 @@ You don't need bots. If you never add one, Nod works exactly as before.
 
 ## Add a bot
 
-Select **+** next to **Bots** in the sidebar. The new bot opens with its settings, where you give it a name, a job, a model and instructions. A new bot starts on the same model as Nod until you pick another.
+Select **+** next to **Bots** in the sidebar, give the bot a name, pick an avatar and select **Create**. Its chat opens, so you can tell it what to do. A new bot starts on the same model as Nod until you pick another in its settings.
 
 You can also ask Nod or any bot in chat, for example "Make me a bot called Penny that tracks my bills."
 
@@ -23,13 +23,17 @@ Send **/clear** in a bot's chat to start that chat fresh. The bot keeps its job,
 
 Bots don't hand work to each other. To ask a bot for something, write in its chat.
 
-## What bots share
+## What each bot owns
 
-| Shared         | How                                                                                                                                                                                                                            |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Memory         | Every bot reads and adds to the same [memory](/use/memory/) as Nod.                                                                                                                                                            |
-| Team notes     | Each bot keeps a short note in the `team` folder of the [workspace](/use/workspace/) on what you asked it, what it owns and what it found. Ask any bot "What is Penny working on?" and it checks Penny's live status and note. |
-| Apps and Vault | Bots use your connected apps, Vault and rules, with the same [approvals](/trust/approvals/) as Nod.                                                                                                                            |
+Each bot writes only its own things and can read everyone's, Nod's included.
+
+| Its own   | What it holds                                                                                                                                                                                                                             |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Memory    | What it learns in its chat goes to its own [memory](/use/memory/). Any bot can look up what Nod and the other bots remember, and says whose memory a fact came from. Only the bot itself, or you in **Settings > Memory**, can change it. |
+| Folder    | Its files in the [workspace](/use/workspace/) live in `bots/<id>`. Other bots can read and copy them, but not change them.                                                                                                                |
+| Team note | A short note in the workspace's `team` folder on what you asked it, what it owns and what it found. Ask any bot "What is Penny working on?" and it checks Penny's live status and note.                                                   |
+
+Your apps, Vault, rules and settings are shared: bots use them with the same [approvals](/trust/approvals/) as Nod.
 
 ## Change a bot
 
@@ -37,7 +41,7 @@ Select the name at the top of a bot's chat to open its settings: avatar, name, j
 
 ## Remove a bot
 
-Right-click it in the sidebar and select **Remove**. Removing stops its chat and its tasks, and pauses its schedules. What it learned stays in memory.
+Right-click it in the sidebar and select **Remove**. Removing stops its chat and its tasks, pauses its schedules and deletes its memory. Its files stay in the workspace.
 
 ## What stays with Nod
 

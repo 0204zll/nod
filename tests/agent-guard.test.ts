@@ -3443,7 +3443,10 @@ test(
           const recall = createMemoryRecall({
             pool,
             ownerId,
-            memory,
+            memories: {
+              views: async () => [{ label: {}, view: await memory.view() }],
+              find: (raw) => memory.find(raw),
+            },
             curator: {
               id: 'fixture',
               configured: true,
@@ -3513,7 +3516,10 @@ test('memory planning bounds pasted requests and recent owner messages', async (
   const recall = createMemoryRecall({
     pool,
     ownerId: 'synthetic-owner',
-    memory,
+    memories: {
+      views: async () => [{ label: {}, view: await memory.view() }],
+      find: (raw) => memory.find(raw),
+    },
     curator: {
       id: 'fixture',
       configured: true,

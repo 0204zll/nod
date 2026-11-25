@@ -1,7 +1,7 @@
 import { posix, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ConnectedCli, Workspace } from '../../ports/computer.ts';
-import { threadIdentity } from '../../ports/thread-identity.ts';
+import { botIdentity, threadIdentity } from '../../ports/thread-identity.ts';
 import {
   runWorkspaceCommand,
   WorkspaceCommandError,
@@ -131,6 +131,7 @@ type CommandInput = {
   maxBytes?: number;
   onData?(chunk: Buffer): void;
   session?: boolean;
+  bot?: string;
 };
 type CommandResult = { stdout: Buffer; stderr: Buffer; exitCode: number };
 
@@ -282,11 +283,37 @@ export function createCommandWorkspace(options: {
       const id = threadIdentity(input.threadId);
       if (resolve(input.workspacePath) !== resolve(options.workspaceRoot, id))
         throw new Error('The task workspace does not match its configured root.');
+      const bot = input.bot && botIdentity(input.bot.id);
+      const root = `/workspace/${id}`;
+      const path = bot ? `${root}/bots/${bot}` : root;
+      const step = async (script: string, owner?: string) => {
+        const result = await command(id, ['/bin/sh', '-c', script], {
+          signal: input.signal,
+          timeoutMs: 30_000,
+          ...(owner ? { bot: owner } : {}),
+        });
+        if (result.exitCode)
+          throw new Error(
+            `The bot folders could not be prepared: ${result.stderr.toString().trim() || `exit code ${result.exitCode}`}.`,
+          );
+      };
+      let ready: Promise<void> | undefined;
+      const prepare = () =>
+        (ready ??= (async () => {
+          await step(
+            `chmod 755 ${root} && mkdir -p ${root}/team ${root}/bots && chmod 1777 ${root}/team ${root}/bots`,
+          );
+          await step(`mkdir -p ${path}/.home && ln -sfn ../../team ${path}/team`, bot);
+        })().catch((error) => {
+          ready = undefined;
+          throw error;
+        }));
       const connected = options.runConnectedCommand;
       return {
-        path: `/workspace/${id}`,
+        path,
         instructions: options.instructions,
         async exec(script, { input: stdin, signal, timeoutMs = 600_000, onData, notices } = {}) {
+          if (bot) await prepare();
           const result = await command(
             id,
             [
@@ -303,6 +330,7 @@ export function createCommandWorkspace(options: {
               timeoutMs: Math.max(1000, timeoutMs),
               onData: onData ?? (() => {}),
               session: notices,
+              ...(bot ? { bot } : {}),
             },
           );
           return { exitCode: result.exitCode };

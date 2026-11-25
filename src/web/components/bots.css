@@ -1408,3 +1408,24 @@ input.bot-input {
     animation: none;
   }
 }
+.new-bot-dialog {
+  width: min(400px, calc(100vw - 32px));
+  overflow: visible;
+}
+.new-bot-dialog form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 20px;
+}
+.new-bot-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.new-bot-identity .input {
+  flex: 1;
+}
+.new-bot-dialog form > .button {
+  align-self: flex-end;
+}

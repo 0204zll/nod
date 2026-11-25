@@ -51,6 +51,7 @@ import type {
 } from '../src/shared/contracts.ts';
 import { fakeComputer, fakeWorkspace } from './runtime-fixtures.ts';
 import { createMemoryLearning } from '../src/server/memory-learning.ts';
+import { createMemories } from '../src/server/memories.ts';
 import { createMemoryService } from '../src/server/memory.ts';
 import { memoryObjectStore } from './fixtures/object-store.ts';
 import type { ProductAnalytics } from '../src/ports/analytics.ts';
@@ -12248,7 +12249,7 @@ const memoryFixture = async (tables: string[] = []) => {
   url.searchParams.set('options', `-c search_path=${schema}`);
   const pool = new pg.Pool({ connectionString: url.href });
   await pool.query(
-    "CREATE TABLE threads (id uuid PRIMARY KEY, owner_id text NOT NULL, archived_at timestamptz); CREATE TABLE messages (id uuid PRIMARY KEY, owner_id text NOT NULL, role text NOT NULL, text text NOT NULL, turn_id uuid, thread_id uuid, suggestions jsonb, approval_answer boolean, attachments jsonb NOT NULL DEFAULT '[]', created_at timestamptz NOT NULL DEFAULT now()); CREATE TABLE turns (id uuid PRIMARY KEY, owner_id text NOT NULL, channel text, message_id uuid, withdrawn boolean NOT NULL DEFAULT false); CREATE TABLE preferences (owner_id text PRIMARY KEY, time_zone text)",
+    "CREATE TABLE threads (id uuid PRIMARY KEY, owner_id text NOT NULL, archived_at timestamptz); CREATE TABLE messages (id uuid PRIMARY KEY, owner_id text NOT NULL, role text NOT NULL, text text NOT NULL, turn_id uuid, thread_id uuid, suggestions jsonb, approval_answer boolean, attachments jsonb NOT NULL DEFAULT '[]', bot_id uuid, created_at timestamptz NOT NULL DEFAULT now()); CREATE TABLE turns (id uuid PRIMARY KEY, owner_id text NOT NULL, channel text, message_id uuid, withdrawn boolean NOT NULL DEFAULT false); CREATE TABLE preferences (owner_id text PRIMARY KEY, time_zone text); CREATE TABLE bots (id uuid PRIMARY KEY, owner_id text NOT NULL, name text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), archived_at timestamptz)",
   );
   for (const table of tables) await pool.query(table);
   const ownerId = 'memory-fixture-owner';
@@ -12297,6 +12298,59 @@ const memoryFixture = async (tables: string[] = []) => {
     },
   };
 };
+
+test(
+  'each chat writes only its own memory and reads every memory with its owner named',
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 30_000 },
+  async () => {
+    const { pool, ownerId, store, close } = await memoryFixture();
+    try {
+      const penny = randomUUID();
+      await pool.query('INSERT INTO bots(id,owner_id,name) VALUES($1,$2,$3)', [
+        penny,
+        ownerId,
+        'Penny',
+      ]);
+      const memories = createMemories({ pool, ownerId, store });
+      const home = await memories.nod.add({ area: 'about', text: 'Lives in Barcelona.' });
+      const bill = await memories.of(penny).add({
+        area: 'about',
+        text: 'Pays Iberdrola for electricity.',
+      });
+      assert.deepEqual(
+        (await memories.nod.load()).entries.map((entry) => entry.text),
+        ['Lives in Barcelona.'],
+      );
+      assert.deepEqual(
+        (await memories.of(penny).load()).entries.map((entry) => entry.text),
+        ['Pays Iberdrola for electricity.'],
+      );
+      const found = (query: string, reader: string | null) =>
+        memories
+          .find({ query }, reader)
+          .then((notes) => notes.map((note) => [note.path, note.memory ?? 'own']));
+      assert.deepEqual(await found('Iberdrola', null), [[bill, 'Penny']]);
+      assert.deepEqual(await found('Barcelona', penny), [[home, 'Nod']]);
+      assert.equal(
+        ((await memories.read({ path: bill, memory: 'penny' }, null)) as { text: string }).text,
+        'Pays Iberdrola for electricity.',
+      );
+      await assert.rejects(memories.read({ path: bill }, null), /not found/);
+      await assert.rejects(memories.of(penny).forget(home), /no longer in memory/);
+      assert.match(
+        await memories.context(penny),
+        /Iberdrola[\s\S]*Nod's memory, read only:\n.*Barcelona/,
+      );
+      assert.doesNotMatch(await memories.context(null), /Iberdrola/);
+      await memories.nod.control({ enabled: false });
+      assert.equal(await memories.of(penny).enabled(), false);
+      await memories.remove(penny);
+      assert.equal(await store.read(`memory/bots/${penny}.md`, 1_000_000), undefined);
+    } finally {
+      await close();
+    }
+  },
+);
 
 test(
   'owner memory keeps evidence, replacements and every note across sessions',

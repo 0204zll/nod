@@ -15,6 +15,7 @@ import { botActivity, botLine, botPath, type Bot } from '../lib/bots';
 import { LockKeyhole, Plus, Settings, X } from './icons';
 import { NodModelName, BotModel } from './model-choices';
 import { NodAvatar, BotAvatar } from './bot-avatar';
+import { Button, Dialog, DialogContent, DialogTitle, Input, Notice } from './ui';
 
 function plain(event: MouseEvent) {
   return !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0);
@@ -67,14 +68,8 @@ async function changeBot(id: string, body: object) {
   return result;
 }
 
-export async function createBot() {
-  const created = await api<Bot>('/api/bots', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: '{}',
-  });
-  botsChanged();
-  return created;
+export function newBot() {
+  window.dispatchEvent(new Event('nod:new-bot'));
 }
 
 async function removeBot(id: string) {
@@ -204,7 +199,6 @@ export function BotNav({
   const known = useRef<Set<string> | null>(null);
   const [fresh, setFresh] = useState<Set<string>>(new Set());
   const [menu, setMenu] = useState<{ bot: Bot; point: { x: number; y: number } }>();
-  const [creating, setCreating] = useState(false);
   const ids = bots.map((bot) => bot.id).join();
   useEffect(() => {
     const next = new Set(bots.map((bot) => bot.id));
@@ -224,18 +218,6 @@ export function BotNav({
     event.preventDefault();
     onNavigate(path);
   };
-  async function add() {
-    if (creating) return;
-    setCreating(true);
-    try {
-      const created = await createBot();
-      onOpenPanel(created.id);
-    } catch (cause) {
-      toast(errorMessage(cause));
-    } finally {
-      setCreating(false);
-    }
-  }
   const openMenu = (bot: Bot, point: { x: number; y: number }) => setMenu({ bot, point });
   return (
     <nav className="bot-nav" aria-label="Chats">
@@ -266,13 +248,7 @@ export function BotNav({
       <div className="bot-section">
         <div className="bot-head">
           <span>Bots</span>
-          <button
-            type="button"
-            className="bot-icon-button"
-            aria-label="New bot"
-            disabled={creating}
-            onClick={() => void add()}
-          >
+          <button type="button" className="bot-icon-button" aria-label="New bot" onClick={newBot}>
             <Plus size={16} aria-hidden="true" />
           </button>
         </div>
@@ -332,7 +308,7 @@ export function BotNav({
         ) : (
           <p className="bot-empty">
             No bots yet.{' '}
-            <button type="button" onClick={() => void add()}>
+            <button type="button" onClick={newBot}>
               Add one
             </button>
           </p>
@@ -475,14 +451,24 @@ function generatedAvatar(name: string, description: string) {
   return canvas.toDataURL('image/webp', 0.92);
 }
 
-function AvatarMenu({ bot, onClose }: { bot: Bot; onClose(): void }) {
+function AvatarMenu({
+  name,
+  avatar,
+  onPick,
+  onClose,
+}: {
+  name: string;
+  avatar: string;
+  onPick(next: string): Promise<unknown> | void;
+  onClose(): void;
+}) {
   const [tab, setTab] = useState<'avatar' | 'generate' | 'upload'>('avatar');
   const [description, setDescription] = useState('');
   const [busy, setBusy] = useState(false);
-  const avatar = bot.avatar;
-  const save = (next: string, done?: string) => {
+  const save = (next: string | Promise<string>, done?: string) => {
     setBusy(true);
-    void changeBot(bot.id, { avatar: next })
+    void Promise.resolve(next)
+      .then(onPick)
       .then(() => done && toast(done))
       .catch((cause) => toast(errorMessage(cause)))
       .finally(() => setBusy(false));
@@ -519,22 +505,12 @@ function AvatarMenu({ bot, onClose }: { bot: Bot; onClose(): void }) {
               disabled={busy}
               onClick={() => save(emoji)}
             >
-              <BotAvatar name={bot.name} avatar={emoji} />
+              <BotAvatar name={name} avatar={emoji} />
             </button>
           ))}
         </div>
       ) : tab === 'generate' ? (
-        <form
-          className="avatar-generate"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const value = description.trim();
-            if (!value) return toast('Describe the avatar first');
-            void uploadAvatar(generatedAvatar(bot.name, value))
-              .then((url) => save(url, 'Avatar generated'))
-              .catch((cause) => toast(errorMessage(cause)));
-          }}
-        >
+        <div className="avatar-generate">
           <textarea
             className="bot-input"
             rows={2}
@@ -542,10 +518,19 @@ function AvatarMenu({ bot, onClose }: { bot: Bot; onClose(): void }) {
             placeholder="Describe the avatar, e.g. a friendly robot in pastel colors"
             onChange={(event) => setDescription(event.target.value)}
           />
-          <button type="submit" className="bot-button" disabled={busy}>
+          <button
+            type="button"
+            className="bot-button"
+            disabled={busy}
+            onClick={() => {
+              const value = description.trim();
+              if (!value) return toast('Describe the avatar first');
+              save(uploadAvatar(generatedAvatar(name, value)), 'Avatar generated');
+            }}
+          >
             Generate
           </button>
-        </form>
+        </div>
       ) : (
         <div className="avatar-upload">
           <label>
@@ -556,11 +541,7 @@ function AvatarMenu({ bot, onClose }: { bot: Bot; onClose(): void }) {
               onChange={(event) => {
                 const file = event.target.files?.[0];
                 event.target.value = '';
-                if (!file) return;
-                void resizedImage(file)
-                  .then(uploadAvatar)
-                  .then((url) => save(url, 'Avatar updated'))
-                  .catch((cause) => toast(errorMessage(cause)));
+                if (file) save(resizedImage(file).then(uploadAvatar), 'Avatar updated');
               }}
             />
             <span className="bot-button">Choose image…</span>
@@ -572,6 +553,128 @@ function AvatarMenu({ bot, onClose }: { bot: Bot; onClose(): void }) {
         Close
       </button>
     </div>
+  );
+}
+
+function AvatarField({
+  name,
+  avatar,
+  onPick,
+}: {
+  name: string;
+  avatar: string;
+  onPick(next: string): Promise<unknown> | void;
+}) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const key = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+    };
+    document.addEventListener('pointerdown', outside, true);
+    window.addEventListener('keydown', key, true);
+    return () => {
+      document.removeEventListener('pointerdown', outside, true);
+      window.removeEventListener('keydown', key, true);
+    };
+  }, [open]);
+  return (
+    <span className="avatar-wrap" ref={root}>
+      <button
+        type="button"
+        className="avatar-button"
+        aria-expanded={open}
+        aria-label="Change avatar"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <BotAvatar name={name} avatar={avatar} size="lg" />
+      </button>
+      {open && (
+        <AvatarMenu name={name} avatar={avatar} onPick={onPick} onClose={() => setOpen(false)} />
+      )}
+    </span>
+  );
+}
+
+export function NewBotDialog({ bots, onCreated }: { bots: Bot[]; onCreated(bot: Bot): void }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [avatar, setAvatar] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const taken = useRef(bots);
+  taken.current = bots;
+  useEffect(() => {
+    const show = () => {
+      const free = botEmojis.filter((emoji) => !taken.current.some((bot) => bot.avatar === emoji));
+      const choices = free.length ? free : botEmojis;
+      setAvatar(choices[Math.floor(Math.random() * choices.length)]!);
+      setName('');
+      setError('');
+      setOpen(true);
+    };
+    window.addEventListener('nod:new-bot', show);
+    return () => window.removeEventListener('nod:new-bot', show);
+  }, []);
+  async function create() {
+    if (busy || !name.trim()) return;
+    setBusy(true);
+    setError('');
+    try {
+      const created = await api<Bot>('/api/bots', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name, avatar }),
+      });
+      botsChanged();
+      setOpen(false);
+      onCreated(created);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Dialog open={open} onOpenChange={(next) => !busy && setOpen(next)}>
+      <DialogContent className="new-bot-dialog" aria-describedby={undefined}>
+        <DialogTitle>New bot</DialogTitle>
+        <form
+          autoComplete="off"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void create();
+          }}
+        >
+          <div className="new-bot-identity">
+            <AvatarField name={name || '?'} avatar={avatar} onPick={setAvatar} />
+            <Input
+              autoFocus
+              aria-label="Name"
+              placeholder="Name"
+              value={name}
+              maxLength={botNameLimit}
+              disabled={busy}
+              onChange={(event) => {
+                setName(event.target.value);
+                setError('');
+              }}
+            />
+          </div>
+          {error && <Notice kind="error">{error}</Notice>}
+          <Button type="submit" disabled={busy || !name.trim()}>
+            {busy ? 'Creating…' : 'Create'}
+          </Button>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -668,26 +771,14 @@ function ProfileField({ bot, field }: { bot: Bot; field: 'job' | 'instructions' 
 }
 
 export function BotPanel({ bot, onClose }: { bot?: Bot; onClose(): void }) {
-  const [avatarOpen, setAvatarOpen] = useState(false);
-  const avatarRoot = useRef<HTMLSpanElement>(null);
-  useEffect(() => setAvatarOpen(false), [bot?.id]);
   useEffect(() => {
     const key = (event: globalThis.KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented) return;
-      if (avatarOpen) return setAvatarOpen(false);
       onClose();
     };
     document.addEventListener('keydown', key);
     return () => document.removeEventListener('keydown', key);
-  }, [avatarOpen, onClose]);
-  useEffect(() => {
-    if (!avatarOpen) return;
-    const outside = (event: PointerEvent) => {
-      if (!avatarRoot.current?.contains(event.target as Node)) setAvatarOpen(false);
-    };
-    document.addEventListener('pointerdown', outside, true);
-    return () => document.removeEventListener('pointerdown', outside, true);
-  }, [avatarOpen]);
+  }, [onClose]);
   const close = (
     <button type="button" className="bot-icon-button" aria-label="Close settings" onClick={onClose}>
       <X size={16} aria-hidden="true" />
@@ -703,18 +794,12 @@ export function BotPanel({ bot, onClose }: { bot?: Bot; onClose(): void }) {
         <div className="panel-head-top">{close}</div>
         <div className="panel-identity">
           {bot ? (
-            <span className="avatar-wrap" ref={avatarRoot}>
-              <button
-                type="button"
-                className="avatar-button"
-                aria-expanded={avatarOpen}
-                aria-label="Change avatar"
-                onClick={() => setAvatarOpen((value) => !value)}
-              >
-                <BotAvatar name={bot.name} avatar={bot.avatar} size="lg" />
-              </button>
-              {avatarOpen && <AvatarMenu bot={bot} onClose={() => setAvatarOpen(false)} />}
-            </span>
+            <AvatarField
+              key={bot.id}
+              name={bot.name}
+              avatar={bot.avatar}
+              onPick={(avatar) => changeBot(bot.id, { avatar })}
+            />
           ) : (
             <NodAvatar size="lg" />
           )}

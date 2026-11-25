@@ -1,3 +1,4 @@
+import { focusMessage } from '../lib/bots';
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import {
   ArrowUpRight,
@@ -74,7 +75,7 @@ export function AccountSettings({
   openRequest: number;
   onOpenChange(open: boolean): void;
   onReplayOnboarding?(): void;
-  onOpenSource?(messageId: string): void;
+  onOpenSource?(messageId: string, botId?: string): void;
 }) {
   const id = useId();
   const desktop = desktopSettingsAvailable();
@@ -317,11 +318,11 @@ export function AccountSettings({
       runExit(action);
     }
   }
-  const source = (messageId: string, view: MemoryNavigationState) =>
+  const source = (messageId: string, view: MemoryNavigationState, botId?: string) =>
     requestExit(() => {
       memorySourceView.current = { ownerId: account.user.id, view };
-      if (onOpenSource) onOpenSource(messageId);
-      else window.dispatchEvent(new CustomEvent('nod:focus-message', { detail: { messageId } }));
+      if (onOpenSource) onOpenSource(messageId, botId);
+      else focusMessage(messageId, botId);
     });
   return (
     <SettingsDraftContext.Provider value={register}>

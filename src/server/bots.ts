@@ -9,7 +9,6 @@ import {
   botEmojis,
   botName,
   botNameLimit,
-  newBotName,
   type Bot,
   avatarUpload,
   type BotStatus,
@@ -81,6 +80,7 @@ export function createBots(options: {
   nodModel?: () => ModelSelection | null;
   clearBrowser?: (id: string) => Promise<unknown>;
   removeSchedule?: (id: string) => Promise<unknown>;
+  removeMemory?: (id: string) => Promise<unknown>;
 }) {
   const { pool, ownerId } = options;
 
@@ -166,32 +166,43 @@ export function createBots(options: {
     return name;
   }
 
+  async function keepAvatar(client: PoolClient, avatar: string) {
+    const upload = avatarUpload(avatar);
+    if (!upload) return;
+    const image = (
+      await client.query<{ mime_type: string }>(
+        'SELECT mime_type FROM artifacts WHERE id=$1 AND owner_id=$2 AND deleting_at IS NULL',
+        [upload, ownerId],
+      )
+    ).rows[0];
+    if (!/^image\/(png|jpeg|webp)$/.test(image?.mime_type ?? ''))
+      throw failure('Choose a PNG, JPG or WebP image for the avatar.');
+    await localArtifacts.retainArtifacts([upload], client);
+  }
+
   async function create(
     client: PoolClient,
     profile: {
-      name?: string;
+      name: string;
       job?: string;
       instructions?: string;
+      avatar?: string;
       model?: ModelSelection;
-    } = {},
+    },
   ) {
-    const used = (
-      await client.query<{ avatar: string; name: string }>(
-        'SELECT avatar,name FROM bots WHERE owner_id=$1 AND archived_at IS NULL',
-        [ownerId],
-      )
-    ).rows;
-    const free = botEmojis.filter((emoji) => !used.some((row) => row.avatar === emoji));
-    const choices = free.length ? free : botEmojis;
-    const avatar = choices[Math.floor(Math.random() * choices.length)]!;
-    let name = profile.name ? await freeName(client, profile.name) : newBotName;
-    if (!profile.name)
-      for (
-        let count = 2;
-        used.some((row) => row.name.toLowerCase() === name.toLowerCase());
-        count++
-      )
-        name = `${newBotName} ${count}`;
+    const name = await freeName(client, profile.name);
+    let avatar = profile.avatar;
+    if (avatar === undefined) {
+      const used = (
+        await client.query<{ avatar: string }>(
+          'SELECT avatar FROM bots WHERE owner_id=$1 AND archived_at IS NULL',
+          [ownerId],
+        )
+      ).rows;
+      const free = botEmojis.filter((emoji) => !used.some((row) => row.avatar === emoji));
+      const choices = free.length ? free : botEmojis;
+      avatar = choices[Math.floor(Math.random() * choices.length)]!;
+    } else await keepAvatar(client, avatar);
     const model = profile.model ?? options.nodModel?.();
     if (!model) throw failure('Connect a model in Settings before you add a bot.', 409);
     options.validateModel?.(model);
@@ -218,18 +229,7 @@ export function createBots(options: {
     );
     if (!current.rowCount) throw failure('This bot was removed.', 404);
     const name = change.name === undefined ? undefined : await freeName(client, change.name, id);
-    const upload = change.avatar && avatarUpload(change.avatar);
-    if (upload) {
-      const image = (
-        await client.query<{ mime_type: string }>(
-          'SELECT mime_type FROM artifacts WHERE id=$1 AND owner_id=$2 AND deleting_at IS NULL',
-          [upload, ownerId],
-        )
-      ).rows[0];
-      if (!/^image\/(png|jpeg|webp)$/.test(image?.mime_type ?? ''))
-        throw failure('Choose a PNG, JPG or WebP image for the avatar.');
-      await localArtifacts.retainArtifacts([upload], client);
-    }
+    if (change.avatar) await keepAvatar(client, change.avatar);
     if (change.model) options.validateModel?.(change.model);
     await client.query(
       `UPDATE bots SET name=COALESCE($3,name),job=COALESCE($4,job),instructions=COALESCE($5,instructions),
@@ -268,18 +268,23 @@ export function createBots(options: {
       for (const browser of new Set([id, ...browsers]))
         void options.clearBrowser?.(browser)?.catch(() => {});
       for (const schedule of schedules) void options.removeSchedule?.(schedule.id)?.catch(() => {});
+      void options.removeMemory?.(id)?.catch(() => {});
     });
   }
 
   function registerRoutes(app: FastifyInstance) {
     app.post('/api/bots', async (request) => {
-      const { model } = z
-        .object({ model: modelSelectionInput.optional() })
+      const profile = z
+        .object({
+          name: z.string(),
+          avatar: botAvatarSchema.optional(),
+          model: modelSelectionInput.optional(),
+        })
         .strict()
         .parse(request.body ?? {});
       const id = await transaction(async (client) => {
         await lockThread(client, ownerId);
-        return create(client, model ? { model } : {});
+        return create(client, profile);
       }, pool);
       refresh();
       return get(pool, id);

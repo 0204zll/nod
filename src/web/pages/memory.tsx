@@ -1,4 +1,6 @@
+import { focusMessage } from '../lib/bots';
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
+import { Tabs } from '../components/tabs';
 import {
   CalendarClock,
   Check,
@@ -186,7 +188,7 @@ function Sources({
   onOpenSource,
 }: {
   sources: MemorySource[];
-  onOpenSource(messageId: string): void;
+  onOpenSource(messageId: string, botId?: string): void;
 }) {
   const format = useDateFormat();
   return sources
@@ -198,7 +200,7 @@ function Sources({
             variant="ghost"
             size="sm"
             className="memory-source-link"
-            onClick={() => onOpenSource(source.id)}
+            onClick={() => onOpenSource(source.id, source.botId)}
           >
             <MessageCircle size={14} aria-hidden="true" />
             View message
@@ -232,7 +234,7 @@ function MemoryDetails({
   history?: MemoryArchived[];
   origin?: string;
   task?: string | null;
-  onOpenSource(messageId: string): void;
+  onOpenSource(messageId: string, botId?: string): void;
   initiallyOpen?: boolean;
 }) {
   const format = useDateFormat();
@@ -310,7 +312,7 @@ function NoteDetail({
   onForget(): Promise<void>;
   onBack?: () => void;
   onDirtyChange?(dirty: boolean): void;
-  onOpenSource(messageId: string): void;
+  onOpenSource(messageId: string, botId?: string): void;
   detailsOpen?: boolean;
 }) {
   const format = useDateFormat();
@@ -612,7 +614,7 @@ function ArchivedDetail({
   onRestore(): Promise<void>;
   onForget(): Promise<void>;
   onBack?: () => void;
-  onOpenSource(messageId: string): void;
+  onOpenSource(messageId: string, botId?: string): void;
   detailsOpen?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
@@ -727,7 +729,7 @@ function SkillDetail({
   onForget(): Promise<void>;
   onBack?: () => void;
   onDirtyChange?(dirty: boolean): void;
-  onOpenSource(messageId: string): void;
+  onOpenSource(messageId: string, botId?: string): void;
 }) {
   const [mode, setMode] = useState<'view' | 'edit' | 'forget'>('view');
   const [description, setDescription] = useState(skill.description);
@@ -1205,10 +1207,17 @@ export function Memory({
 }: {
   onDone(): void;
   onDirtyChange?(dirty: boolean): void;
-  onOpenSource?(messageId: string, view: MemoryNavigationState): void;
+  onOpenSource?(messageId: string, view: MemoryNavigationState, botId?: string): void;
   initialView?: MemoryNavigationState;
 }) {
-  const { data: view, error: loadError, loading, update } = usePageData<MemoryView>('/api/memory');
+  const [chat, setChat] = useState('nod');
+  const scope = chat === 'nod' ? '' : `?bot=${chat}`;
+  const {
+    data: view,
+    error: loadError,
+    loading,
+    update,
+  } = usePageData<MemoryView>(`/api/memory${scope}`);
   const format = useDateFormat();
   const [compact, panelRef, panel] = useCompact();
   const [restoredView] = useState(initialView);
@@ -1239,15 +1248,20 @@ export function Memory({
     discard: () => {},
   });
   const locked = dirty || saving > 0;
-  function openSource(messageId: string) {
+  function openSource(messageId: string, botId?: string) {
     if (onOpenSource)
-      onOpenSource(messageId, {
-        stage,
-        query,
-        selection: selectionRef.current ?? null,
-        detailsOpen: panel?.querySelector<HTMLDetailsElement>('.memory-provenance')?.open ?? false,
-      });
-    else window.dispatchEvent(new CustomEvent('nod:focus-message', { detail: { messageId } }));
+      onOpenSource(
+        messageId,
+        {
+          stage,
+          query,
+          selection: selectionRef.current ?? null,
+          detailsOpen:
+            panel?.querySelector<HTMLDetailsElement>('.memory-provenance')?.open ?? false,
+        },
+        botId,
+      );
+    else focusMessage(messageId, botId);
   }
   useEffect(() => {
     onDirtyChange?.(dirty || saving > 0 || exporting);
@@ -1259,7 +1273,7 @@ export function Memory({
     requests.current.add(request);
     setSaving((count) => count + 1);
     try {
-      const next = await api<MemoryUpdate>(path, {
+      const next = await api<MemoryUpdate>(`${path}${scope}`, {
         method,
         signal: request.signal,
         ...(body ? { body: JSON.stringify(body) } : {}),
@@ -1554,7 +1568,21 @@ export function Memory({
         detail
       ) : (
         <>
-          <div className="memory-bar">
+          {(view.memories?.length ?? 0) > 1 && (
+            <Tabs
+              id="memory-chats"
+              panelId="memory-chat-panel"
+              label="Whose memory"
+              size="compact"
+              items={(view.memories ?? []).map((item) => ({ value: item.id, label: item.name }))}
+              value={chat}
+              onValueChange={(next) => {
+                setChosen(undefined);
+                setChat(next);
+              }}
+            />
+          )}
+          <div className="memory-bar" id="memory-chat-panel">
             <SearchField
               className="memory-search"
               type="search"
@@ -1585,7 +1613,10 @@ export function Memory({
               onClick={() => {
                 setExporting(true);
                 setSettingError('');
-                downloadExport('/api/memory/export', 'nod-memory.md')
+                downloadExport(
+                  `/api/memory/export${scope}`,
+                  `${(view.memories?.find((item) => item.id === chat)?.name ?? 'nod').toLowerCase().replace(/[^a-z0-9]+/g, '-')}-memory.md`,
+                )
                   .catch((cause) => setSettingError(errorMessage(cause)))
                   .finally(() => setExporting(false));
               }}

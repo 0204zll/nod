@@ -327,8 +327,11 @@ test(
         }>('GET', `/api/bots/${botId}/messages`)
       ).messages;
     const model = { connectionId: randomUUID(), modelId: 'scripted', effort: 'medium' };
-    const penny = await nod.api<{ id: string; name: string }>('POST', '/api/bots', { model });
-    await nod.api('PATCH', `/api/bots/${penny.id}`, { name: 'Penny', job: 'Track my bills' });
+    const penny = await nod.api<{ id: string; name: string }>('POST', '/api/bots', {
+      name: 'Penny',
+      model,
+    });
+    await nod.api('PATCH', `/api/bots/${penny.id}`, { job: 'Track my bills' });
 
     await t.test(
       'a bot answers in its own chat and session with its note and the team',

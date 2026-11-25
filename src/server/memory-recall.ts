@@ -3,7 +3,7 @@ import type { Pool } from 'pg';
 import type { MemoryCurator } from '../ports/memory-curator.ts';
 import type { RuntimeContext } from '../ports/agent.ts';
 import type { MemoryBrief } from '../ports/memory-recall.ts';
-import type { MemoryService } from './memory.ts';
+import type { Memories } from './memories.ts';
 import { createHistorySearch } from './history.ts';
 import { unsafe } from './memory-tree.ts';
 
@@ -31,7 +31,7 @@ function selectionText(value: string, limit: number) {
 export function createMemoryRecall(options: {
   pool: Pick<Pool, 'query'>;
   ownerId: string;
-  memory: MemoryService;
+  memories: Pick<Memories, 'views' | 'find'>;
   curator: MemoryCurator;
 }) {
   const search = createHistorySearch({
@@ -76,10 +76,14 @@ export function createMemoryRecall(options: {
       (context.background && !context.taskContext)
     )
       return;
-    const view = await options.memory.view();
+    const reader = context.bot?.id ?? null;
     const today = new Date().toISOString().slice(0, 10);
-    const notes = view.notes.filter(
-      (note) => (!note.expires || note.expires >= today) && !unsafe(note.text),
+    const keyOf = (note: { path: string; memory?: string }) =>
+      note.memory ? `${note.memory}:${note.path}` : note.path;
+    const notes = (await options.memories.views(reader)).flatMap(({ label, view }) =>
+      view.notes
+        .filter((note) => (!note.expires || note.expires >= today) && !unsafe(note.text))
+        .map((note) => ({ ...note, ...label, key: keyOf({ ...note, ...label }) })),
     );
     const request = selectionText(context.prompt, 4_000);
     const recent = context.history
@@ -91,7 +95,7 @@ export function createMemoryRecall(options: {
         return bounded;
       });
     if (!notes.length && !recent.length && !context.relatedConversation?.length) return;
-    const fallback = await options.memory.find({ query: context.prompt });
+    const fallback = await options.memories.find({ query: context.prompt }, reader);
     const selectionDeadline = AbortSignal.timeout(1_000);
     const parsed = planSchema.safeParse(
       options.curator.configured && canContinue()
@@ -102,7 +106,12 @@ export function createMemoryRecall(options: {
               today,
               timeZone: context.timeZone,
               recent,
-              notes: notes.map(({ path, text, status, fact }) => ({ path, text, status, fact })),
+              notes: notes.map(({ key, text, status, fact }) => ({
+                path: key,
+                text,
+                status,
+                fact,
+              })),
             },
             signal,
             selectionDeadline,
@@ -113,12 +122,12 @@ export function createMemoryRecall(options: {
       ? parsed.data
       : {
           mode: 'recall' as const,
-          paths: fallback.map((note) => note.path),
+          paths: fallback.map(keyOf),
           queries: [],
         };
     if (plan.mode === 'none') return;
     const selected = new Set(plan.paths.slice(0, plan.mode === 'aggregate' ? 100 : 12));
-    const noteByPath = new Map(notes.map((note) => [note.path, note]));
+    const noteByPath = new Map(notes.map((note) => [note.key, note]));
     let facts = [...selected]
       .flatMap((path) => noteByPath.get(path) ?? [])
       .map((note) => ({
@@ -150,6 +159,7 @@ export function createMemoryRecall(options: {
             text: message.text.slice(0, 1200),
             at: message.created_at.toISOString(),
             shortened: message.shortened || message.text.length > 1200,
+            ...(message.chat ? { chat: message.chat } : {}),
           });
         }
         if (searches.at(-1)?.query === query) searches.pop();
@@ -169,7 +179,12 @@ export function createMemoryRecall(options: {
       options.curator.configured && canContinue() && (facts.length || candidates.length)
         ? await ask(
             rankInstructions,
-            { request, mode: plan.mode, notes: facts, messages: candidates },
+            {
+              request,
+              mode: plan.mode,
+              notes: facts.map(({ key, memory: _, ...note }) => ({ ...note, path: key })),
+              messages: candidates,
+            },
             signal,
             selectionDeadline,
           )
@@ -178,7 +193,7 @@ export function createMemoryRecall(options: {
     if (ranked.success) {
       const paths = new Set(ranked.data.paths);
       const ids = new Set(ranked.data.messages);
-      const noteByPath = new Map(facts.map((note) => [note.path, note]));
+      const noteByPath = new Map(facts.map((note) => [note.key, note]));
       const messageById = new Map(candidates.map((message) => [message.id, message]));
       facts = [...paths].flatMap((path) => noteByPath.get(path) ?? []);
       candidates = [...ids].flatMap((id) => messageById.get(id) ?? []);
@@ -187,7 +202,7 @@ export function createMemoryRecall(options: {
     signal.throwIfAborted();
     return {
       mode: plan.mode,
-      facts,
+      facts: facts.map(({ key: _, ...note }) => note),
       messages: candidates,
       searches,
       truncated: truncated || searches.length < queries.length,

@@ -32,6 +32,7 @@ import type { WorkspaceSession } from '../src/ports/computer.ts';
 import { threadIdentity } from '../src/ports/thread-identity.ts';
 import { isPublicAddress, publicUrl } from '../src/providers/agent-browser/network.ts';
 import {
+  botUser,
   connectedUser,
   runWorkspaceCommand,
   WorkspaceCommandError,
@@ -404,6 +405,58 @@ async function exists(path: string) {
     return false;
   }
 }
+
+test('a bot session runs every command as its own user in its own folder', async () => {
+  const bot = randomUUID();
+  const calls: Array<{ bot?: string; script: string }> = [];
+  const workspace = createCommandWorkspace({
+    workspaceRoot: '/tmp/nod-bot-root',
+    instructions: '',
+    runCommand: async (_id, args, input) => {
+      calls.push({ bot: input.bot, script: args.at(-1)! });
+      return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0 };
+    },
+  });
+  const session = workspace.open({
+    threadId: 'thread',
+    workspacePath: '/tmp/nod-bot-root/thread',
+    signal: new AbortController().signal,
+    bot: { id: bot },
+  });
+  assert.equal(session.path, `/workspace/thread/bots/${bot}`);
+  await session.exec('echo one');
+  await session.exec('echo two');
+  assert.deepEqual(
+    calls.map((call) => call.bot),
+    [undefined, bot, bot, bot],
+  );
+  assert.match(calls[0]!.script, /chmod 1777 \/workspace\/thread\/team \/workspace\/thread\/bots$/);
+  assert.match(calls[1]!.script, new RegExp(`mkdir -p /workspace/thread/bots/${bot}/\\.home`));
+  const launches: string[][] = [];
+  await runWorkspaceCommand({
+    container: 'nod-workspace-fixture',
+    threadId: 'thread',
+    bot,
+    args: ['/bin/true'],
+    spawn: (_command, dockerArgs, options) => {
+      launches.push(dockerArgs);
+      return spawn('/usr/bin/true', [], { ...options, stdio: 'pipe' });
+    },
+  }).catch(() => undefined);
+  const launch = launches[0]!;
+  assert.equal(launch[launch.indexOf('--user') + 1], `${botUser(bot)}:1003`);
+  assert.ok(launch.includes(`HOME=/workspace/thread/bots/${bot}/.home`));
+  assert.throws(
+    () =>
+      workspace.open({
+        threadId: 'thread',
+        workspacePath: '/tmp/nod-bot-root/thread',
+        signal: new AbortController().signal,
+        bot: { id: '../thread' },
+      }),
+    /Invalid bot identifier/,
+  );
+});
 
 test('connected CLIs run only their sealed install with a clean environment', async () => {
   const root = await mkdtemp('/tmp/nod-connected-');

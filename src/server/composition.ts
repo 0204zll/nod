@@ -198,7 +198,8 @@ import { createOnboardingSuggestions } from './onboarding-suggestions.ts';
 import { createOnboardingProfile } from './onboarding-profile.ts';
 import { createMemoryLearning, initializeMemoryLearning } from './memory-learning.ts';
 import { createScheduleIdeas } from './schedule-ideas.ts';
-import { createMemoryService, importMemoryFile } from './memory.ts';
+import { importMemoryFile } from './memory.ts';
+import { createMemories } from './memories.ts';
 import { createMemoryRecall } from './memory-recall.ts';
 import { createLearnedSkills } from './learned-skills.ts';
 import { automaticSpeechVoice, createSpeech } from './speech.ts';
@@ -1032,12 +1033,13 @@ async function initializeApplication(
   options.starting?.('memory');
   await memoryStore.initialize();
   await importMemoryFile(memoryStore, join(dataRoot, 'objects', 'memory'));
-  const memory = createMemoryService({
+  const memories = createMemories({
     pool,
     ownerId,
     store: memoryStore,
     analytics: captureAnalytics,
   });
+  const memory = memories.nod;
   const onboardingProfile = createOnboardingProfile({
     memory,
     profileAnalytics: analytics.personProfileAvailable
@@ -1086,7 +1088,7 @@ async function initializeApplication(
   const memoryRecall = createMemoryRecall({
     pool,
     ownerId,
-    memory,
+    memories,
     curator: adapters.recallCurator ? ledger.curator(adapters.recallCurator) : curator,
   });
   const writingStyle = createWritingStyleLearning({ memory, curator });
@@ -1107,13 +1109,24 @@ async function initializeApplication(
         )
         .map((entry) => entry.text),
   });
-  const learning = createMemoryLearning({
-    pool,
-    ownerId,
-    memory,
-    curator,
-    analytics: captureAnalytics,
-  });
+  const learningFor = (bot: string | null) =>
+    createMemoryLearning({
+      pool,
+      ownerId,
+      memory: memories.of(bot),
+      curator,
+      analytics: captureAnalytics,
+      ...(bot ? { bot } : {}),
+    });
+  const learning = learningFor(null);
+  const learnEveryChat = async () => {
+    await learning.run();
+    const { rows } = await pool.query<{ id: string }>(
+      'SELECT id FROM bots WHERE owner_id=$1 AND archived_at IS NULL ORDER BY created_at,id',
+      [ownerId],
+    );
+    for (const { id } of rows) await learningFor(id).run();
+  };
   const learnedSkills = createLearnedSkills({
     memory,
     curator,
@@ -1136,7 +1149,7 @@ async function initializeApplication(
       if (!retireScheduleConfirmations) throw new Error('Approvals are not ready.');
       return retireScheduleConfirmations(client, id, waitForSend);
     },
-    memory,
+    memories,
     learnedSkills,
     models: adapters.models,
     localFilesAvailable: Boolean(adapters.trash),
@@ -1213,6 +1226,7 @@ async function initializeApplication(
     nodModel: () => adapters.models?.view().selection ?? null,
     clearBrowser: (id) => adapters.computer.clear(id),
     removeSchedule: (id) => personal.removeSchedule(id),
+    removeMemory: (id) => memories.remove(id),
     ...(adapters.models
       ? { validateModel: (choice: ModelSelection) => adapters.models!.validateChoice(choice) }
       : {}),
@@ -2480,7 +2494,7 @@ async function initializeApplication(
     await initializeMemoryLearning({
       boss,
       consumers,
-      run: () => analytics.withSystemWork(ownerId, 'memory_learning', learning.run),
+      run: () => analytics.withSystemWork(ownerId, 'memory_learning', learnEveryChat),
     });
     startThreadConsumers = startThreadWorkers.bind(undefined, {
       present: communication.present,
@@ -2590,7 +2604,7 @@ async function initializeApplication(
       accountProfile,
       connectedApps: integrations.connectedApps,
       mcpServers: discovered.servers,
-      memoryContext: memory.context,
+      memoryContext: memories.context,
       recall: personal.recall,
       learnedSkills: learnedSkills.index,
       taskContext: tasks.context,
@@ -3011,7 +3025,7 @@ async function initializeApplication(
           const origin = await turnOrigin(turn.turnId);
           if (!origin || !['user', 'task'].includes(origin.source))
             throw new Error('Only work the owner started, in chat or a task, can save to memory.');
-          return learning.remember(
+          return learningFor(await memories.chatOf(turn.turnId)).remember(
             args,
             provenance.sourceMessageId,
             (write) => withTurnLock({ turnId: turn.turnId, signal }, write),

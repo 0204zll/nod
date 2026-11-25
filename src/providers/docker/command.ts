@@ -7,7 +7,7 @@ import {
 import { createHash } from 'node:crypto';
 import { serviceEnvironment } from '../process.ts';
 import type { ConnectedCli } from '../../ports/computer.ts';
-import { threadIdentity } from '../../ports/thread-identity.ts';
+import { botIdentity, threadIdentity } from '../../ports/thread-identity.ts';
 import {
   appEnvironmentNamePattern,
   appEnvironmentNameMaxLength,
@@ -73,6 +73,21 @@ const cliInstallTimeoutMs = 600_000;
 
 export const connectedUser = (cli: ConnectedCli) =>
   20_000 + (createHash('sha256').update(cli.id).digest().readUInt32BE() % 40_000);
+
+const botGroup = 1003;
+
+export const botUser = (bot: string) =>
+  100_000 + (createHash('sha256').update(botIdentity(bot)).digest().readUInt32BE() % 900_000);
+
+function botEnvironment(home: string) {
+  return [
+    `HOME=${home}`,
+    `NPM_CONFIG_PREFIX=${home}/.local`,
+    `PIPX_HOME=${home}/.local/pipx`,
+    `PIPX_BIN_DIR=${home}/.local/bin`,
+    `PATH=${home}/.local/bin:/opt/nod-artifacts/bin:/home/node/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
+  ].flatMap((value) => ['--env', value]);
+}
 
 const workspaceCommandProgram = `import os,sys,json,base64,selectors,subprocess,signal,time,threading,re,tempfile,shutil,glob
 import ctypes
@@ -312,6 +327,7 @@ export async function runWorkspaceCommand(options: {
   input?: string;
   environment?: Record<string, string>;
   cli?: ConnectedCli;
+  bot?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   maxBytes?: number;
@@ -322,6 +338,7 @@ export async function runWorkspaceCommand(options: {
   if (!/^nod-workspace(?:-[a-zA-Z0-9_-]+)?$/.test(options.container))
     throw new Error('WORKSPACE_CONTAINER must identify a Nod workspace.');
   const id = threadIdentity(options.threadId);
+  const bot = !options.cli && options.bot ? botIdentity(options.bot) : undefined;
   const launch = (workdir: string) => () =>
     (options.spawn ?? spawn)(
       'docker',
@@ -329,7 +346,12 @@ export async function runWorkspaceCommand(options: {
         'exec',
         '-i',
         '--user',
-        options.cli ? `${connectedUser(options.cli)}:1002` : 'node',
+        options.cli
+          ? `${connectedUser(options.cli)}:1002`
+          : bot
+            ? `${botUser(bot)}:${botGroup}`
+            : 'node',
+        ...(bot ? botEnvironment(`/workspace/${id}/bots/${bot}/.home`) : []),
         '--workdir',
         workdir,
         options.container,

@@ -13,6 +13,8 @@ The short version: memory notes hold only what the owner said in their messages 
 
 Memory is one JSON document, `memory/MEMORY.md`, in Nod's private object store in the database. It sits outside the thread workspace, so it survives a thread reset. It holds up to 256 KiB.
 
+Each [bot](/use/bots/) has its own document, `memory/bots/<bot ID>.md`, with the same format and limit. The server binds a turn's memory tools to its chat's document, so `memory_learn` and `memory_forget` write only there, and hourly learning reads only that chat's messages. `memory_find`, `memory_read` and recall also search the other documents read-only and label each fact with its owner's name. A bot's prompt holds its own index and Nod's. The saving and sensitive-details switches, skills and writing style stay in Nod's document and apply to every bot. Removing a bot deletes its document. The code is in [`src/server/memories.ts`](https://github.com/n8n-io/nod/blob/main/src/server/memories.ts).
+
 Each entry has an address, `area/slug`, a text of up to 4,000 characters and an optional one-line abstract. Notes keep their line breaks in memory, in the note card and in the index; summaries such as the note list and the Markdown export show them on one line. Notes the memory model writes, and their support quotes, may keep the owner's line breaks too. There are five areas:
 
 | Area          | Holds                               |

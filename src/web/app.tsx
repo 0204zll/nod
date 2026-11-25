@@ -3,7 +3,7 @@ import { ArrowLeft } from './components/icons';
 import { Chat } from './pages/chat';
 import { BotChat } from './pages/bot-chat';
 import { BotsPage } from './pages/bots';
-import { ChatTop, BotNav, BotPanel, Toasts } from './components/bots';
+import { ChatTop, BotNav, BotPanel, NewBotDialog, Toasts } from './components/bots';
 import { SettingsNav, botsSettingsPath } from './components/settings-nav';
 import { chatUnread, readChatCursors, botIdOf, botPath, writeChatCursor } from './lib/bots';
 import { Usage } from './pages/usage';
@@ -395,6 +395,7 @@ function Workspace({
       {showPanel && (
         <BotPanel bot={path === '/' ? undefined : openBot} onClose={() => setPanelOpen(false)} />
       )}
+      <NewBotDialog bots={bots} onCreated={(bot) => navigate(botPath(bot.id))} />
       <Toasts />
     </div>
   );
@@ -690,11 +691,11 @@ function AuthenticatedApp({
                 open={settingsOpen}
                 initialTab={settingsTab}
                 openRequest={settingsRequest}
-                onOpenSource={(messageId) => {
+                onOpenSource={(messageId, botId) => {
                   setMemorySource(true);
                   window.dispatchEvent(
                     new CustomEvent('nod:focus-message', {
-                      detail: { messageId, source: 'memory' },
+                      detail: { messageId, source: 'memory', ...(botId ? { botId } : {}) },
                     }),
                   );
                 }}

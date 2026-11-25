@@ -35,7 +35,6 @@ import {
   type Tree,
 } from './memory-tree.ts';
 
-const key = 'memory/MEMORY.md';
 const nilId = '00000000-0000-0000-0000-000000000000';
 const flat = (value: string) => value.replace(/\s+/g, ' ').trim();
 const findInput = z.object({ query: z.string().trim().min(1), area: area.optional() }).strict();
@@ -65,7 +64,11 @@ export const controlInput = z
     message: 'Choose whether to turn memory on, turn it off or clear it.',
   });
 export const forgetInput = z.object({ path }).strict();
-export const forgetReview = z.object({ path, note: z.string() }).strict();
+export const forgetReview = z
+  .object({ path, note: z.string(), memory: z.union([z.literal('nod'), z.uuid()]).optional() })
+  .strict();
+const nodKey = 'memory/MEMORY.md';
+
 function fail(message: string, statusCode = 400): never {
   throw Object.assign(new Error(message), { statusCode });
 }
@@ -75,7 +78,7 @@ export async function importMemoryFile(store: PrivateObjectStore, directory: str
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   });
   if (bytes)
-    await store.write(key, bytes, { expectedVersion: null }).catch((error) => {
+    await store.write(nodKey, bytes, { expectedVersion: null }).catch((error) => {
       if (!(error instanceof ObjectStoreConflict)) throw error;
     });
   await rm(directory, { recursive: true, force: true });
@@ -86,10 +89,20 @@ export function createMemoryService(options: {
   ownerId: string;
   store: PrivateObjectStore;
   analytics?: CaptureAnalytics;
+  bot?: { id: string; owner: MemoryService };
 }) {
+  const bot = options.bot;
+  const key = bot ? `memory/bots/${bot.id}.md` : nodKey;
   async function load() {
     const object = await options.store.read(key, maxBytes);
-    return { tree: parse(object?.bytes), bytes: object?.bytes, version: object?.version ?? null };
+    const tree = parse(object?.bytes);
+    if (bot) {
+      const owner = await bot.owner.load();
+      tree.enabled = owner.enabled;
+      tree.sensitive = owner.sensitive;
+      tree.skills = [];
+    }
+    return { tree, bytes: object?.bytes, version: object?.version ?? null };
   }
 
   async function edit<T>(change: (tree: Tree) => T, { allowDisabled = false } = {}): Promise<T> {
@@ -97,7 +110,9 @@ export function createMemoryService(options: {
       const current = await load();
       if (!current.tree.enabled && !allowDisabled) throw new Error('Memory is turned off.');
       const result = change(current.tree);
-      const bytes = render(current.tree);
+      const bytes = render(
+        bot ? { ...current.tree, enabled: true, sensitive: false, skills: [] } : current.tree,
+      );
       if (current.bytes ? Buffer.from(current.bytes).equals(bytes) : isEmpty(current.tree))
         return result;
       try {
@@ -109,14 +124,17 @@ export function createMemoryService(options: {
     }
   }
 
+  const rows = (tree: Tree) =>
+    Object.entries(indexLayout(tree, { tentative: true })).flatMap(([area, rows]) =>
+      rows.map((row) => `${area}/${row}`.replaceAll('\n', '\n  ')),
+    );
+
   async function context() {
     const { tree } = await load();
     return [
       ...(tree.enabled ? [] : ['savingEnabled: false']),
       ...(tree.sensitive ? ['sensitiveTopics: allowed'] : []),
-      ...Object.entries(indexLayout(tree, { tentative: true })).flatMap(([area, rows]) =>
-        rows.map((row) => `${area}/${row}`.replaceAll('\n', '\n  ')),
-      ),
+      ...rows(tree),
     ].join('\n');
   }
 
@@ -139,8 +157,27 @@ export function createMemoryService(options: {
       throw new Error('The complete current owned user message is required.');
   }
 
-  async function control(raw: unknown) {
+  async function control(raw: unknown): Promise<{ enabled: boolean; cleared?: boolean }> {
     const input = controlInput.parse(raw);
+    if (bot) {
+      const owner =
+        input.enabled === undefined
+          ? undefined
+          : await bot.owner.control({ enabled: input.enabled });
+      const mark = await watermark();
+      if (input.clear)
+        await edit(
+          (tree) => {
+            tree.entries = [];
+            tree.archive = [];
+            tree.generation++;
+            tree.reflected = mark;
+            tree.retries = 0;
+          },
+          { allowDisabled: true },
+        );
+      return { enabled: owner?.enabled ?? (await load()).tree.enabled, cleared: input.clear };
+    }
     const capture = snapshotAnalytics(options.analytics);
     const mark = await watermark();
     const result = await edit(
@@ -394,7 +431,8 @@ export function createMemoryService(options: {
     });
   }
 
-  async function settings(raw: unknown) {
+  async function settings(raw: unknown): Promise<void> {
+    if (bot) return bot.owner.settings(raw);
     const input = settingsInput.parse(raw);
     const capture = snapshotAnalytics(options.analytics);
     const mark = await watermark();
@@ -421,8 +459,9 @@ export function createMemoryService(options: {
   async function sources(ids: string[]) {
     const { rows } = await options.pool.query(
       `SELECT m.id,m.text,m.created_at,split_part(COALESCE(u.channel,'web'),':',1) AS channel,
-       COALESCE(${activeThreadSql()},false) AS can_open
+       COALESCE(${activeThreadSql()},false) AS can_open,m.bot_id,COALESCE(b.name,'Nod') AS chat
        FROM messages m LEFT JOIN turns u ON u.id=m.turn_id AND u.owner_id=m.owner_id
+       LEFT JOIN bots b ON b.id=m.bot_id AND b.owner_id=m.owner_id
        WHERE m.owner_id=$1 AND m.role='user' AND m.id=ANY($2::uuid[])`,
       [options.ownerId, ids],
     );
@@ -435,6 +474,8 @@ export function createMemoryService(options: {
           at: row.created_at.toISOString(),
           channel: row.channel,
           canOpenInCurrentChat: row.can_open === true,
+          chat: row.chat,
+          ...(row.bot_id ? { botId: row.bot_id } : {}),
         },
       ]),
     );
@@ -464,6 +505,8 @@ export function createMemoryService(options: {
 
   return {
     context,
+    index: async () => rows((await load()).tree).join('\n'),
+    remove: () => options.store.remove(key),
     enabled: async () => (await load()).tree.enabled,
     currentSource,
     control,
