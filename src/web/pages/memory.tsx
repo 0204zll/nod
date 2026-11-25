@@ -1212,12 +1212,15 @@ export function Memory({
 }) {
   const [chat, setChat] = useState('nod');
   const scope = chat === 'nod' ? '' : `?bot=${chat}`;
+  const known = useRef<NonNullable<MemoryView['memories']>>([]);
   const {
     data: view,
     error: loadError,
     loading,
     update,
   } = usePageData<MemoryView>(`/api/memory${scope}`);
+  if (view?.memories) known.current = view.memories;
+  const memories = known.current;
   const format = useDateFormat();
   const [compact, panelRef, panel] = useCompact();
   const [restoredView] = useState(initialView);
@@ -1561,6 +1564,20 @@ export function Memory({
         </div>
       )}
       {settingError && <Notice>{settingError}</Notice>}
+      {memories.length > 1 && (
+        <Tabs
+          id="memory-chats"
+          panelId="memory-chat-panel"
+          label="Whose memory"
+          size="compact"
+          items={memories.map((item) => ({ value: item.id, label: item.name }))}
+          value={chat}
+          onValueChange={(next) => {
+            setChosen(undefined);
+            setChat(next);
+          }}
+        />
+      )}
       {loadError && !view && <Notice>Could not load your memory.</Notice>}
       {!view ? (
         loading && <Loading label="Loading memory…" />
@@ -1568,20 +1585,6 @@ export function Memory({
         detail
       ) : (
         <>
-          {(view.memories?.length ?? 0) > 1 && (
-            <Tabs
-              id="memory-chats"
-              panelId="memory-chat-panel"
-              label="Whose memory"
-              size="compact"
-              items={(view.memories ?? []).map((item) => ({ value: item.id, label: item.name }))}
-              value={chat}
-              onValueChange={(next) => {
-                setChosen(undefined);
-                setChat(next);
-              }}
-            />
-          )}
           <div className="memory-bar" id="memory-chat-panel">
             <SearchField
               className="memory-search"

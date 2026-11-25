@@ -828,7 +828,7 @@ export function BotPanel({ bot, onClose }: { bot?: Bot; onClose(): void }) {
               <div className="panel-row">
                 <div className="panel-row-head panel-row-still">
                   <span>Memory</span>
-                  <span className="panel-row-value">Shared with Nod</span>
+                  <span className="panel-row-value">Its own</span>
                 </div>
               </div>
               <div className="panel-row">

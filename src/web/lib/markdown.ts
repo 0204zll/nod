@@ -1,7 +1,21 @@
 import type { Root, Text, Element } from 'hast';
 import type { Root as MarkdownRoot } from 'mdast';
 import remarkInlineLinks from 'remark-inline-links';
+import remarkParse from 'remark-parse';
+import { unified } from 'unified';
 import { SKIP, visit } from 'unist-util-visit';
+
+const markdown = unified().use(remarkParse);
+
+export function plainText(source: string) {
+  const parts: string[] = [];
+  visit(markdown.parse(source), (node) => {
+    if (node.type === 'text' || node.type === 'inlineCode' || node.type === 'code')
+      parts.push(node.value);
+    else if (node.type === 'image' && node.alt) parts.push(node.alt);
+  });
+  return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
 
 export function remarkLinkDestinations() {
   return (tree: MarkdownRoot) => {

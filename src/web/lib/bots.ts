@@ -1,6 +1,7 @@
 import { createContext } from 'react';
 import type { Activity } from '../../shared/contracts';
 import type { Bot } from '../../shared/bots';
+import { plainText } from './markdown';
 
 export type { Bot };
 
@@ -40,12 +41,12 @@ export function botActivity(activity: Activity[] | undefined, id: string) {
 
 export function botLine(bot: Bot, writing: boolean, live?: Activity) {
   if (writing) return 'Writing…';
-  if (bot.status === 'needs_you' && bot.question) return `Needs you: ${bot.question}`;
+  if (bot.status === 'needs_you' && bot.question) return `Needs you: ${plainText(bot.question)}`;
   const now = live?.step ?? live?.title;
   if (bot.status === 'working' && now) return now;
   const last = bot.lastMessage;
   if (!last) return bot.job || 'No messages yet';
-  return last.from === 'owner' ? `You: ${last.text}` : last.text;
+  return last.from === 'owner' ? `You: ${plainText(last.text)}` : plainText(last.text);
 }
 
 export const ChatBot = createContext<string | undefined>(undefined);

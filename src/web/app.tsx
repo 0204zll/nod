@@ -1,3 +1,4 @@
+import { plainText } from './lib/markdown';
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft } from './components/icons';
 import { Chat } from './pages/chat';
@@ -179,7 +180,7 @@ function Workspace({
   );
   const lastMain = state?.messages.findLast((message) => message.text.trim());
   const nodLine = lastMain
-    ? `${lastMain.role === 'user' ? 'You: ' : ''}${lastMain.text.replace(/\s+/g, ' ').trim()}`
+    ? `${lastMain.role === 'user' ? 'You: ' : ''}${plainText(lastMain.text)}`
     : '';
   const nodWorking = Boolean(
     connected && state?.activity?.some((item) => !item.background && !item.botId),

@@ -1,6 +1,5 @@
+import { plainText } from '../lib/markdown';
 import { useEffect, useId, useRef, useState } from 'react';
-import { unified } from 'unified';
-import remarkParse from 'remark-parse';
 import { visit } from 'unist-util-visit';
 import type { Message, Task } from '../../shared/contracts';
 import { api, errorMessage, requestAccountVersion } from '../lib/api';
@@ -21,18 +20,6 @@ import { ownedArtifactUrl, type ImagePreview } from './attachment-images';
 import { reuseFile } from './file-actions';
 import { Button, Dialog, DialogContent, DialogTitle, SearchField, Skeleton } from './ui';
 import { ArrowUpRight, Search } from './icons';
-
-const markdown = unified().use(remarkParse);
-
-function searchText(source: string) {
-  const parts: string[] = [];
-  visit(markdown.parse(source), (node) => {
-    if (node.type === 'text' || node.type === 'inlineCode' || node.type === 'code')
-      parts.push(node.value);
-    else if (node.type === 'image' && node.alt) parts.push(node.alt);
-  });
-  return parts.join(' ').replace(/\s+/g, ' ').trim();
-}
 
 function highlighted(text: string, query: string) {
   const terms = [...new Set(query.match(/[\p{L}\p{N}]+/gu) ?? [])]
@@ -328,12 +315,12 @@ export function ChatTools({
                 const message = 'message' in entry ? entry.message : undefined;
                 let snippet = '';
                 if (message) {
-                  const text = searchText(message.audioCaption ?? message.text);
+                  const text = plainText(message.audioCaption ?? message.text);
                   const match = text.toLocaleLowerCase().indexOf(trimmedQuery.toLocaleLowerCase());
                   const start = Math.max(0, match - 60);
                   snippet =
                     match < 0 && message.snippet
-                      ? searchText(message.snippet)
+                      ? plainText(message.snippet)
                       : text
                         ? `${start > 0 ? '…' : ''}${text.slice(start, start + 220)}${text.length > start + 220 ? '…' : ''}`
                         : message.attachments.map((item) => item.name).join(', ') ||
