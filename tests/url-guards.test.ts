@@ -1402,3 +1402,18 @@ test('the browser proxy refuses a WebSocket upgrade to a private destination', a
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test('print frames run only the print command, without same-origin, network or page scripts', async () => {
+  const { printSandbox, printSource } = await import('../src/web/lib/print.ts');
+  const source = printSource(
+    '<script>top.postMessage("synthetic-page-script","*")</script><p>synthetic</p>',
+    'a'.repeat(32),
+  );
+  const policy = /http-equiv="Content-Security-Policy" content="([^"]+)"/.exec(source)![1];
+  const scripts = policy.split(';').find((part) => part.trim().startsWith('script-src'))!;
+  assert.deepEqual(printSandbox.split(' ').sort(), ['allow-modals', 'allow-scripts']);
+  assert.match(policy, /default-src 'none'/);
+  assert.equal(scripts.trim(), `script-src 'nonce-${'a'.repeat(32)}'`);
+  assert.equal((source.match(/nonce="/g) ?? []).length, 1);
+  assert.ok(source.indexOf('Content-Security-Policy') < source.indexOf('synthetic-page-script'));
+});

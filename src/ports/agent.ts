@@ -200,6 +200,7 @@ export interface RuntimeContext {
     mimeType: string;
     workspaceFile?: string;
     source?: Artifact['source'];
+    page?: { id: string; version: number };
   }>;
   emit(type: string, summary: string, event?: ExecutionEvent): Promise<void>;
   reply(
@@ -232,7 +233,7 @@ export interface RuntimeContext {
     | { result: unknown }
   >;
   delta(text: string, streamId?: string, done?: boolean): void;
-  publish(path: string, name?: string): Promise<Artifact>;
+  publish(path: string, name?: string, page?: string): Promise<Artifact>;
   readAudio?(audio: AgentAudio, signal: AbortSignal): Promise<Uint8Array>;
   readWorkspaceFile?(path: string, maxBytes: number): Promise<Uint8Array>;
   publishScreenshot?(bytes: Uint8Array, name?: string): Promise<Artifact>;

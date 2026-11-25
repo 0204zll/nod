@@ -706,10 +706,11 @@ export const toolDefinitions = {
   ),
   share_file: defineTool(
     'share_file',
-    'Attach a workspace file to your next reply, or deliver it on its own when no reply follows. Check the file first and share each file once.',
+    'Attach a workspace file to your next reply, or deliver it on its own when no reply follows. Check the file first and share each file once. Sharing an HTML file, a .data.json data page or a PPTX again from the same path saves a new version of that page; the result gives page {id,version,type}. To update a page from a file at another path, such as a copy in workspaceAttachments, pass its page id.',
     Type.Object({
       path: Type.String(),
       name: Type.Optional(Type.String()),
+      page: Type.Optional(Type.String()),
     }),
     true,
   ),
@@ -1500,7 +1501,7 @@ export function nodTools(
           }
         : result;
     }),
-    bind(toolDefinitions.share_file, (p) => context.publish(p.path, p.name)),
+    bind(toolDefinitions.share_file, (p) => context.publish(p.path, p.name, p.page)),
     bind(toolDefinitions.create_audio, async (p) => {
       if (!context.createAudio)
         throw new Error('Audio generation is not available in this runtime.');

@@ -162,6 +162,7 @@ export const analyticsEvent = z.discriminatedUnion('event', [
               'presentation',
               'archive',
               'n8n-workflow',
+              'data-page',
               'text',
               'file',
             ]),

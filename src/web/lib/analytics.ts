@@ -75,7 +75,8 @@ type AnalyticsEvents = {
   artifact_action: {
     kind: AttachmentKind | 'file';
     location: 'message' | 'drawer' | 'commands' | 'composer';
-    action: 'copy' | 'download' | 'download_requested' | 'open' | 'reveal' | 'reuse_requested';
+    action:
+      'copy' | 'download' | 'download_requested' | 'open' | 'print' | 'reveal' | 'reuse_requested';
   };
   settings_viewed: {
     tab: 'general' | 'notifications' | 'models' | 'voice' | 'memory' | 'computer' | 'privacy';
@@ -166,6 +167,7 @@ const artifactKinds = [
   'presentation',
   'archive',
   'n8n-workflow',
+  'data-page',
   'text',
   'file',
 ];
@@ -223,7 +225,15 @@ const eventProperties: Record<keyof AnalyticsEvents, Record<string, readonly unk
   artifact_action: {
     kind: artifactKinds,
     location: ['message', 'drawer', 'commands', 'composer'],
-    action: ['copy', 'download', 'download_requested', 'open', 'reveal', 'reuse_requested'],
+    action: [
+      'copy',
+      'download',
+      'download_requested',
+      'open',
+      'print',
+      'reveal',
+      'reuse_requested',
+    ],
   },
   settings_viewed: {
     tab: ['general', 'notifications', 'models', 'voice', 'memory', 'computer', 'privacy'],
@@ -297,6 +307,7 @@ const appOpenRoutes = new Set([
   '/prepared',
   '/usage',
   '/vault',
+  '/pages',
   '/settings',
 ]);
 

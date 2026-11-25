@@ -35,6 +35,7 @@ const thumbnailKinds = new Set([
   'html',
   'archive',
   'n8n-workflow',
+  'data-page',
 ]);
 
 function DataThumbnail({ item, kind }: { item: ImagePreview; kind: DataKind }) {
@@ -77,6 +78,8 @@ function DataThumbnail({ item, kind }: { item: ImagePreview; kind: DataKind }) {
     </div>
   );
 }
+
+const pageTypeLabels = { docs: 'Docs', data: 'Data', slides: 'Slides' };
 
 function CardDetails({ name, mimeType, meta }: { name: string; mimeType: string; meta: string }) {
   return (
@@ -185,8 +188,10 @@ function DocumentCard({
   const [pages, setPages] = useState<number | null>(null);
   const [thumbnail, setThumbnail] = useState(kind === 'pdf');
   const dataThumbnail = thumbnailKinds.has(kind ?? '');
+  const wide = kind === 'html' || kind === 'data-page';
   const meta = [
-    fileType(item.name),
+    item.page ? pageTypeLabels[item.page.type] : fileType(item.name),
+    item.page ? `Version ${item.page.version}` : '',
     pages ? `${pages} ${pages === 1 ? 'page' : 'pages'}` : '',
     fileSize(item.size),
   ]
@@ -197,7 +202,7 @@ function DocumentCard({
       draggable
       onDragStart={(event) => fileDrag(event, item)}
       onPointerEnter={() => prepareFile(item)}
-      className={`attachment-card is-${kind ?? 'file'}${thumbnail || dataThumbnail ? ' has-preview' : ''}${selected ? ' is-selected' : ''}`}
+      className={`attachment-card is-${kind ?? 'file'}${wide ? ' is-page' : ''}${thumbnail || dataThumbnail ? ' has-preview' : ''}${selected ? ' is-selected' : ''}`}
     >
       {thumbnail && (
         <PdfThumbnail
@@ -214,7 +219,7 @@ function DocumentCard({
         aria-current={selected || undefined}
         onClick={(event) => onOpen({ element: event.currentTarget, keyboard: event.detail === 0 })}
       >
-        <CardDetails name={item.name} mimeType={mimeType} meta={meta} />
+        <CardDetails name={item.page?.title ?? item.name} mimeType={mimeType} meta={meta} />
       </button>
       <FileActions item={item} />
     </div>

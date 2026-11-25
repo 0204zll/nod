@@ -29,6 +29,7 @@ import {
   sandboxedDocument,
 } from './attachment-frame';
 import { SlidesView } from './attachment-slides';
+import { DataPageView } from './data-page';
 import { Button, Skeleton } from './ui';
 import { Tabs } from './tabs';
 
@@ -41,7 +42,8 @@ type DataKind =
   | 'document'
   | 'presentation'
   | 'archive'
-  | 'n8n-workflow';
+  | 'n8n-workflow'
+  | 'data-page';
 type Sheet = { name: string; rows: string[][]; header: boolean; total: number; columns: number };
 
 const previewRows = 202;
@@ -57,6 +59,7 @@ const limits: Record<DataKind, number> = {
   presentation: 60_000_000,
   archive: 100_000_000,
   'n8n-workflow': textPreviewBytes,
+  'data-page': textPreviewBytes,
 };
 const WorkflowCanvas = lazy(() => import('./n8n-canvas'));
 const numberLike = /^[-+(]?[$€£¥]?\s?\d[\d,.\s]*%?\)?(?:\s?[$€£¥]|\s?[A-Z]{3})?$/;
@@ -652,6 +655,8 @@ export default function AttachmentData({
         This file is empty.
       </div>
     );
+  if (kind === 'data-page' && mode === 'preview')
+    return <DataPageView text={source} fallback={<PreviewUnavailable item={item} />} />;
   if (kind === 'n8n-workflow' && mode === 'preview')
     return (
       <Suspense fallback={<PreviewLoading />}>

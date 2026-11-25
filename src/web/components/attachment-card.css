@@ -183,6 +183,39 @@
   height: 100%;
 }
 
+.attachment-card.is-page {
+  width: 420px;
+}
+
+.attachment-card.is-page.has-preview {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.attachment-card.is-page .attachment-card-preview {
+  width: 100%;
+  min-height: 0;
+  aspect-ratio: 16 / 10;
+  border-right: 0;
+  border-bottom: 1px solid var(--border);
+  container-type: inline-size;
+}
+
+.attachment-card.is-page .attachment-card-preview-content {
+  width: 250cqw;
+  height: 156.25cqw;
+  transform: scale(0.4);
+}
+
+.attachment-card.is-page .attachment-card-details {
+  min-height: 0;
+  padding: 12px 96px 12px 12px;
+}
+
+.attachment-card.is-page > .file-actions {
+  top: auto;
+  bottom: 10px;
+}
+
 .attachment-card-preview .attachment-pdf-page {
   display: block;
   padding: 0;

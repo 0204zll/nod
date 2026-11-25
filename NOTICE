@@ -9,6 +9,17 @@ is distributed under GPL-3.0-or-later. See desktop/licenses/speech.md for compon
 attribution and corresponding source. Desktop builds include the license and
 verified source archives under engine/licenses/speech.
 
+HTML page guides
+Source: https://github.com/nexu-io/open-design
+The guides in src/runtime/skills/artifacts/references/ adapt design rules and
+page layouts from OpenDesign, distributed under Apache-2.0. Its typography and
+colour rules adapt https://github.com/referodesign/refero_skill, distributed
+under MIT, Copyright (c) Refero Design. The guides also draw on the
+frontend-design skill in https://github.com/anthropics/skills and on
+https://github.com/pbakaus/impeccable, both distributed under Apache-2.0, and
+on https://github.com/vercel-labs/web-interface-guidelines, distributed under
+MIT.
+
 Agent Plugins 1.0.0 JSON Schemas
 Source: https://github.com/agentplugins/agent-plugins-spec
 Schemas in src/server/agent-plugins/ are distributed under Apache-2.0.

@@ -11,6 +11,19 @@ export interface Artifact {
   size: number;
   url: string;
   source?: 'browser_screenshot' | 'sticker' | 'sticker-preview' | 'location' | 'contact';
+  page?: { id: string; version: number; title: string; type: PageType };
+}
+export const pageTypes = ['docs', 'data', 'slides'] as const;
+export type PageType = (typeof pageTypes)[number];
+export interface PageVersion {
+  version: number;
+  createdAt: string;
+  artifact: Artifact;
+}
+export interface Page extends PageVersion {
+  id: string;
+  title: string;
+  type: PageType;
 }
 export type MessageReaction = string;
 export type AgentReactionResult =
