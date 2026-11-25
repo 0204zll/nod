@@ -1,4 +1,5 @@
 import { check, judge, scenario } from '../scenario.ts';
+import { pageText } from '../html.ts';
 import type { Run } from '../trace.ts';
 
 const data = [
@@ -75,7 +76,7 @@ export default scenario({
             (item) => item === shared.at(-1) || item.endsWith(`/${shared.at(-1)}`),
           );
           const html = file ? await run.text(file) : '';
-          const text = html.replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, '');
+          const text = pageText(html);
           return {
             pass: /55\s?%/.test(text),
             evidence: html ? `55% shown: ${/55\s?%/.test(text)}` : 'no page file',

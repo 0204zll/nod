@@ -1,6 +1,6 @@
 # Page layouts
 
-Each layout uses the base and classes from [references/pages.md](references/pages.md). Keep the section order. Drop a section that has no real content instead of filling it.
+Each layout uses the base and classes from [pages.md](pages.md). Keep the section order. Drop a section that has no real content instead of filling it.
 
 ## Specification
 

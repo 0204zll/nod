@@ -1,4 +1,5 @@
 import { check, judge, scenario } from '../scenario.ts';
+import { pageText } from '../html.ts';
 import type { Run } from '../trace.ts';
 
 const notes = [
@@ -93,11 +94,7 @@ export default scenario({
       check(
         'page-keeps-the-facts',
         async (run) => {
-          const text = (await pages(run))
-            .map((page) =>
-              page.html.replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, ''),
-            )
-            .join('\n');
+          const text = (await pages(run)).map((page) => pageText(page.html)).join('\n');
           const wanted: Array<[string, RegExp]> = [
             ['Dana Okafor', /dana okafor/i],
             ['412', /\b412\b/],
@@ -120,9 +117,9 @@ export default scenario({
         async (run) => {
           const years = (await pages(run)).flatMap(
             (page) =>
-              page.html
-                .replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>|<[^>]+>/gi, ' ')
-                .match(/\b(?:mar|apr)[a-z]*\.?,?\s+20\d\d\b|\b20\d\d-0[34]-\d\d\b/gi) ?? [],
+              pageText(page.html).match(
+                /\b(?:mar|apr)[a-z]*\.?,?\s+20\d\d\b|\b20\d\d-0[34]-\d\d\b/gi,
+              ) ?? [],
           );
           return { pass: !years.length, evidence: years.join(', ') || 'no year on a rollout date' };
         },
