@@ -1,4 +1,5 @@
 import { Tooltip } from '../components/tooltip';
+import { ResetChat } from '../components/reset-chat';
 import {
   Fragment,
   useEffect,
@@ -335,8 +336,10 @@ export function Chat({
   onDismissFeedbackDiscovery,
   onReturnToMemory,
   turnTraces = false,
+  onReset,
 }: {
   turnTraces?: boolean;
+  onReset?(threadId: string): Promise<unknown>;
   ownerId: string;
   state: AppState;
   streams: Record<string, string>;
@@ -2219,6 +2222,7 @@ export function Chat({
           </Button>
         </Tooltip>
       )}
+      {onReset && <ResetChat onReset={() => onReset(threadId)} />}
       {onFeedback && (
         <FeedbackLauncher
           onFeedback={onFeedback}

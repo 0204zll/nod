@@ -3353,6 +3353,10 @@ async function initializeApplication(
     attributeAudioUsage: ledger.attributeMediaUsage,
     verification: chatVerification,
     taskLedger: tasks.read,
+    forgetLearned:
+      developmentMode && !desktopMode
+        ? async () => void (await memory.control({ clear: true }))
+        : undefined,
     activity: activity.current,
     planningTasks: onboardingSuggestions.planning,
     computer,

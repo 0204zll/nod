@@ -19,15 +19,19 @@ There is no extra switch. In dev mode Nod stores every model call made inside a 
 
 The header shows the turn's duration, model calls, tool calls, input tokens (with how many the provider served from its cache), output tokens and cost. Pick an earlier turn from the list under the title, or keep **Latest turn** to follow new work. The list holds turns that started; a message you sent while Nod was working joins the running turn, so its trace is there.
 
-`GET /api/traces` lists the same turns.
+`GET /api/traces` lists the same turns. **Full screen** in the panel header fills the window with the trace; **Exit full screen** or Escape puts it back beside the chat.
 
-| Tab           | What it shows                                                                                                                                                                           |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Timeline      | Each model call on a shared time scale: agent, subagent or memory curator, the model, duration, tokens and cost, and the tool calls it asked for. Below it, the turn's recorded events. |
-| System prompt | The full system prompt the selected call sent, including the tool guidelines Pi adds.                                                                                                   |
-| Tools         | Every tool the call offered, with its description and full input schema, and roughly how many tokens each costs.                                                                        |
-| Messages      | Every message in the request, in order, including the owner context, tool results and thinking, then the model's response and stop reason.                                              |
-| Raw           | The whole stored trace for the turn as JSON, with a copy button.                                                                                                                        |
+## Start over
+
+**Reset chat** in the chat toolbar, also dev mode only, stops running work, starts an empty chat and forgets every memory note and learned skill. Past tasks, files, connected accounts, schedules and settings stay.
+
+| Tab           | What it shows                                                                                                                                                                            |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Timeline      | Each model call on a shared time scale: agent, subagent or memory curator, the model, duration, tokens and cost, and the tool calls it asked for. Below it, the turn's recorded events.  |
+| System prompt | The full system prompt the selected call sent, including the tool guidelines Pi adds.                                                                                                    |
+| Tools         | Every tool the call offered, with its description and full input schema, and roughly how many tokens each costs.                                                                         |
+| Messages      | Every message in the request, in order, including the owner context, tool results and thinking, then the model's response and stop reason. JSON inside a message shows as nested fields. |
+| Raw           | The whole stored trace for the turn as JSON, with a copy button.                                                                                                                         |
 
 Select a call on the timeline to open its messages. The other tabs follow the selected call, or the main agent's first call when none is selected.
 

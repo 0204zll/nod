@@ -222,6 +222,7 @@ export interface AppDependencies {
   >;
   configuration?: () => Configuration;
   onboard?: (timeZone?: string, threadId?: string) => Promise<unknown>;
+  forgetLearned?: () => Promise<void>;
   taskLedger?: () => Promise<import('../shared/contracts.ts').Task[]>;
   activity?: () => Promise<Activity[]>;
   planningTasks?: () => string | undefined;
@@ -553,11 +554,16 @@ export async function createApp(dependencies: AppDependencies = {}) {
     const capture = snapshotAnalytics(dependencies.analytics);
     if (!configuration().conversationResetEnabled)
       return reply.code(404).send({ error: 'Not found.' });
-    const { threadId } = z.object({ threadId: z.uuid() }).strict().parse(request.body);
+    const { threadId, forget } = z
+      .object({ threadId: z.uuid(), forget: z.boolean().default(false) })
+      .strict()
+      .parse(request.body);
+    if (forget && !dependencies.forgetLearned) return reply.code(404).send({ error: 'Not found.' });
     return audioMessages.pause(async () => {
       const { previousThreadId, browsers, ...reset } = await resetThread(threadId, capture);
       for (const id of [previousThreadId, ...browsers])
         void dependencies.computer?.discard(id).catch(() => {});
+      if (forget) await dependencies.forgetLearned!();
       return reset;
     }, threadId);
   });

@@ -3,7 +3,7 @@ import { api, errorMessage } from '../lib/api';
 import { readUiPreference, writeUiPreference } from '../lib/ui-preferences';
 import { Tabs } from './tabs';
 import { Button, Loading, SearchField } from './ui';
-import { Check, Copy, RefreshCw, X } from './icons';
+import { Check, Copy, Maximize2, Minimize2, RefreshCw, X } from './icons';
 
 type Block = {
   type: string;
@@ -128,13 +128,88 @@ function Copyable({ text, label }: { text: string; label: string }) {
   );
 }
 
+function parsed(text: string): { value: unknown } | undefined {
+  const trimmed = text.trim();
+  if (!/^[[{]/.test(trimmed) || trimmed.length < 2) return undefined;
+  try {
+    const value: unknown = JSON.parse(trimmed);
+    return value && typeof value === 'object' ? { value } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function JsonValue({ value }: { value: unknown }): ReactNode {
+  if (typeof value === 'string') {
+    const inner = parsed(value);
+    if (inner) return <JsonValue value={inner.value} />;
+    return <span className="trace-json-string">{value}</span>;
+  }
+  if (value === null || typeof value !== 'object')
+    return <span className="trace-json-scalar">{String(value)}</span>;
+  const entries = Array.isArray(value)
+    ? value.map((item, index) => [String(index), item] as const)
+    : Object.entries(value);
+  if (!entries.length)
+    return <span className="trace-json-scalar">{Array.isArray(value) ? '[]' : '{}'}</span>;
+  return (
+    <div className="trace-json">
+      {entries.map(([key, item]) =>
+        item && typeof item === 'object' && Object.keys(item).length ? (
+          <details key={key} open>
+            <summary>
+              <span className="trace-json-key">{key}</span>
+              <span className="trace-json-count">
+                {Array.isArray(item) ? `${item.length} items` : `${Object.keys(item).length} keys`}
+              </span>
+            </summary>
+            <JsonValue value={item} />
+          </details>
+        ) : (
+          <div key={key} className="trace-json-row">
+            <span className="trace-json-key">{key}</span>
+            <JsonValue value={item} />
+          </div>
+        ),
+      )}
+    </div>
+  );
+}
+
+function TextView({ text }: { text: string }) {
+  const whole = parsed(text);
+  if (whole) return <JsonValue value={whole.value} />;
+  const parts: ReactNode[] = [];
+  let prose: string[] = [];
+  const flush = () => {
+    if (prose.join('').trim())
+      parts.push(
+        <p key={parts.length} className="trace-text">
+          {prose.join('\n').trim()}
+        </p>,
+      );
+    prose = [];
+  };
+  for (const line of text.split('\n')) {
+    const data = parsed(line);
+    if (!data) {
+      prose.push(line);
+      continue;
+    }
+    flush();
+    parts.push(<JsonValue key={parts.length} value={data.value} />);
+  }
+  flush();
+  return <>{parts}</>;
+}
+
 function BlockView({ block }: { block: Block }) {
-  if (block.type === 'text') return <pre>{block.text}</pre>;
+  if (block.type === 'text') return <TextView text={block.text ?? ''} />;
   if (block.type === 'thinking')
     return (
       <div className="trace-block">
         <span className="trace-label">thinking</span>
-        <pre>{block.thinking}</pre>
+        <p className="trace-text is-muted">{block.thinking}</p>
       </div>
     );
   if (block.type === 'toolCall')
@@ -143,33 +218,49 @@ function BlockView({ block }: { block: Block }) {
         <span className="trace-label">
           tool call · <code>{block.name}</code>
         </span>
-        <pre>{json(block.arguments)}</pre>
+        <JsonValue value={block.arguments} />
       </div>
     );
-  return <pre>{json(block)}</pre>;
+  return <JsonValue value={block} />;
 }
 
-function MessageView({ message }: { message: TraceMessage }) {
+function messageSize(message: TraceMessage) {
+  return JSON.stringify(message.content ?? '').length;
+}
+
+function MessageView({
+  message,
+  index,
+  open,
+}: {
+  message: TraceMessage;
+  index: number;
+  open: boolean;
+}) {
   const role =
     message.role === 'toolResult'
       ? `tool result · ${message.toolName ?? ''}${message.isError ? ' · error' : ''}`
       : message.role;
-  const content =
-    message.role === 'system' && !Array.isArray(message.content)
-      ? [
-          {
-            type: 'text',
-            text: typeof message.content === 'string' ? message.content : json(message),
-          },
-        ]
-      : blocks(message.content);
+  const extra =
+    message.role === 'system'
+      ? Object.fromEntries(
+          Object.entries(message).filter(
+            ([key]) => !['role', 'content', 'timestamp'].includes(key),
+          ),
+        )
+      : {};
   return (
-    <section className="trace-message">
-      <header className="trace-label">{role}</header>
-      {content.map((block, index) => (
-        <BlockView key={index} block={block} />
+    <details className={`trace-message is-${message.role}`} open={open}>
+      <summary>
+        <span className="trace-label">{index + 1}</span>
+        <span className="trace-message-role">{role}</span>
+        <span className="trace-label">{tokens(Math.round(messageSize(message) / 4))} tokens</span>
+      </summary>
+      {blocks(message.content).map((block, position) => (
+        <BlockView key={position} block={block} />
       ))}
-    </section>
+      {Object.keys(extra).length > 0 && <JsonValue value={extra} />}
+    </details>
   );
 }
 
@@ -307,6 +398,16 @@ export function TraceDrawer({ changed, onClose }: { changed: unknown; onClose():
   const [view, setView] = useState<View>('timeline');
   const [selectedId, setSelectedId] = useState<string>();
   const [width, setWidth] = useState(storedWidth);
+  const [expanded, setExpanded] = useState(false);
+  const [messagesOpen, setMessagesOpen] = useState(true);
+  useEffect(() => {
+    if (!expanded) return;
+    const leave = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.defaultPrevented) setExpanded(false);
+    };
+    window.addEventListener('keydown', leave);
+    return () => window.removeEventListener('keydown', leave);
+  }, [expanded]);
   const root = useRef<HTMLElement>(null);
   const load = useCallback(async (turn: string, signal?: AbortSignal) => {
     setLoading(true);
@@ -429,17 +530,28 @@ export function TraceDrawer({ changed, onClose }: { changed: unknown; onClose():
             Call {shown.calls.indexOf(selected) + 1} · {callLabel(selected)} · {selected.provider} ·{' '}
             {selected.model} · {selected.messages.length} messages sent
           </span>
+          <Button variant="ghost" size="sm" onClick={() => setMessagesOpen(!messagesOpen)}>
+            {messagesOpen ? 'Collapse all' : 'Expand all'}
+          </Button>
         </div>
         {selected.messages.map((message, index) => (
-          <MessageView key={index} message={message} />
+          <MessageView
+            key={`${selected.id}.${index}.${messagesOpen}`}
+            message={message}
+            index={index}
+            open={messagesOpen}
+          />
         ))}
-        <section className="trace-message is-output">
-          <header className="trace-label">response · {selected.stopReason}</header>
+        <details className="trace-message is-output" open>
+          <summary>
+            <span className="trace-message-role">response</span>
+            <span className="trace-label">{selected.stopReason}</span>
+          </summary>
           {(selected.output?.content ?? []).map((block, index) => (
             <BlockView key={index} block={block} />
           ))}
           {selected.error && <pre role="alert">{selected.error}</pre>}
-        </section>
+        </details>
       </>
     );
   else
@@ -455,8 +567,8 @@ export function TraceDrawer({ changed, onClose }: { changed: unknown; onClose():
   return (
     <aside
       ref={root}
-      className="artifact-drawer trace-drawer"
-      style={{ width, ['--artifact-width' as string]: `${width}px` }}
+      className={`artifact-drawer trace-drawer${expanded ? ' is-expanded' : ''}`}
+      style={expanded ? undefined : { width, ['--artifact-width' as string]: `${width}px` }}
       aria-label="Turn trace"
     >
       <div
@@ -519,6 +631,16 @@ export function TraceDrawer({ changed, onClose }: { changed: unknown; onClose():
             </select>
           </div>
           <div className="artifact-drawer-actions">
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={expanded ? 'Exit full screen' : 'Full screen'}
+              title={expanded ? 'Exit full screen' : 'Full screen'}
+              aria-pressed={expanded}
+              onClick={() => setExpanded(!expanded)}
+            >
+              {expanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+            </Button>
             <Button
               variant="ghost"
               size="icon"
