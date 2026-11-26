@@ -1733,6 +1733,8 @@ export function createModelService(options: {
       analytics = capture;
       void app.register(async (routes) => {
         routes.setErrorHandler((error, _request, reply) => {
+          if (error instanceof z.ZodError)
+            return reply.code(400).send({ error: 'Check the supplied values.' });
           if (!(error instanceof ConnectionError || error instanceof ModelAuthError)) throw error;
           return reply.code(400).send({
             error: error.message,
