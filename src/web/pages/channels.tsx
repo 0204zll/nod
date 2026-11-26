@@ -781,8 +781,7 @@ export function Channels() {
                 {telegramStatus.paired ? 'Telegram' : 'Connect Telegram'}
               </DialogTitle>
               <DialogDescription>
-                Nod replies only in your private chat with the bot. It ignores group messages, even
-                when you mention it in a topic.
+                Nod replies only in your private chat with the bot, not in groups.
               </DialogDescription>
               <TelegramSetup
                 setup={telegramSetup}
