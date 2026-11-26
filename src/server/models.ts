@@ -1732,17 +1732,25 @@ export function createModelService(options: {
     register(app: FastifyInstance, capture?: CaptureAnalytics) {
       analytics = capture;
       void app.register(async (routes) => {
-        routes.setErrorHandler((error, _request, reply) =>
-          reply.code(400).send({
-            error:
-              error instanceof ConnectionError || error instanceof ModelAuthError
-                ? error.message
-                : 'The model connection request failed. Check the service and try again.',
+        routes.setErrorHandler((error, request, reply) => {
+          if (error instanceof z.ZodError) {
+            const issue = error.issues[0];
+            const field = issue?.path.join('.') || Object.keys(request.params ?? {})[0];
+            const message = field
+              ? `Check the model request field "${field}".`
+              : issue?.code === 'unrecognized_keys'
+                ? 'The model request contains unexpected fields.'
+                : 'Check the supplied model settings.';
+            return reply.code(400).send({ error: message });
+          }
+          if (!(error instanceof ConnectionError || error instanceof ModelAuthError)) throw error;
+          return reply.code(400).send({
+            error: error.message,
             ...(error instanceof ModelWorkspaceSelectionError
               ? { workspaces: error.workspaces }
               : {}),
-          }),
-        );
+          });
+        });
         routes.get('/api/models', async () => service.view());
         routes.post('/api/models/keys', async (request) => {
           const { provider, key, ...settings } = keySchema.parse(request.body);
