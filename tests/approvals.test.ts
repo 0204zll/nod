@@ -5814,6 +5814,27 @@ test(
           );
         assert.deepEqual((await found('FIXTURE%20rep')).sort(), [page, copy.page!.id].sort());
         assert.deepEqual(await found('100%25'), []);
+        for (const sort of ['newest', 'oldest', 'title'] as const) {
+          const all = (await artifacts.listPages(undefined, undefined, 50, undefined, sort)).pages;
+          const walked: string[] = [];
+          let cursor: string | undefined;
+          do {
+            const part = await artifacts.listPages(cursor, undefined, 2, undefined, sort);
+            walked.push(...part.pages.map((item) => item.id));
+            cursor = part.next;
+          } while (cursor);
+          assert.deepEqual(
+            walked,
+            all.map((item) => item.id),
+          );
+          const times = all.map((item) => item.createdAt);
+          if (sort !== 'title')
+            assert.deepEqual(
+              times,
+              sort === 'newest' ? times.toSorted().reverse() : times.toSorted(),
+            );
+        }
+        assert.equal((await request('GET', '/api/pages?sort=size')).statusCode, 400);
         const first = await artifacts.listPages(undefined, undefined, 1);
         const rest = await artifacts.listPages(first.next, undefined, 50);
         assert.equal(first.pages.length, 1);

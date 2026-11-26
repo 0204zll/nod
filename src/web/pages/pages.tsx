@@ -1,12 +1,24 @@
 import { useEffect, useRef, useState, type ComponentProps } from 'react';
-import { pageTypes, type PageType } from '../../shared/attachment-kind';
+import { pageSorts, pageTypes, type PageSort, type PageType } from '../../shared/attachment-kind';
 import type { Page, PageVersion } from '../../shared/contracts';
+import { ActionMenu, ActionMenuItem } from '../components/action-menu';
 import { useArtifactDrawer } from '../components/artifact-context';
 import { ArtifactWorkspace } from '../components/artifact-drawer';
 import { DataThumbnail, thumbnailKinds } from '../components/attachment-card';
 import { FileGlyph } from '../components/attachment-glyph';
 import type { ImagePreview } from '../components/attachment-images';
-import { FileText, Trash2 } from '../components/icons';
+import {
+  FileImage,
+  FileSpreadsheet,
+  FileText,
+  Filter,
+  Folder,
+  LayoutGrid,
+  List,
+  Presentation,
+  Trash2,
+  type IconComponent,
+} from '../components/icons';
 import { PageTitle } from '../components/page-title';
 import {
   Button,
@@ -22,6 +34,7 @@ import { api, errorMessage } from '../lib/api';
 import { attachmentKind } from '../lib/attachment-kind';
 import { formatDateTime, useDateFormat } from '../lib/date-format';
 import { navigate } from '../lib/navigation';
+import { readUiPreference, writeUiPreference } from '../lib/ui-preferences';
 import './pages.css';
 
 type ThumbnailKind = ComponentProps<typeof DataThumbnail>['kind'];
@@ -33,6 +46,18 @@ const typeLabels: Record<PageType, string> = {
   images: 'Images',
   files: 'Files',
 };
+const sortLabels: Record<PageSort, string> = {
+  newest: 'Newest first',
+  oldest: 'Oldest first',
+  title: 'Title, A to Z',
+};
+const typeIcons: Record<PageType, IconComponent> = {
+  docs: FileText,
+  slides: Presentation,
+  data: FileSpreadsheet,
+  images: FileImage,
+  files: Folder,
+};
 
 interface PageList {
   pages: Page[];
@@ -41,10 +66,12 @@ interface PageList {
 
 function PageCards({
   pages,
+  list,
   onVersions,
   onDelete,
 }: {
   pages: Page[];
+  list: boolean;
   onVersions(page: Page, versions: PageVersion[]): void;
   onDelete(page: Page): void;
 }) {
@@ -66,14 +93,22 @@ function PageCards({
     }
   };
   return (
-    <ul className="pages-grid">
+    <ul className={list ? 'pages-grid is-list' : 'pages-grid'}>
       {pages.map((page) => {
         const kind = attachmentKind(page.artifact.mimeType, page.artifact.name);
         return (
           <li key={page.id}>
             <div className="pages-card">
               <button type="button" className="pages-card-open" onClick={() => void open(page)}>
-                {kind === 'image' ? (
+                {list ? (
+                  <span className="pages-card-glyph" data-type={page.type} aria-hidden="true">
+                    <FileGlyph
+                      name={page.artifact.name}
+                      mimeType={page.artifact.mimeType}
+                      size={20}
+                    />
+                  </span>
+                ) : kind === 'image' ? (
                   <span className="pages-card-image" aria-hidden="true">
                     <img src={page.artifact.url} alt="" loading="lazy" decoding="async" />
                   </span>
@@ -123,7 +158,15 @@ export function Pages() {
     return () => clearTimeout(timer);
   }, [query]);
   const [type, setType] = useState<PageType | null>(null);
-  const filter = [search && `q=${encodeURIComponent(search)}`, type && `type=${type}`]
+  const [sort, setSort] = useState<PageSort>(
+    () => pageSorts.find((item) => item === readUiPreference('nod.pages-sort')) ?? 'newest',
+  );
+  const [list, setList] = useState(() => readUiPreference('nod.pages-view') === 'list');
+  const filter = [
+    search && `q=${encodeURIComponent(search)}`,
+    type && `type=${type}`,
+    sort !== 'newest' && `sort=${sort}`,
+  ]
     .filter(Boolean)
     .join('&');
   const { data, error, refresh } = usePageData<PageList>(`/api/pages${filter && `?${filter}`}`);
@@ -202,26 +245,71 @@ export function Pages() {
           <header className="page-heading secondary-heading">
             <PageTitle path="/pages" />
           </header>
-          <SearchField
-            className="pages-search"
-            type="search"
-            value={query}
-            placeholder="Search"
-            aria-label="Search by title"
-            onChange={(event) => setQuery(event.target.value)}
-          />
+          <div className="pages-toolbar">
+            <SearchField
+              className="pages-search"
+              type="search"
+              value={query}
+              placeholder="Search"
+              aria-label="Search by title"
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            <ActionMenu
+              label="Sort"
+              trigger={
+                <Button variant="ghost" size="icon" title={`Sort: ${sortLabels[sort]}`}>
+                  <Filter size={16} />
+                </Button>
+              }
+            >
+              {(close) =>
+                pageSorts.map((item) => (
+                  <ActionMenuItem
+                    key={item}
+                    checked={sort === item}
+                    onClick={() => {
+                      close();
+                      setSort(item);
+                      writeUiPreference('nod.pages-sort', item);
+                    }}
+                  >
+                    {sortLabels[item]}
+                  </ActionMenuItem>
+                ))
+              }
+            </ActionMenu>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={list ? 'Show as grid' : 'Show as list'}
+              title={list ? 'Show as grid' : 'Show as list'}
+              onClick={() => {
+                setList(!list);
+                writeUiPreference('nod.pages-view', list ? 'grid' : 'list');
+              }}
+            >
+              {list ? <LayoutGrid size={16} /> : <List size={16} />}
+            </Button>
+          </div>
           <div className="pages-types" role="group" aria-label="Show one type">
-            {pageTypes.map((item) => (
-              <button
-                type="button"
-                key={item}
-                className="pages-type"
-                aria-pressed={type === item}
-                onClick={() => setType(type === item ? null : item)}
-              >
-                {typeLabels[item]}
-              </button>
-            ))}
+            {pageTypes.map((item) => {
+              const Icon = typeIcons[item];
+              return (
+                <button
+                  type="button"
+                  key={item}
+                  className="pages-type"
+                  data-type={item}
+                  aria-pressed={type === item}
+                  onClick={() => setType(type === item ? null : item)}
+                >
+                  <span className="pages-type-tile" aria-hidden="true">
+                    <Icon size={20} strokeWidth={1.75} />
+                  </span>
+                  {typeLabels[item]}
+                </button>
+              );
+            })}
           </div>
           <div data-analytics-private>
             {error ? (
@@ -254,6 +342,7 @@ export function Pages() {
               <>
                 <PageCards
                   pages={shown}
+                  list={list}
                   onVersions={(page, versions) => setOpened({ page, versions })}
                   onDelete={(page) => {
                     setDeleteError('');

@@ -100,6 +100,8 @@ export function attachmentKind(mimeType: string, name = ''): AttachmentKind | nu
 
 export const pageTypes = ['docs', 'slides', 'data', 'images', 'files'] as const;
 export type PageType = (typeof pageTypes)[number];
+export const pageSorts = ['newest', 'oldest', 'title'] as const;
+export type PageSort = (typeof pageSorts)[number];
 
 export function pageType(mimeType: string, name = ''): PageType | null {
   const type = mimeType.split(';', 1)[0].trim().toLowerCase();

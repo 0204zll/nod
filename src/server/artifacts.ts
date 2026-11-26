@@ -7,7 +7,7 @@ import { dataRoot, ownerId } from './config.ts';
 import { transaction } from './transaction.ts';
 import type { Artifact, Page, PageVersion } from '../shared/contracts.ts';
 import { fileBytes, fileMimeType, fileName } from '../shared/files.ts';
-import { pageType, pageTypes, type PageType } from '../shared/attachment-kind.ts';
+import { pageType, pageTypes, type PageSort, type PageType } from '../shared/attachment-kind.ts';
 import type { MessagingAttachment } from '../ports/messaging.ts';
 import { z } from 'zod';
 import type { Pool, PoolClient } from 'pg';
@@ -400,28 +400,35 @@ export function createArtifactService(options: {
     query?: string,
     limit = 50,
     type?: PageType,
+    sort: PageSort = 'newest',
   ): Promise<{ pages: Page[]; next?: string }> {
-    const cursor = before?.split('_');
+    const split = before?.lastIndexOf('_') ?? -1;
+    const key =
+      sort === 'title'
+        ? 'lower(COALESCE(page_title,name))'
+        : "date_trunc('milliseconds',created_at)";
+    const direction = sort === 'newest' ? 'DESC' : 'ASC';
     const rows = (
       await options.database.query(
-        `SELECT * FROM (SELECT DISTINCT ON (page_id) * FROM artifacts
+        `SELECT *,${key} AS sort_key FROM (SELECT DISTINCT ON (page_id) * FROM artifacts
            WHERE owner_id=$1 AND page_id IS NOT NULL AND deleting_at IS NULL
            ORDER BY page_id,page_version DESC) latest
-         WHERE ($2::timestamptz IS NULL OR (date_trunc('milliseconds',created_at),page_id)<($2,$5::uuid))
+         WHERE ($2::text IS NULL OR (${key},page_id)${sort === 'newest' ? '<' : '>'}($2::${sort === 'title' ? 'text' : 'timestamptz'},$5::uuid))
            AND ($4::text IS NULL OR strpos(lower(COALESCE(page_title,name)),lower($4))>0)
            AND ($6::text IS NULL OR COALESCE(page_type,'docs')=$6)
-         ORDER BY date_trunc('milliseconds',created_at) DESC,page_id DESC LIMIT $3`,
+         ORDER BY ${key} ${direction},page_id ${direction} LIMIT $3`,
         [
           options.ownerId,
-          cursor?.[0] ?? null,
+          before ? before.slice(0, split) : null,
           limit + 1,
           query ?? null,
-          cursor?.[1] ?? null,
+          before ? before.slice(split + 1) : null,
           type ?? null,
         ],
       )
     ).rows;
     const shown = rows.slice(0, limit);
+    const last = shown.at(-1);
     return {
       pages: shown.map((row) => ({
         id: row.page_id,
@@ -429,8 +436,10 @@ export function createArtifactService(options: {
         type: storedType(row.page_type),
         ...pageVersion(row),
       })),
-      ...(rows.length > limit
-        ? { next: `${pageVersion(shown.at(-1)!).createdAt}_${shown.at(-1)!.page_id}` }
+      ...(rows.length > limit && last
+        ? {
+            next: `${sort === 'title' ? last.sort_key : pageVersion(last).createdAt}_${last.page_id}`,
+          }
         : {}),
     };
   }
