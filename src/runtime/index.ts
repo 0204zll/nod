@@ -313,9 +313,10 @@ export function createAgentRuntime(dependencies: {
     let streamSubmitted = false;
     let speakNext = !context.taskContext;
     let owed: string[] = [];
+    let batchedBurst = false;
     let owedRefused = false;
     let spoke = false;
-    let spokeTo: string | undefined;
+    let spokeTo: string | null | undefined;
     let answered = false;
     let lastNote = '';
     let reported = false;
@@ -447,7 +448,7 @@ export function createAgentRuntime(dependencies: {
       }
       bufferedText = '';
     };
-    const queueStreamReply = (text: string, id: string, replyToMessageId?: string) => {
+    const queueStreamReply = (text: string, id: string, replyToMessageId?: string | null) => {
       streamSubmitted = true;
       if (!context.taskContext) {
         spoke = true;
@@ -1016,13 +1017,13 @@ export function createAgentRuntime(dependencies: {
             replyToMessageId ??
             (chat && !first && owed.length === 1
               ? owed[0]
-              : chat && owed.length > 1
+              : chat && (owed.length > 1 || batchedBurst)
                 ? null
                 : undefined);
           const delivery = await reply(text, id, target, presentation, handoff);
           if (delivery.delivered && chat) {
             spoke = true;
-            spokeTo = target ?? undefined;
+            spokeTo = target;
           }
           if (delivery.delivered && !handoff)
             owed = replyToMessageId
@@ -1298,6 +1299,7 @@ export function createAgentRuntime(dependencies: {
               context.memoryBrief = undefined;
               checkInSpent = checkInPlan = checkInStrikes = 0;
               owed = [...owed, ...incoming.map((message) => message.id)];
+              if (owed.length > 1) batchedBurst = true;
               owedRefused = false;
             }
             for (const [index, message] of incoming.entries()) {
@@ -1386,7 +1388,17 @@ export function createAgentRuntime(dependencies: {
                 queueStreamReply(
                   text,
                   streamId ?? randomUUID(),
-                  context.taskContext || !spoke || owed.length !== 1 ? undefined : owed[0],
+                  context.taskContext
+                    ? undefined
+                    : !spoke
+                      ? batchedBurst
+                        ? null
+                        : undefined
+                      : owed.length === 1
+                        ? owed[0]
+                        : owed.length > 1 || batchedBurst
+                          ? null
+                          : undefined,
                 );
                 lastNote = '';
                 owed = [];
@@ -1426,7 +1438,12 @@ export function createAgentRuntime(dependencies: {
               context.emit('final', '', { execution }).catch(() => {}),
             );
             if (taskStartRevision === requestRevision && !owed.length) streamSubmitted = true;
-            else queueStreamReply(event.text, streamId ?? randomUUID());
+            else
+              queueStreamReply(
+                event.text,
+                streamId ?? randomUUID(),
+                !context.taskContext && batchedBurst ? null : undefined,
+              );
           }
         },
       });
@@ -1532,7 +1549,11 @@ export function createAgentRuntime(dependencies: {
         ...(answer ? { completed: answer } : {}),
         ...(waitingFor ? { waitingFor } : {}),
         ...(waitingMessage ? { message: waitingMessage } : {}),
-        ...(waitingMessage && spokeTo ? { replyToMessageId: spokeTo } : {}),
+        ...(waitingMessage && spokeTo !== undefined
+          ? { replyToMessageId: spokeTo }
+          : waitingMessage && !context.taskContext && batchedBurst
+            ? { replyToMessageId: null }
+            : {}),
         ...(answerChoices ? { answerChoices } : {}),
         ...(handoffBrowserId ? { handoffBrowserId } : {}),
       };
