@@ -6227,11 +6227,7 @@ test(
       intervalMs: 600_000,
     });
     const service = channels;
-    async function queue(
-      withChoices = true,
-      withAttachment = false,
-      questionText = 'Which calendar should I use?',
-    ) {
+    async function queue(withChoices = true, withAttachment = false) {
       const sourceId = `fixture-source-${randomUUID()}`;
       const turnId = await fixtureTurn(
         pool,
@@ -6257,7 +6253,7 @@ test(
           ownerId,
           threadId,
           turnId,
-          withChoices ? questionText : 'Your planning note is ready.',
+          withChoices ? 'Which calendar should I use?' : 'Your planning note is ready.',
           withChoices ? JSON.stringify(choices) : null,
           JSON.stringify(withAttachment ? [{ id: randomUUID() }] : []),
         ],
@@ -6335,11 +6331,7 @@ test(
       assert.equal(duringAttachments, undefined);
     });
     await t.test('answering during presentation preparation prevents delivery', async () => {
-      const question = await queue(
-        true,
-        true,
-        'Which calendar should I open in [the browser](/browser)?',
-      );
+      const question = await queue(true, true);
       const before = presented;
       duringPresentation = () => answer(question);
       await blocked(question.messageId, sent.length);

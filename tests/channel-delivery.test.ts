@@ -4041,7 +4041,7 @@ test(
       transport: createChatSdkTransport(pool, telegramEnvironment),
       present: async (_threadId, input) => {
         if (input.kind === 'delivery' && input.attachments === 'pending')
-          return 'O ficheiro está disponível no Nod.';
+          return input.text === 'Trip notes. Both files are attached.' ? 'Trip notes' : input.text;
         if (presentationFails) throw new Error('Fixture presentation failure');
         if (input.kind === 'delivery' && input.files)
           return `Open ${input.files.join(', ')} in Nod.`;
@@ -4292,7 +4292,11 @@ test(
       assert.equal((await state(readFailure)).state, 'sent');
       failRead = false;
       const beforePartial = texts.length;
-      const partial = await addReply(turnId, [image, document], 'Trip notes');
+      const partial = await addReply(
+        turnId,
+        [image, document],
+        'Trip notes. Both files are attached.',
+      );
       await channels.drain();
       assert.equal((await state(partial)).state, 'sent');
       assert.deepEqual(texts.slice(beforePartial), ['Trip notes', 'Open result.txt in Nod.']);
