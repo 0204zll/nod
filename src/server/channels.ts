@@ -265,7 +265,6 @@ export async function channelReply(
   const needsPresentation =
     safe.secureAction ||
     attachments === 'in_nod' ||
-    (attachments === 'pending' && Boolean(safe.text)) ||
     (!safe.text && !fallback && attachments === 'none');
   return needsPresentation
     ? await presentChannelText(

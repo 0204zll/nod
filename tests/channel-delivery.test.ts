@@ -4043,6 +4043,8 @@ test(
         if (input.kind === 'delivery' && input.attachments === 'pending')
           return 'O ficheiro está disponível no Nod.';
         if (presentationFails) throw new Error('Fixture presentation failure');
+        if (input.kind === 'delivery' && input.files)
+          return `Open ${input.files.join(', ')} in Nod.`;
         return 'Ficheiro disponível na aplicação.';
       },
       resolveAttachments: async (threadId, ids) => {
@@ -4269,10 +4271,10 @@ test(
         }
       }
       failDocument = true;
-      const captionedImage = await addReply(turnId, [image], '**Image result**');
+      const captionedImage = await addReply(turnId, [image], 'Image result');
       const beforeCaption = texts.length;
       await channels.drain();
-      assert.ok(sent.at(-1)!.caption.trim());
+      assert.equal(sent.at(-1)!.caption, 'Image result');
       assert.equal(texts.length, beforeCaption);
       assert.equal((await state(captionedImage)).state, 'sent');
       const captionFailure = await addReply(turnId, [document], 'Document result');
@@ -4289,9 +4291,11 @@ test(
       assert.ok(texts.length >= beforeReadFailure + 2);
       assert.equal((await state(readFailure)).state, 'sent');
       failRead = false;
-      const partial = await addReply(turnId, [image, document]);
+      const beforePartial = texts.length;
+      const partial = await addReply(turnId, [image, document], 'Trip notes');
       await channels.drain();
       assert.equal((await state(partial)).state, 'sent');
+      assert.deepEqual(texts.slice(beforePartial), ['Trip notes', 'Open result.txt in Nod.']);
       const partialCount = sent.length;
       await channels.drain();
       assert.equal(sent.length, partialCount);
