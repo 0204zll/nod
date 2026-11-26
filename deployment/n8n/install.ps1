@@ -8,7 +8,7 @@
   $windows = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue
   $processor = Get-CimInstance -ClassName Win32_Processor -Property Architecture | Select-Object -First 1
   if (-not [Environment]::Is64BitOperatingSystem -or [int]$windows.CurrentBuildNumber -lt 22000 -or $processor.Architecture -ne 9) {
-    throw 'Nod needs Windows 11 on an x64 computer.'
+    throw 'Sorry, Nod requires Windows 11 on an Intel or AMD x64 computer. Windows on Arm is not supported.'
   }
   if ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run this installer in a normal PowerShell window, not as administrator.'

@@ -541,13 +541,13 @@ test(
 );
 
 test(
-  'CLI-INSTALL: Windows on Arm stops before requesting an x64 release',
+  'CLI-INSTALL: the Windows script rejects Arm before requesting an x64 release',
   { skip: !powershell && 'pwsh is unavailable' },
   async () => {
     for (const powershell of powershellCommands) {
       const rejected = await windowsInstall({ architecture: 12, powershell });
       assert.notEqual(rejected.result.status, 0, rejected.output);
-      assert.match(rejected.output, /Windows 11 on an x64 computer/);
+      assert.match(rejected.output, /Windows 11.*x64/);
       assert.deepEqual(rejected.calls, []);
       assert.deepEqual(rejected.staged, []);
     }
