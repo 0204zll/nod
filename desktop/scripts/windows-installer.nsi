@@ -30,7 +30,7 @@ Function .onInit
   ${EndIf}
   ReadRegStr $0 HKLM "Software\Microsoft\Windows NT\CurrentVersion" "CurrentBuildNumber"
   ${If} $0 < 22000
-    MessageBox MB_ICONSTOP "Sorry, Nod requires Windows 11 on an Intel or AMD x64 computer. Windows on Arm is not supported." /SD IDOK
+    MessageBox MB_ICONSTOP "Sorry, Nod requires Windows 11 or later." /SD IDOK
     SetErrorLevel 1
     Abort
   ${EndIf}
