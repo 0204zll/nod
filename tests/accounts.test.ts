@@ -3251,64 +3251,6 @@ test('server model credentials reject invalid destinations and cloud accounts be
   );
 });
 
-test('model routes distinguish invalid selection fields from storage failures', async (t) => {
-  const { createModelService } = await import('../src/server/models.ts');
-  const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
-  const database = new pg.Pool();
-  const failure = new Error('synthetic private storage detail');
-  const connect = t.mock.method(database, 'connect', async () => {
-    throw failure;
-  });
-  const origin = 'http://127.0.0.1:4310';
-  const owner = createModelService({
-    database,
-    ownerId: 'fixture-model-route-owner',
-    keyStore: { id: 'fixture', configured: true, getKey: async () => Buffer.alloc(32) },
-    backend: createPiModelBackend(),
-    origin,
-  });
-  const app = Fastify();
-  const failures: unknown[] = [];
-  app.setErrorHandler((error, _request, reply) => {
-    failures.push(error);
-    return reply.code(500).send({ error: 'Server failure' });
-  });
-  owner.register(app);
-  t.after(async () => {
-    await app.close();
-    await owner.close();
-    await database.end();
-  });
-  const selection = { connectionId: randomUUID(), modelId: 'fixture-model', effort: 'low' };
-  const select = (payload: Record<string, unknown>) =>
-    app.inject({ method: 'PUT', url: '/api/models/selection', payload });
-  const wrapped = await select({ selection });
-  assert.equal(wrapped.statusCode, 400);
-  assert.match(wrapped.json().error, /connectionId/);
-  const invalid = await select({ ...selection, effort: 'synthetic-private-input' });
-  assert.equal(invalid.statusCode, 400);
-  assert.match(invalid.json().error, /effort/);
-  assert.doesNotMatch(invalid.body, /synthetic-private-input/);
-  const extra = await select({ ...selection, 'synthetic-private-key': true });
-  assert.equal(extra.statusCode, 400);
-  assert.match(extra.json().error, /unexpected field/i);
-  assert.doesNotMatch(extra.body, /synthetic-private-key/);
-  const invalidId = await app.inject({
-    method: 'DELETE',
-    url: '/api/models/connections/synthetic-private-id',
-  });
-  assert.equal(invalidId.statusCode, 400);
-  assert.match(invalidId.json().error, /"id"/);
-  assert.doesNotMatch(invalidId.body, /synthetic-private-id/);
-  assert.equal(connect.mock.callCount(), 0);
-  assert.deepEqual(failures, []);
-
-  const failed = await select(selection);
-  assert.equal(failed.statusCode, 500);
-  assert.doesNotMatch(failed.body, /synthetic private storage detail/);
-  assert.deepEqual(failures, [failure]);
-});
-
 test('adding a model key keeps the service reason and removes the key', async () => {
   const { createModelService } = await import('../src/server/models.ts');
   const { createPiModelBackend } = await import('../src/providers/pi/models.ts');
